@@ -17,7 +17,7 @@ RUN rm src/*.rs
 
 # copy all source/static/resource files
 COPY ./src ./src
-# COPY ./static ./static
+COPY ./static ./static
 # COPY ./templates ./templates
 
 # build for release

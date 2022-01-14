@@ -39,7 +39,11 @@ async fn main() {
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let routes = warp::any()
+    let favicon = warp::path("favicon.ico")
+        .and(warp::get())
+        .and(warp::fs::file("static/think.jpg"));
+
+    let index = warp::any()
         .and(warp::header::optional::<String>("accept"))
         .map(|accept: Option<String>| {
             if let Some(accept) = accept {
@@ -92,6 +96,8 @@ async fn main() {
             Response::new(format!("{days}d {hours}h {minutes}m {seconds}s\nbusiness days left: {bdays_left}\nbusiness days done: {bdays_done}"))
         })
         .with(warp::trace::request());
+
+    let routes = favicon.or(index);
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT").unwrap_or_else(|_| "3003".to_string());
