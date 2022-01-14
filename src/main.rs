@@ -1,6 +1,7 @@
 use bdays::HolidayCalendar;
 use cached::proc_macro::cached;
 use chrono::{DateTime, TimeZone, Utc};
+use std::net::SocketAddr;
 use warp::{http::Response, Filter};
 
 #[cached(time = 60, size = 5)]
@@ -33,7 +34,7 @@ fn timedelta(start: &DateTime<Utc>, end: &DateTime<Utc>) -> (i64, i64, i64, i64)
 
 #[tokio::main]
 async fn main() {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "tracing=info,warp=debug".to_owned());
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "tracing=info,warp=info".to_owned());
     let filter = tracing_subscriber::filter::EnvFilter::new(filter);
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -92,5 +93,14 @@ async fn main() {
         })
         .with(warp::trace::request());
 
-    warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3030".to_string());
+    let addr = format!("{host}:{port}");
+    warp::serve(routes)
+        .run(
+            addr.parse::<SocketAddr>()
+                .map_err(|e| format!("invalid host/port: {addr}, {e}"))
+                .unwrap(),
+        )
+        .await;
 }
