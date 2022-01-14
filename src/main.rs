@@ -94,7 +94,7 @@ async fn main() {
         .with(warp::trace::request());
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("PORT").unwrap_or_else(|_| "3030".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3003".to_string());
     let addr = format!("{host}:{port}");
     warp::serve(routes)
         .run(
