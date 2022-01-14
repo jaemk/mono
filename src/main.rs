@@ -93,7 +93,7 @@ async fn main() {
             let (days, hours, minutes, seconds) = timedelta(&now, &done);
             let bdays_left = count_business_days(now, done);
             let bdays_done = count_business_days(start, now);
-            Response::new(format!("{days}d {hours}h {minutes}m {seconds}s\nbusiness days left: {bdays_left}\nbusiness days done: {bdays_done}"))
+            Response::new(format!("{days}d {hours}h {minutes}m {seconds}s\nbusiness days left: {bdays_left}\nbusiness days done: {bdays_done}\n"))
         })
         .with(warp::trace::request());
 
