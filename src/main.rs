@@ -58,9 +58,9 @@ async fn main() {
                                 </div>
                             </body>
                             <script>
-                                var countDownDate = new Date("Oct 7, 2022 00:00:00").getTime();
+                                var countDownDate = Date.parse("2022-10-07T00:00:00Z");
                                 function tick() {
-                                  var now = new Date().getTime();
+                                  var now = Date.parse(new Date().toISOString());
                                   var distance = countDownDate - now;
                                   var days = Math.floor(distance / (1000 * 60 * 60 * 24));
                                   var hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
