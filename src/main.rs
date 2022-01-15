@@ -38,7 +38,7 @@ async fn main() {
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT").unwrap_or_else(|_| "3003".to_string());
     let filter =
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "ugh=info,tracing=info,warp=info".to_owned());
+        std::env::var("LOG").unwrap_or_else(|_| "ugh=info,tracing=info,warp=info".to_owned());
     let start_date =
         std::env::var("START_DATE").unwrap_or_else(|_| "2021-01-01T00:00:00Z".to_string());
     let end_date = std::env::var("END_DATE").unwrap_or_else(|_| "2022-01-01T00:00:00Z".to_string());
