@@ -64,10 +64,18 @@ async fn main() {
         struct Dates {
             start: String,
             end: String,
+            days_left: i64,
+            business_days_left: i64,
         }
+
+        let now = Utc::now();
+        let (days_left, _, _, _) = timedelta(&now, &end_date);
+        let business_days_left = count_business_days(now, end_date);
         let d = Dates {
             start: start_date.to_rfc3339(),
             end: end_date.to_rfc3339(),
+            days_left,
+            business_days_left,
         };
         serde_json::to_string(&d).unwrap()
     });
@@ -89,9 +97,12 @@ async fn main() {
                             <body>
                                 <div>
                                     <pre id="timer"></pre>
+                                    <pre id="business_days">100</pre>
                                 </div>
                             </body>
                             <script>
+                                var timer = document.getElementById("timer");
+                                var bdays = document.getElementById("business_days");
                                 var endDate = null;
                                 function tick() {
                                     if (!endDate) { return; }
@@ -101,23 +112,33 @@ async fn main() {
                                     var hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
                                     var minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
                                     var seconds = Math.floor((diff % (1000 * 60)) / 1000);
-                                    document.getElementById("timer").innerHTML = days + "d " + hours + "h " + minutes + "m " + seconds + "s ";
+                                    timer.innerHTML = days + "d " + hours + "h " + minutes + "m " + seconds + "s ";
                                     if (diff < 0) {
                                         clearInterval(x);
-                                        document.getElementById("timer").innerHTML = "MADE IT";
+                                        timer.innerHTML = "MADE IT";
                                     }
                                 }
-                                var r = new XMLHttpRequest();
-                                r.onreadystatechange = function() {
-                                    if (r.readyState === XMLHttpRequest.DONE && r.status === 200) {
-                                        var resp = JSON.parse(r.responseText);
-                                        endDate = Date.parse(resp.end);
-                                        tick();
-                                        var x = setInterval(tick, 1000);
+                                setInterval(tick, 1000);
+
+                                function refresh() {
+                                    var r = new XMLHttpRequest();
+                                    r.onreadystatechange = function() {
+                                        if (r.readyState === XMLHttpRequest.DONE && r.status === 200) {
+                                            var resp = JSON.parse(r.responseText);
+                                            endDate = Date.parse(resp.end);
+                                            if (resp.business_days_left <= 0) {
+                                                bdays.innerHTML = "MADE IT";
+                                            } else {
+                                                bdays.innerHTML = resp.business_days_left + " business days";
+                                            }
+                                            tick();
+                                        }
                                     }
+                                    r.open("GET", "/dates/end", true);
+                                    r.send();
                                 }
-                                r.open("GET", "/dates/end", true);
-                                r.send();
+                                refresh();
+                                setInterval(refresh, 1000 * 60 * 30);
                             </script>
                         </html>
                     "##;
