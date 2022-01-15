@@ -67,16 +67,19 @@ async fn main() {
             end: String,
             days_left: i64,
             business_days_left: i64,
+            business_days_done: i64,
         }
 
         let now = Utc::now();
         let (days_left, _, _, _) = timedelta(&now, &end_date);
         let business_days_left = count_business_days(now.date(), end_date.date());
+        let business_days_done = count_business_days(start_date.date(), now.date());
         let d = Dates {
             start: start_date.to_rfc3339(),
             end: end_date.to_rfc3339(),
             days_left,
             business_days_left,
+            business_days_done,
         };
         serde_json::to_string(&d).unwrap()
     });
@@ -98,12 +101,14 @@ async fn main() {
                             <body>
                                 <div>
                                     <pre id="timer"></pre>
-                                    <pre id="business_days">100</pre>
+                                    <pre id="business_days_left"></pre>
+                                    <pre id="business_days_done"></pre>
                                 </div>
                             </body>
                             <script>
                                 var timer = document.getElementById("timer");
-                                var bdays = document.getElementById("business_days");
+                                var bdays_left = document.getElementById("business_days_left");
+                                var bdays_done = document.getElementById("business_days_done");
                                 var endDate = null;
                                 function tick() {
                                     if (!endDate) { return; }
@@ -128,10 +133,11 @@ async fn main() {
                                             var resp = JSON.parse(r.responseText);
                                             endDate = Date.parse(resp.end);
                                             if (resp.business_days_left <= 0) {
-                                                bdays.innerHTML = "MADE IT";
+                                                bdays_left.innerHTML = "MADE IT";
                                             } else {
-                                                bdays.innerHTML = resp.business_days_left + " business days";
+                                                bdays_left.innerHTML = resp.business_days_left + " business days left";
                                             }
+                                            bdays_done.innerHTML = resp.business_days_done + " business days done";
                                             tick();
                                         }
                                     }
