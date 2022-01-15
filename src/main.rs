@@ -1,6 +1,6 @@
 use bdays::HolidayCalendar;
 use cached::proc_macro::cached;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use std::net::SocketAddr;
 use warp::{http::Response, Filter};
 
@@ -34,18 +34,48 @@ fn timedelta(start: &DateTime<Utc>, end: &DateTime<Utc>) -> (i64, i64, i64, i64)
 
 #[tokio::main]
 async fn main() {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "tracing=info,warp=info".to_owned());
-    let filter = tracing_subscriber::filter::EnvFilter::new(filter);
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3003".to_string());
+    let filter =
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "ugh=info,tracing=info,warp=info".to_owned());
+    let start_date =
+        std::env::var("START_DATE").unwrap_or_else(|_| "2021-01-01T00:00:00Z".to_string());
+    let end_date = std::env::var("END_DATE").unwrap_or_else(|_| "2022-01-01T00:00:00Z".to_string());
 
+    let addr = format!("{host}:{port}");
+    let start_date = DateTime::parse_from_rfc3339(&start_date)
+        .map_err(|e| format!("error parsing start date: {start_date}, {e}"))
+        .unwrap()
+        .with_timezone(&Utc);
+    let end_date = DateTime::parse_from_rfc3339(&end_date)
+        .map_err(|e| format!("error parsing end date: {end_date}, {e}"))
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let filter = tracing_subscriber::filter::EnvFilter::new(filter);
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let favicon = warp::path("favicon.ico")
         .and(warp::get())
         .and(warp::fs::file("static/think.jpg"));
 
+    let dates = warp::path!("dates" / "end").and(warp::get()).map(move || {
+        #[derive(serde::Serialize)]
+        struct Dates {
+            start: String,
+            end: String,
+        }
+        let d = Dates {
+            start: start_date.to_rfc3339(),
+            end: end_date.to_rfc3339(),
+        };
+        serde_json::to_string(&d).unwrap()
+    });
+
     let index = warp::any()
+        .and(warp::path::end())
         .and(warp::header::optional::<String>("accept"))
-        .map(|accept: Option<String>| {
+        .map(move |accept: Option<String>| {
             if let Some(accept) = accept {
                 if accept.to_lowercase().contains("text/html") {
                     let html = r##"
@@ -62,22 +92,32 @@ async fn main() {
                                 </div>
                             </body>
                             <script>
-                                var countDownDate = Date.parse("2022-10-07T00:00:00Z");
+                                var endDate = null;
                                 function tick() {
-                                  var now = Date.parse(new Date().toISOString());
-                                  var distance = countDownDate - now;
-                                  var days = Math.floor(distance / (1000 * 60 * 60 * 24));
-                                  var hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                                  var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-                                  var seconds = Math.floor((distance % (1000 * 60)) / 1000);
-                                  document.getElementById("timer").innerHTML = days + "d " + hours + "h " + minutes + "m " + seconds + "s ";
-                                  if (distance < 0) {
-                                    clearInterval(x);
-                                    document.getElementById("timer").innerHTML = "MADE IT";
-                                  }
+                                    if (!endDate) { return; }
+                                    var now = Date.parse(new Date().toISOString());
+                                    var diff = endDate - now;
+                                    var days = Math.floor(diff / (1000 * 60 * 60 * 24));
+                                    var hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                                    var minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                                    var seconds = Math.floor((diff % (1000 * 60)) / 1000);
+                                    document.getElementById("timer").innerHTML = days + "d " + hours + "h " + minutes + "m " + seconds + "s ";
+                                    if (diff < 0) {
+                                        clearInterval(x);
+                                        document.getElementById("timer").innerHTML = "MADE IT";
+                                    }
                                 }
-                                tick();
-                                var x = setInterval(tick, 1000);
+                                var r = new XMLHttpRequest();
+                                r.onreadystatechange = function() {
+                                    if (r.readyState === XMLHttpRequest.DONE && r.status === 200) {
+                                        var resp = JSON.parse(r.responseText);
+                                        endDate = Date.parse(resp.end);
+                                        tick();
+                                        var x = setInterval(tick, 1000);
+                                    }
+                                }
+                                r.open("GET", "/dates/end", true);
+                                r.send();
                             </script>
                         </html>
                     "##;
@@ -87,21 +127,21 @@ async fn main() {
                     return resp;
                 }
             }
-            let start = Utc.ymd(2021, 10, 7).and_hms(0,0,0);
             let now = Utc::now();
-            let done = Utc.ymd(2022, 10, 7).and_hms(0, 0, 0);
-            let (days, hours, minutes, seconds) = timedelta(&now, &done);
-            let bdays_left = count_business_days(now, done);
-            let bdays_done = count_business_days(start, now);
+            let (days, hours, minutes, seconds) = timedelta(&now, &end_date);
+            let bdays_left = count_business_days(now, end_date);
+            let bdays_done = count_business_days(start_date, now);
             Response::new(format!("{days}d {hours}h {minutes}m {seconds}s\nbusiness days left: {bdays_left}\nbusiness days done: {bdays_done}\n"))
-        })
-        .with(warp::trace::request());
+        });
 
-    let routes = favicon.or(index);
+    let routes = index.or(dates).or(favicon).with(warp::trace::request());
 
-    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("PORT").unwrap_or_else(|_| "3003".to_string());
-    let addr = format!("{host}:{port}");
+    tracing::info!(
+        addr = %addr,
+        start_date = %start_date.to_rfc3339(),
+        end_date = %end_date.to_rfc3339(),
+        "starting server",
+    );
     warp::serve(routes)
         .run(
             addr.parse::<SocketAddr>()
