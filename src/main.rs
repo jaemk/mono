@@ -1,18 +1,19 @@
 use bdays::HolidayCalendar;
 use cached::proc_macro::cached;
-use chrono::{DateTime, Utc};
+use chrono::{Date, DateTime, Utc};
 use std::net::SocketAddr;
 use warp::{http::Response, Filter};
 
 #[cached(time = 60, size = 5)]
-fn count_business_days(mut start: DateTime<Utc>, end: DateTime<Utc>) -> i64 {
+fn count_business_days(mut start: Date<Utc>, end: Date<Utc>) -> i64 {
+    tracing::debug!("calculating business days");
     let cal = bdays::calendars::us::USSettlement;
     let mut count = 0;
     while start < end {
         if cal.is_bday(start) {
             count += 1;
         }
-        start = start.checked_add_signed(chrono::Duration::days(1)).unwrap();
+        start = start.succ();
     }
     count
 }
@@ -70,7 +71,7 @@ async fn main() {
 
         let now = Utc::now();
         let (days_left, _, _, _) = timedelta(&now, &end_date);
-        let business_days_left = count_business_days(now, end_date);
+        let business_days_left = count_business_days(now.date(), end_date.date());
         let d = Dates {
             start: start_date.to_rfc3339(),
             end: end_date.to_rfc3339(),
@@ -148,10 +149,12 @@ async fn main() {
                     return resp;
                 }
             }
+
+            // plain text response
             let now = Utc::now();
             let (days, hours, minutes, seconds) = timedelta(&now, &end_date);
-            let bdays_left = count_business_days(now, end_date);
-            let bdays_done = count_business_days(start_date, now);
+            let bdays_left = count_business_days(now.date(), end_date.date());
+            let bdays_done = count_business_days(start_date.date(), now.date());
             Response::new(format!("{days}d {hours}h {minutes}m {seconds}s\nbusiness days left: {bdays_left}\nbusiness days done: {bdays_done}\n"))
         });
 
