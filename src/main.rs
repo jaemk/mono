@@ -1,5 +1,5 @@
 use bdays::HolidayCalendar;
-use cached::proc_macro::cached;
+use cached::proc_macro::{cached, once};
 use chrono::{Date, DateTime, Utc};
 use std::net::SocketAddr;
 use warp::{http::Response, Filter};
@@ -61,7 +61,7 @@ async fn main() {
         .and(warp::fs::file("static/think.jpg"));
 
     let dates = warp::path!("dates" / "end").and(warp::get()).map(move || {
-        #[derive(serde::Serialize)]
+        #[derive(serde::Serialize, PartialEq, Clone)]
         struct Dates {
             start: String,
             end: String,
@@ -70,17 +70,23 @@ async fn main() {
             business_days_done: i64,
         }
 
-        let now = Utc::now();
-        let (days_left, _, _, _) = timedelta(&now, &end_date);
-        let business_days_left = count_business_days(now.date(), end_date.date());
-        let business_days_done = count_business_days(start_date.date(), now.date());
-        let d = Dates {
-            start: start_date.to_rfc3339(),
-            end: end_date.to_rfc3339(),
-            days_left,
-            business_days_left,
-            business_days_done,
-        };
+        #[once(time = 30)]
+        fn dates_end(start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Dates {
+            tracing::debug!("calculating /dates/end info");
+            let now = Utc::now();
+            let (days_left, _, _, _) = timedelta(&now, end_date);
+            let business_days_left = count_business_days(now.date(), end_date.date());
+            let business_days_done = count_business_days(start_date.date(), now.date());
+            Dates {
+                start: start_date.to_rfc3339(),
+                end: end_date.to_rfc3339(),
+                days_left,
+                business_days_left,
+                business_days_done,
+            }
+        }
+
+        let d = dates_end(&start_date, &end_date);
         serde_json::to_string(&d).unwrap()
     });
 
