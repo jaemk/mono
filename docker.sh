@@ -27,5 +27,5 @@ elif [ "$cmd" = "run" ]; then
     docker run --rm -it --init -p $port_map --env-file .env.docker $reg/$app:latest
 elif [ "$cmd" = "shell" ]; then
     $0 build
-    docker run --rm -it --init -p $port_map --env-file .env.docker $reg/$app:latest /bin/bash
+    docker run --rm -it --init -p $port_map --env-file .env.docker $reg/$app:latest /bin/sh
 fi
