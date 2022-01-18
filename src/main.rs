@@ -1,6 +1,7 @@
 use bdays::HolidayCalendar;
 use cached::proc_macro::{cached, once};
 use chrono::{Date, DateTime, Utc};
+use std::io::Read;
 use std::net::SocketAddr;
 use warp::{http::Response, Filter};
 
@@ -42,6 +43,13 @@ async fn main() {
     let start_date =
         std::env::var("START_DATE").unwrap_or_else(|_| "2021-01-01T00:00:00Z".to_string());
     let end_date = std::env::var("END_DATE").unwrap_or_else(|_| "2022-01-01T00:00:00Z".to_string());
+    let version = std::fs::File::open("commit_hash.txt")
+        .map(|mut f| {
+            let mut s = String::new();
+            f.read_to_string(&mut s).expect("Error reading commit_hash");
+            s.trim().to_string()
+        })
+        .unwrap_or_else(|_| "unknown".to_string());
 
     let addr = format!("{host}:{port}");
     let start_date = DateTime::parse_from_rfc3339(&start_date)
@@ -55,6 +63,20 @@ async fn main() {
 
     let filter = tracing_subscriber::filter::EnvFilter::new(filter);
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    let v = version.clone();
+    let status = warp::path("status").and(warp::get()).map(move || {
+        #[derive(serde::Serialize)]
+        struct Status<'a> {
+            version: &'a str,
+            ok: &'a str,
+        }
+        serde_json::to_string(&Status {
+            version: &v,
+            ok: "ok",
+        })
+        .expect("error serializing status")
+    });
 
     let favicon = warp::path("favicon.ico")
         .and(warp::get())
@@ -170,9 +192,14 @@ async fn main() {
             Response::new(format!("{days}d {hours}h {minutes}m {seconds}s\nbusiness days left: {bdays_left}\nbusiness days done: {bdays_done}\n"))
         });
 
-    let routes = index.or(dates).or(favicon).with(warp::trace::request());
+    let routes = index
+        .or(dates)
+        .or(favicon)
+        .or(status)
+        .with(warp::trace::request());
 
     tracing::info!(
+        version = %version,
         addr = %addr,
         start_date = %start_date.to_rfc3339(),
         end_date = %end_date.to_rfc3339(),
