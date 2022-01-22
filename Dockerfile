@@ -1,4 +1,4 @@
-FROM rust:1.58 as builder
+FROM rust:1.58.1-bullseye as builder
 
 # create a new empty shell
 RUN mkdir -p /app
@@ -31,7 +31,7 @@ RUN git rev-parse HEAD | awk '{ printf "%s", substr($0, 0, 7)>"commit_hash.txt" 
 RUN rm -rf ./.git
 
 # copy out the binary, static assets, and commit_hash
-from debian:buster-slim
+FROM debian:bullseye-slim
 WORKDIR /app/ugh
 COPY --from=builder /app/ugh/commit_hash.txt ./commit_hash.txt
 COPY --from=builder /app/ugh/static ./static
