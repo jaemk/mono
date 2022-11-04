@@ -5,6 +5,7 @@ use cached::proc_macro::{cached, once};
 use chrono::{Date, DateTime, Utc};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use warp::path::Tail;
 use warp::{http::Response, Filter};
 
 #[cached(time = 60, size = 5)]
@@ -127,21 +128,40 @@ async fn main() {
 
     let localhost = warp::host::exact(&CONFIG.get_localhost_port())
         .or(warp::host::exact(&CONFIG.get_127_port()));
-    let host_ugh = localhost.or(warp::host::exact("ugh.kominick.com"));
+    let host_ugh_kom = localhost.clone().or(warp::host::exact("ugh.kominick.com"));
+    let host_git_jaemk = localhost.clone().or(warp::host::exact("git.jaemk.me"));
 
+    // jaemk.me
+    let git_index =
+        warp::get()
+            .and(host_git_jaemk)
+            .and(warp::path::tail())
+            .map(move |_, path: Tail| {
+                let path = path.as_str();
+                tracing::info!("path: {}", path);
+                let uri = format!("https://github.com/jaemk/{path}");
+                Response::builder()
+                    .header("Location", uri)
+                    .status(302)
+                    .body("")
+                    .unwrap()
+            });
+
+    // -- ugh.kominick.com --
     let ugh_dates = warp::path!("dates" / "end")
-        .and(host_ugh.clone())
+        .and(host_ugh_kom.clone())
         .and(warp::get())
         .and_then(move |_| async { ugh::dates_end().await });
 
     let ugh_index = warp::any()
         .and(warp::path::end())
-        .and(host_ugh)
+        .and(host_ugh_kom)
         .and(warp::header::optional::<String>("accept"))
         .and_then(move |_, accept: Option<String>| async { ugh::index(accept).await });
 
     let routes = ugh_index
         .or(ugh_dates)
+        .or(git_index)
         .or(favicon)
         .or(status)
         .with(warp::trace::request());
