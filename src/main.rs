@@ -42,6 +42,7 @@ lazy_static::lazy_static! {
 
 mod ugh {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     pub async fn dates_end() -> Result<impl warp::Reply, Infallible> {
         #[derive(serde::Serialize, PartialEq, Clone)]
@@ -76,69 +77,16 @@ mod ugh {
     pub async fn index(accept: Option<String>) -> Result<impl warp::Reply, Infallible> {
         if let Some(accept) = accept {
             if accept.to_lowercase().contains("text/html") {
-                let html = r##"
-<html>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-        <title> how much longer? </title>
-    </head>
-    <body>
-        <div>
-            <pre>Round two!</pre>
-            <pre id="timer"></pre>
-            <pre id="business_days_left"></pre>
-            <pre id="business_days_done"></pre>
-        </div>
-    </body>
-    <script>
-        var timer = document.getElementById("timer");
-        var bdays_left = document.getElementById("business_days_left");
-        var bdays_done = document.getElementById("business_days_done");
-        var endDate = null;
-        function tick() {
-            if (!endDate) { return; }
-            var now = Date.parse(new Date().toISOString());
-            var diff = endDate - now;
-            var days = Math.floor(diff / (1000 * 60 * 60 * 24));
-            var hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-            var minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-            var seconds = Math.floor((diff % (1000 * 60)) / 1000);
-            timer.innerHTML = days + "d " + hours + "h " + minutes + "m " + seconds + "s ";
-            if (diff < 0) {
-                clearInterval(x);
-                timer.innerHTML = "MADE IT";
-            }
-        }
-        setInterval(tick, 1000);
-
-        function refresh() {
-            var r = new XMLHttpRequest();
-            r.onreadystatechange = function() {
-                if (r.readyState === XMLHttpRequest.DONE && r.status === 200) {
-                    var resp = JSON.parse(r.responseText);
-                    endDate = Date.parse(resp.end);
-                    if (resp.business_days_left <= 0) {
-                        bdays_left.innerHTML = "MADE IT";
-                    } else {
-                        bdays_left.innerHTML = resp.business_days_left + " business days left";
-                    }
-                    bdays_done.innerHTML = resp.business_days_done + " business days done";
-                    tick();
-                }
-            }
-            r.open("GET", "/dates/end", true);
-            r.send();
-        }
-        refresh();
-        setInterval(refresh, 1000 * 60 * 30);
-    </script>
-</html>
-"##;
+                let mut f = tokio::fs::File::open("static/ugh_index.html")
+                    .await
+                    .expect("failed opening ugh_index.html");
+                let mut html = String::new();
+                f.read_to_string(&mut html)
+                    .await
+                    .expect("failed reading ugh_index.html");
                 let resp = Response::builder()
                     .header("Content-Type", "text/html")
-                    .body(html.to_string())
+                    .body(html)
                     .unwrap();
                 return Ok(resp);
             }
