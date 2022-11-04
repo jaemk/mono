@@ -107,7 +107,14 @@ async fn main() {
     CONFIG.initialize();
 
     let filter = tracing_subscriber::filter::EnvFilter::new(&CONFIG.log_level);
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if CONFIG.log_json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     let status = warp::path("status").and(warp::get()).map(move || {
         #[derive(serde::Serialize)]

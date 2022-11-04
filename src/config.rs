@@ -10,6 +10,7 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub log_level: String,
+    pub log_json: bool,
 
     pub start_date: DateTime<Utc>,
     pub end_date: DateTime<Utc>,
@@ -43,6 +44,7 @@ impl Config {
             host: env_or("HOST", "localhost"),
             port: env_or("PORT", "3003").parse().expect("invalid port"),
             log_level: env_or("LOG_LEVEL", "mono=info,tracing=info,warp=info"),
+            log_json: env_or("LOG_JSON", "false") == "true",
             start_date,
             end_date,
         }
@@ -54,6 +56,7 @@ impl Config {
             host = %CONFIG.host,
             port = %CONFIG.port,
             log_level = %CONFIG.log_level,
+            log_json = %CONFIG.log_json,
             start_date = %CONFIG.start_date.to_rfc3339(),
             end_date = %CONFIG.end_date.to_rfc3339(),
             "initialized config",
