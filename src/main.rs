@@ -110,6 +110,7 @@ async fn main() {
     if CONFIG.log_json {
         tracing_subscriber::fmt()
             .json()
+            .with_current_span(false)
             .with_env_filter(filter)
             .init();
     } else {
