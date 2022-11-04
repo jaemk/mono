@@ -1,11 +1,11 @@
-FROM rust:1.58.1-bullseye as builder
+FROM rust:1.65.0-bullseye as builder
 
 # create a new empty shell
 RUN mkdir -p /app
 WORKDIR /app
 
-RUN USER=root cargo new --bin ugh
-WORKDIR /app/ugh
+RUN USER=root cargo new --bin mono
+WORKDIR /app/mono
 
 # copy over your manifests
 COPY ./Cargo.toml ./Cargo.toml
@@ -21,7 +21,7 @@ COPY ./static ./static
 # COPY ./templates ./templates
 
 # build for release
-RUN rm ./target/release/deps/ugh*
+RUN rm ./target/release/deps/mono*
 RUN cargo build --release
 
 # copy over git dir and embed latest commit hash
@@ -32,9 +32,9 @@ RUN rm -rf ./.git
 
 # copy out the binary, static assets, and commit_hash
 FROM debian:bullseye-slim
-WORKDIR /app/ugh
-COPY --from=builder /app/ugh/commit_hash.txt ./commit_hash.txt
-COPY --from=builder /app/ugh/static ./static
-COPY --from=builder /app/ugh/target/release/ugh ./ugh
+WORKDIR /app/mono
+COPY --from=builder /app/mono/commit_hash.txt ./commit_hash.txt
+COPY --from=builder /app/mono/static ./static
+COPY --from=builder /app/mono/target/release/mono ./mono
 
-CMD ["./ugh"]
+CMD ["./mono"]
