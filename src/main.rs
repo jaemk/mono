@@ -183,9 +183,9 @@ async fn main() {
     let routes = ugh_index
         .or(ugh_dates)
         .or(git_index)
-        .or(ip_index)
         .or(favicon)
         .or(status)
+        .or(ip_index)
         .with(warp::trace::request());
 
     let addr = CONFIG.get_host_port();
