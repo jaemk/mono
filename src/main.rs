@@ -159,7 +159,7 @@ async fn main() {
     // -- ip.kominick.com --
     let ip_index = warp::get()
         .and(host_ip_kom)
-        .and(warp::filters::addr::remote())
+        .and(warp::header::optional("fly-client-ip"))
         .map(move |_, remote: Option<SocketAddr>| {
             let ip = remote
                 .map(|r| format!("{}", r.ip()))
