@@ -160,10 +160,8 @@ async fn main() {
     let ip_index = warp::get()
         .and(host_ip_kom)
         .and(warp::header::optional("fly-client-ip"))
-        .map(move |_, remote: Option<SocketAddr>| {
-            let ip = remote
-                .map(|r| format!("{}", r.ip()))
-                .unwrap_or_else(|| "unknown".into());
+        .map(move |_, remote: Option<String>| {
+            let ip = remote.unwrap_or_else(|| "unknown".into());
             Response::builder()
                 .status(200)
                 .body(format!("{ip}\n"))
