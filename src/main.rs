@@ -129,6 +129,7 @@ async fn main() {
     let localhost = warp::host::exact(&CONFIG.get_localhost_port())
         .or(warp::host::exact(&CONFIG.get_127_port()));
     let host_ugh_kom = localhost.clone().or(warp::host::exact("ugh.kominick.com"));
+    let host_ip_kom = localhost.clone().or(warp::host::exact("ip.kominick.com"));
     let host_git_jaemk = localhost.clone().or(warp::host::exact("git.jaemk.me"));
 
     // jaemk.me
@@ -147,6 +148,20 @@ async fn main() {
                     .unwrap()
             });
 
+    // -- ip.kominick.com --
+    let ip_index = warp::get()
+        .and(host_ip_kom)
+        .and(warp::filters::addr::remote())
+        .map(move |_, remote: Option<SocketAddr>| {
+            let ip = remote
+                .map(|r| format!("{}", r.ip()))
+                .unwrap_or_else(|| "unknown".into());
+            Response::builder()
+                .status(200)
+                .body(format!("{ip}\n"))
+                .unwrap()
+        });
+
     // -- ugh.kominick.com --
     let ugh_dates = warp::path!("dates" / "end")
         .and(host_ugh_kom.clone())
@@ -162,6 +177,7 @@ async fn main() {
     let routes = ugh_index
         .or(ugh_dates)
         .or(git_index)
+        .or(ip_index)
         .or(favicon)
         .or(status)
         .with(warp::trace::request());
