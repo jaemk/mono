@@ -1,8 +1,7 @@
 [package]
-name = "ugh"
+name = "mono"
 version = "0.1.0"
 edition = "2021"
-categories = ["caching"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -11,6 +10,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 bdays = "0.1"
-cached = "0.29"
+cached = "0.40.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+lazy_static = "1"
+dotenv = "0.15.0"

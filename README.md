@@ -1,1 +1,7 @@
-> a countdown to the day
+> miscellaneous monolith
+
+
+```shell
+cargo clippy
+cargo run
+```
