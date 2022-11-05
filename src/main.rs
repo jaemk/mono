@@ -241,14 +241,18 @@ where
 {
     warp::any()
         .and(warp::path::full())
+        .and(warp::header::optional("host"))
         .and(warp::header::optional("fly-client-ip"))
-        .map(|path: FullPath, remote: Option<String>| {
-            tracing::info!(
-                path = %path.as_str(),
-                remote = %remote.unwrap_or_default(),
-                "handling request",
-            );
-        })
+        .map(
+            |path: FullPath, host: Option<String>, remote: Option<String>| {
+                tracing::info!(
+                    path = %path.as_str(),
+                    host = %host.unwrap_or_default(),
+                    remote = %remote.unwrap_or_default(),
+                    "handling request",
+                );
+            },
+        )
         .untuple_one()
         .and(filter)
         .map(|response| {
