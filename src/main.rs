@@ -143,20 +143,19 @@ async fn main() {
     let host_git_jaemk = localhost.clone().or(warp::host::exact("git.jaemk.me"));
 
     // jaemk.me
-    let git_index = warp::get()
-        .and(host_git_jaemk)
-        .and(warp::header::optional("host"))
-        .and(warp::path::tail())
-        .map(move |_, host: Option<String>, path: Tail| {
-            let path = path.as_str();
-            tracing::info!("host: {:?}, path: {}", host, path);
-            let uri = format!("https://github.com/jaemk/{path}");
-            Response::builder()
-                .header("Location", uri)
-                .status(302)
-                .body("")
-                .unwrap()
-        });
+    let git_index =
+        warp::get()
+            .and(host_git_jaemk)
+            .and(warp::path::tail())
+            .map(move |_, path: Tail| {
+                let path = path.as_str();
+                let uri = format!("https://github.com/jaemk/{path}");
+                Response::builder()
+                    .header("Location", uri)
+                    .status(302)
+                    .body("")
+                    .unwrap()
+            });
 
     // -- ip.kominick.com --
     let ip_index = warp::get()
