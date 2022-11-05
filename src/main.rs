@@ -1,41 +1,14 @@
 mod config;
+use serde::Serialize;
 
 use bdays::HolidayCalendar;
 use cached::proc_macro::{cached, once};
 use chrono::{Date, DateTime, Utc};
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use warp::path::Tail;
-use warp::{http::Response, Filter};
-
-#[cached(time = 60, size = 5)]
-fn count_business_days(mut start: Date<Utc>, end: Date<Utc>) -> i64 {
-    tracing::debug!("calculating business days");
-    let cal = bdays::calendars::us::USSettlement;
-    let mut count = 0;
-    while start < end {
-        if cal.is_bday(start) {
-            count += 1;
-        }
-        start = start.succ();
-    }
-    count
-}
-
-fn timedelta(start: &DateTime<Utc>, end: &DateTime<Utc>) -> (i64, i64, i64, i64) {
-    let diff = end.signed_duration_since(*start);
-    let seconds = diff.num_seconds();
-
-    let minutes = seconds / 60;
-    let seconds = seconds % 60;
-
-    let hours = minutes / 60;
-    let minutes = minutes % 60;
-
-    let days = hours / 24;
-    let hours = hours % 24;
-    (days, hours, minutes, seconds)
-}
+use warp::http::StatusCode;
+use warp::path::{FullPath, Tail};
+use warp::{http::Response, Filter, Rejection, Reply};
 
 lazy_static::lazy_static! {
     pub static ref CONFIG: config::Config = config::Config::load();
@@ -44,6 +17,35 @@ lazy_static::lazy_static! {
 mod ugh {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[cached(time = 60, size = 5)]
+    fn count_business_days(mut start: Date<Utc>, end: Date<Utc>) -> i64 {
+        tracing::debug!("calculating business days");
+        let cal = bdays::calendars::us::USSettlement;
+        let mut count = 0;
+        while start < end {
+            if cal.is_bday(start) {
+                count += 1;
+            }
+            start = start.succ();
+        }
+        count
+    }
+
+    fn timedelta(start: &DateTime<Utc>, end: &DateTime<Utc>) -> (i64, i64, i64, i64) {
+        let diff = end.signed_duration_since(*start);
+        let seconds = diff.num_seconds();
+
+        let minutes = seconds / 60;
+        let seconds = seconds % 60;
+
+        let hours = minutes / 60;
+        let minutes = minutes % 60;
+
+        let days = hours / 24;
+        let hours = hours % 24;
+        (days, hours, minutes, seconds)
+    }
 
     pub async fn dates_end() -> Result<impl warp::Reply, Infallible> {
         #[derive(serde::Serialize, PartialEq, Clone)]
@@ -186,7 +188,8 @@ async fn main() {
         .or(favicon)
         .or(status)
         .or(ip_index)
-        .with(warp::trace::request());
+        .recover(recover)
+        .with(warp::wrap_fn(trace_wrapper));
 
     let addr = CONFIG.get_host_port();
     warp::serve(routes)
@@ -196,4 +199,60 @@ async fn main() {
                 .unwrap(),
         )
         .await;
+}
+
+/// https://github.com/seanmonstar/warp/blob/master/examples/rejections.rs
+async fn recover(err: Rejection) -> Result<impl Reply, Infallible> {
+    #[derive(Serialize)]
+    struct ErrorMessage {
+        code: u16,
+        message: String,
+    }
+    let code;
+    let message;
+
+    if err.is_not_found() {
+        code = StatusCode::NOT_FOUND;
+        message = "NOT_FOUND";
+    } else if err.find::<warp::reject::MethodNotAllowed>().is_some() {
+        code = StatusCode::METHOD_NOT_ALLOWED;
+        message = "METHOD_NOT_ALLOWED";
+    } else {
+        tracing::error!("unhandled rejection: {:?}", err);
+        code = StatusCode::INTERNAL_SERVER_ERROR;
+        message = "UNHANDLED_REJECTION";
+    }
+
+    let json = warp::reply::json(&ErrorMessage {
+        code: code.as_u16(),
+        message: message.into(),
+    });
+    Ok(warp::reply::with_status(json, code))
+}
+
+/// https://github.com/seanmonstar/warp/blob/master/examples/wrapping.rs
+fn trace_wrapper<F, T>(
+    filter: F,
+) -> impl Filter<Extract = (impl Reply,)> + Clone + Send + Sync + 'static
+where
+    F: Filter<Extract = (T,), Error = Infallible> + Clone + Send + Sync + 'static,
+    F::Extract: Reply,
+    T: Reply,
+{
+    warp::any()
+        .and(warp::path::full())
+        .and(warp::header::optional("fly-client-ip"))
+        .map(|path: FullPath, remote: Option<String>| {
+            tracing::info!(
+                path = %path.as_str(),
+                remote = %remote.unwrap_or_default(),
+                "handling request",
+            );
+        })
+        .untuple_one()
+        .and(filter)
+        .map(|response| {
+            tracing::debug!("request complete");
+            response
+        })
 }
