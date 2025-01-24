@@ -140,6 +140,9 @@ async fn main() {
         .or(warp::host::exact(&CONFIG.get_127_port()));
     let host_ugh_kom = localhost.clone().or(warp::host::exact("ugh.kominick.com"));
     let host_ip_kom = localhost.clone().or(warp::host::exact("ip.kominick.com"));
+    let host_photo_kom = localhost
+        .clone()
+        .or(warp::host::exact("photo.kominick.com"));
     let host_git_jaemk = localhost.clone().or(warp::host::exact("git.jaemk.me"));
 
     // jaemk.me
@@ -150,6 +153,20 @@ async fn main() {
             .map(move |_, path: Tail| {
                 let path = path.as_str();
                 let uri = format!("https://github.com/jaemk/{path}");
+                Response::builder()
+                    .header("Location", uri)
+                    .status(302)
+                    .body("")
+                    .unwrap()
+            });
+
+    // -- photo.kominick.com
+    let photo_index =
+        warp::get()
+            .and(host_photo_kom)
+            .and(warp::path::tail())
+            .map(move |_, _path: Tail| {
+                let uri = format!("https://kominick.myportfolio.com/");
                 Response::builder()
                     .header("Location", uri)
                     .status(302)
@@ -184,6 +201,7 @@ async fn main() {
     let routes = ugh_index
         .or(ugh_dates)
         .or(git_index)
+        .or(photo_index)
         .or(favicon)
         .or(status)
         .or(ip_index)
