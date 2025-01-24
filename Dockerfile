@@ -1,4 +1,4 @@
-FROM rust:1.65.0-bullseye as builder
+FROM rust:1.84.0-bullseye as builder
 
 # create a new empty shell
 RUN mkdir -p /app
