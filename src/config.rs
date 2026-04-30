@@ -41,9 +41,9 @@ impl Config {
             .with_timezone(&Utc);
         Self {
             version,
-            host: env_or("HOST", "localhost"),
+            host: env_or("HOST", "0.0.0.0"),
             port: env_or("PORT", "3003").parse().expect("invalid port"),
-            log_level: env_or("LOG_LEVEL", "mono=info,tracing=info,warp=info"),
+            log_level: env_or("LOG_LEVEL", "mono=info,tracing=info,axum=info"),
             log_json: env_or("LOG_JSON", "false") == "true",
             start_date,
             end_date,

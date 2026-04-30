@@ -8,7 +8,7 @@ processes = []
 [env]
   HOST = "0.0.0.0"
   LOG_JSON = "true"
-  LOG_LEVEL = "mono=info,tracing=info,warp=info"
+  LOG_LEVEL = "mono=info,tracing=info,axum=info"
   PORT = "3000"
   START_DATE = "2021-10-07T00:00:00Z"
   END_DATE = "2023-10-07T00:00:00Z"
@@ -23,9 +23,9 @@ processes = []
   protocol = "tcp"
   script_checks = []
   [services.concurrency]
-    hard_limit = 500
-    soft_limit = 20
-    type = "connections"
+    #hard_limit = 500
+    soft_limit = 100
+    type = "requests"
 
   [[services.http_checks]]
     grace_period = "5s"

@@ -1,4 +1,4 @@
-FROM rust:1.84.0-bullseye as builder
+FROM rust:1.95.0-bookworm as builder
 
 # create a new empty shell
 RUN mkdir -p /app
@@ -18,7 +18,7 @@ RUN rm src/*.rs
 # copy all source/static/resource files
 COPY ./src ./src
 COPY ./static ./static
-# COPY ./templates ./templates
+COPY ./templates ./templates
 
 # build for release
 RUN rm ./target/release/deps/mono*
@@ -30,11 +30,12 @@ COPY ./.git ./.git
 RUN git rev-parse HEAD | awk '{ printf "%s", substr($0, 0, 7)>"commit_hash.txt" }'
 RUN rm -rf ./.git
 
-# copy out the binary, static assets, and commit_hash
-FROM debian:bullseye-slim
+# copy out the binary, static assets, templates and commit_hash
+FROM debian:bookworm-slim
 WORKDIR /app/mono
 COPY --from=builder /app/mono/commit_hash.txt ./commit_hash.txt
 COPY --from=builder /app/mono/static ./static
+COPY --from=builder /app/mono/templates ./templates
 COPY --from=builder /app/mono/target/release/mono ./mono
 
 CMD ["./mono"]

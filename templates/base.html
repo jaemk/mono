@@ -1,0 +1,29 @@
+<html>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <head>
+        <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+        <link type="text/css" rel="stylesheet" href="/static/css/materialize.min.css"  media="screen,projection"/>
+
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+
+        <link rel="shortcut icon" href="/favicon.ico?v=2" type="image/x-icon">
+        <link rel="stylesheet" href="/static/css/site.css" type="text/css">
+
+        <title> James Kominick </title>
+        {% block head_extra %}
+        {% endblock head_extra %}
+    </head>
+
+    <body>
+        {% block content %}
+        {% endblock content %}
+    </body>
+
+    <script type="text/javascript" src="https://code.jquery.com/jquery-3.2.1.min.js"></script>
+    <script type="text/javascript" src="/static/js/materialize.min.js"></script>
+    <script type="text/javascript" src="/static/js/site.js"></script>
+    {% block script %}
+    {% endblock script %}
+</html>
+

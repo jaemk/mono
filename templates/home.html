@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% import "macros.html" as macros %}
+
+{% block content %}
+
+<div id="-nav" class="nav">
+    <div class="table">
+        {{ macros::nav_link(id="-top-link",   hash="#top",        icon_class="icon-arrow-upward",      text="Top") }}
+        {{ macros::nav_link(id="-about-link", hash="#about",      icon_class="icon-account-circle",    text="About") }}
+        {{ macros::nav_link(id="-proj-link",  hash="#projects",   icon_class="icon-star",              text="Projects") }}
+        {{ macros::nav_link(id="-tech-link",  hash="#technology", icon_class="icon-laptop-chromebook", text="Technology") }}
+        {{ macros::nav_link(id="-exp-link",   hash="#experience", icon_class="icon-business",          text="Experience") }}
+        {{ macros::nav_link(id="-ed-link",    hash="#education",  icon_class="icon-book",              text="Education") }}
+    </div>
+</div>
+
+<div id="-content" class="content my-flow-text">
+    <div id="-header" class="header valign-wrapper">
+        <i id="-nav-toggle" class="material-icons clicky hamburgy">menu</i>
+    </div>
+
+    <div id="-top" class="section mygrey">
+        <h2> James Kominick </h2>
+        <span> Software Engineer </span>
+
+        <div class="top-links">
+            {{ macros::image_link(image_url="/static/assets/github.png", url="https://github.com/jaemk", text="github/jaemk") }}
+            {{ macros::image_link(image_url="/static/assets/linkedin.png",
+                                url="https://www.linkedin.com/in/james-kominick/",
+                                text="linkedin/james-kominick") }}
+            {{ macros::icon_link(icon="camera", url="https://photo.kominick.com", text="photography") }}
+            {{ macros::icon_link(icon="mail_outline", url="mailto:james@kominick.com", text="james@kominick.com") }}
+        </div>
+    </div>
+
+    <div id="-about" class="section myblue">
+        <h4 class="section-title"> About </h4>
+        <div class="mugshot-container">
+            <img class="mugshot" src="/static/assets/mugshot2.jpg"/>
+        </div>
+        <div class="about-text">
+            Highly motivated, proactive, detail-oriented software engineer with a background in mechanical engineering.
+            Dedicated to furthering knowledge, improving skills, and exploring new technologies.
+        </div>
+
+    </div>
+
+    <div id="-projects" class="section mygrey">
+        <h4 class="section-title"> Projects </h4>
+
+        <div class="proj-group">
+            <div class="row proj-row">
+                {{ macros::proj(name="cached", link_url="https://github.com/jaemk/cached",
+                                desc="Function memoization inspired by Python decorators") }}
+                {{ macros::proj(name="self_update", link_url="https://github.com/jaemk/self_update",
+                                desc="Self-update functionality for Rust executables") }}
+            </div>
+            <div class="row proj-row">
+                {{ macros::proj(name="migrant_lib", link_url="https://github.com/jaemk/migrant_lib",
+                                desc="Embeddable database configuration and migration management library") }}
+                {{ macros::proj(name="migrant", link_url="https://github.com/jaemk/migrant",
+                                desc="Database migration management") }}
+            </div>
+            <div class="row proj-row">
+                {{ macros::proj(name="transfer", link_url="https://github.com/jaemk/transfer",
+                                desc="Encrypted file sharing utility -- server, web client, & CLI client") }}
+                {{ macros::proj(name="proxy", link_url="https://github.com/jaemk/proxy",
+                                desc="Command-line proxy server") }}
+            </div>
+            <div class="row proj-row">
+                {{ macros::proj(name="upaste", link_url="https://github.com/jaemk/upaste-server",
+                                desc="Personal pastebin clone -- server, web client, & CLI client") }}
+                {{ macros::proj(name="notify-hook", link_url="https://github.com/jaemk/notify-hook",
+                                desc="GitHub PushEvent compatible post-receive git hook") }}
+            </div>
+            <div class="row proj-row">
+                {{ macros::proj(name="mini_http", link_url="https://github.com/jaemk/mini_http",
+                                desc="Barebones asynchronous HTTP server") }}
+                {{ macros::proj(name="badge-cache", link_url="https://github.com/jaemk/badge-cache",
+                                desc="Shields.io badge caching service for the Rustlang community cookbook") }}
+            </div>
+        </div>
+    </div>
+
+    <div id="-technology" class="section myblue">
+        <h4 class="section-title"> Technology </h4>
+
+        <div class="chip-block">
+            <div class="chip custom"> Python </div>
+            <div class="chip custom"> Rust </div>
+            <div class="chip custom"> Clojure </div>
+            <div class="chip custom"> JavaScript </div>
+            <div class="chip custom"> C </div>
+            <div class="chip custom"> C++ </div>
+            <div class="chip custom"> SQL </div>
+            <div class="chip custom"> Bash </div>
+            <div class="chip custom"> React </div>
+            <div class="chip custom"> HTML </div>
+            <div class="chip custom"> CSS </div>
+            <div class="chip custom"> Django </div>
+            <div class="chip custom"> Flask </div>
+            <div class="chip custom"> PostgreSQL </div>
+            <div class="chip custom"> SQLite </div>
+            <div class="chip custom"> Nginx </div>
+            <div class="chip custom"> Apache </div>
+            <div class="chip custom"> git </div>
+            <div class="chip custom"> docker </div>
+            <div class="chip custom"> Linux </div>
+            <div class="chip custom"> Debian/Ubuntu </div>
+        </div>
+    </div>
+
+    <div id="-experience" class="section mygrey">
+        <h4 class="section-title"> Experience </h4>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(title="Lead Software Engineer") }}
+            {{ macros::exp_company(org="Capital One", time="2021 to Present") }}
+        </div>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(title="Staff Software Engineer (2021)") }}
+            {{ macros::exp_title(title="Senior Software Engineer (2019 to 2021)") }}
+            {{ macros::exp_title(title="Software Engineer (2018 to 2019)") }}
+            {{ macros::exp_company(org="Lola.com", time="2018 to 2021") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Delivered a ground-up business expense management / budgeting / charge card product on a 3 month timeline after global pandemic wiped out travel spend") }}
+            {{ macros::exp_bullet(t="Integrated with banking providers to support card issuing, real time transaction authorization webhooks, and check/ACH payments") }}
+            {{ macros::exp_bullet(t="Redesigned and implemented new flight search process to allow streaming responses, resulting in search speeds faster than Kayak and Expedia") }}
+            {{ macros::exp_bullet(t="Evaluated and implemented integrations with travel content providers for searching and booking flights, hotels, and cars") }}
+            {{ macros::exp_bullet(t="Collaborated with external business partners to unlock exclusive flight and hotel rates") }}
+            {{ macros::exp_bullet(t="Developed and automated extensive reporting for in-house and external partners") }}
+            {{ macros::exp_bullet(t="Championed static analysis and strict type checking on Python code bases") }}
+            {{ macros::exp_bullet(t="Developed an extensive and reusable python utility library utilized across the organization") }}
+            {{ macros::exp_bullet(t="Jointly led an organization-wide upgrade from python 2 to 3") }}
+            {{ macros::exp_bullet(t="Participated regularly in the screening, interviewing, and hiring process") }}
+        </div>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(title="Application Programmer Analyst") }}
+            {{ macros::exp_company(org="Communally", time="2016 to 2018") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Lead development of a responsive budgeting tool webapp (JavaScript/React)") }}
+            {{ macros::exp_sub_bullet(t="Participate in research and development of required features and overall UI design") }}
+            {{ macros::exp_sub_bullet(t="Design and build a new REST api, integrating with the existing backend system") }}
+            {{ macros::exp_sub_bullet(t="Architect new database schema and handle transformation and migration of legacy data") }}
+            {{ macros::exp_sub_bullet(t="Accommodate a myriad of unplanned feature requests") }}
+            {{ macros::exp_bullet(t="Lead migration of backend services to Python3 and upgrades of production systems (systemd, gunicorn)") }}
+            {{ macros::exp_bullet(t="Maintain and update a comprehensive Django application (Python)") }}
+            {{ macros::exp_bullet(t="Re-architect core database (PostgreSQL) schemas to improve query performance and programming ergonomics") }}
+            {{ macros::exp_bullet(t="Develop a report generation framework to allow quickly defining complex reports as Python data structures,
+                                     enabling faster development and consistent, maintainable code") }}
+            {{ macros::exp_bullet(t="Collaborate with User Experience and Business Analysts in developing well-defined project specifications") }}
+            {{ macros::exp_bullet(t="Automate build/compilation and deployments of various production, training, and demo sites") }}
+        </div>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(title="Hull Designer") }}
+            {{ macros::exp_company(org="Philly Shipyard", time="2015 to 2016") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Developed and maintained purpose built Python modules utilized by designers across multiple companies") }}
+            {{ macros::exp_sub_bullet(t="Automated bill of materials reporting, eliminating physical archives and error-prone procedures") }}
+            {{ macros::exp_sub_bullet(t="Designed applications to automate raw material calculations, enabling crucial requisition timelines") }}
+            {{ macros::exp_sub_bullet(t="Developed TribonM3 (ship modeling software) Python plugins to help automate design processes") }}
+            {{ macros::exp_sub_bullet(t="Implemented centralized code repository to ensure seamless distribution to users") }}
+            {{ macros::exp_bullet(t="Consolidated disparate MS Access databases into a unified SQLite database using pyodbc and SQLAlchemy") }}
+            {{ macros::exp_sub_bullet(t="Provided user interface to query the aggregated info on ship-wide raw materials usage") }}
+            {{ macros::exp_bullet(t="Implemented ship-wide weight analysis to track unreported changes in ongoing container vessel design") }}
+        </div>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(org="Capstone / Senior Design",
+                                 title="Moment Arm Propulsion System for Cube Satellites",
+                                 time="2014 to 2015") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Designed and constructed attitude control system capable of momentum wheel recharge via deployed arm mounted thrusters") }}
+            {{ macros::exp_bullet(t="Developed real-time wireless communcation system using on-board Raspberry Pi for remote control and data acquisition") }}
+            {{ macros::exp_bullet(t="Tested/integrated critical sensors and communication protocols into microprocessor control system") }}
+            {{ macros::exp_bullet(t="Characterized, tested, and modified off-the-shelf RC motor for integration in flywheel assembly") }}
+        </div>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(org="Philly Shipyard", title="Hull Design Engineering Intern", time="2013 to 2015") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Developed automated report genration system (Python), reducing preparation time from hours to minutes") }}
+            {{ macros::exp_bullet(t="Designed and analyzed hull support structures required for assembly and transportation
+                                     of various hull sections using AutoCAD, Autodesk Inventor, and Nastran") }}
+            {{ macros::exp_bullet(t="Created detailed frame fabrication drawings and itemized assembly and material reports using AutoCAD") }}
+            {{ macros::exp_bullet(t="Produced scaffolding plans and bill of materials for future ship construction using AutoCAD and Excel") }}
+        </div>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(org="Philadelphia Department of Commerce, Division of Aviation",
+                                 title="Engineering Intern", time="2012 to 2013") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Oversaw and documented work completed for mechanical and electrical contracts
+                                     to ensure adherence to contract documents and plans") }}
+            {{ macros::exp_bullet(t="Produced daily construction reports detailing work completed and issues encountered") }}
+            {{ macros::exp_bullet(t="Created and interpreted detailed construction drawings for construction conflicts and necessary redesigns") }}
+        </div>
+
+        <div class="exp-entry card-panel z-depth-4">
+            {{ macros::exp_title(org="SFS intec", title="Product Development Co-op Engineer", time="2011 to 2012") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Designed and conducted product performance tests for new and existing products") }}
+            {{ macros::exp_bullet(t="Quantified and delivered laboratory test results for product documentation and customer requests") }}
+            {{ macros::exp_bullet(t="Created, revised, and maintenanced 2-D and 3-D drawings using AutoCAD, Catia V5, and SAP PLM software") }}
+            {{ macros::exp_bullet(t="Assisted in and contributed to the design of new and innovative products") }}
+        </div>
+
+    </div>
+
+    <div id="-education" class="section myblue">
+        <h4 class="section-title"> Education </h4>
+
+        <div class="exp-entry education card-panel z-depth-4 black-text">
+            {{ macros::exp_title(org="Mechincal Engineering (BSME): Magna Cum Laude, GPA: 3.7/4.0 -- June 2015",
+                                title="Drexel University -- Philadelphia, PA",
+                                time="") }}
+            <hr class="exp-hr"/>
+
+            {{ macros::exp_bullet(t="Teaching Assistant / Grader, Mechanics of Materials II") }}
+        </div>
+    </div>
+</div>
+
+{% endblock content %}
+
