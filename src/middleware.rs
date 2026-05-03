@@ -1,10 +1,4 @@
-use axum::{
-    body::Body,
-    extract::Host,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, extract::Host, http::Request, middleware::Next, response::Response};
 
 pub async fn trace_middleware(Host(host): Host, request: Request<Body>, next: Next) -> Response {
     let path = request.uri().path().to_string();
@@ -15,15 +9,21 @@ pub async fn trace_middleware(Host(host): Host, request: Request<Body>, next: Ne
         .unwrap_or_default()
         .to_string();
 
-    tracing::info!(
+    tracing::debug!(
         path = %path,
         host = %host,
         remote = %remote,
+        method = %request.method(),
         "handling request",
     );
 
     let response = next.run(request).await;
 
-    tracing::debug!("request complete");
+    tracing::info!(
+        path = %path,
+        host = %host,
+        remote = %remote,
+        status = %response.status(),
+    );
     response
 }

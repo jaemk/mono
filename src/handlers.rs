@@ -38,14 +38,10 @@ pub async fn ip_index(headers: HeaderMap) -> impl IntoResponse {
 
 pub async fn root_handler(Host(host): Host, headers: HeaderMap) -> impl IntoResponse {
     if is_host(&host, &["ugh.kominick.com"]) {
-        return ugh::index(headers).await.into_response();
+        return ugh::index().await.into_response();
     }
     if is_host(&host, &["ip.kominick.com"]) {
         return ip_index(headers).await.into_response();
-    }
-    if is_host(&host, &["photo.kominick.com"]) {
-        return axum::response::Redirect::temporary("https://kominick.myportfolio.com/")
-            .into_response();
     }
     if is_host(&host, &["git.jaemk.me"]) {
         return axum::response::Redirect::temporary("https://github.com/jaemk/").into_response();
@@ -54,17 +50,12 @@ pub async fn root_handler(Host(host): Host, headers: HeaderMap) -> impl IntoResp
     // homepage hosts
     if is_host(
         &host,
-        &[
-            "kominick.com",
-            "james.kominick.com",
-            "kominick.org",
-            "james.kominick.org",
-        ],
+        &["kominick.com", "james.kominick.com", "kominick.org"],
     ) {
         return homepage::index().await.into_response();
     }
-    
-    if is_host(&host, &["kominick.dev"]) {
+
+    if is_host(&host, &["kominick.dev", "jaemk.me"]) {
         return dev::index().await.into_response();
     }
 
@@ -77,10 +68,6 @@ pub async fn wildcard_handler(Host(host): Host, Path(path): Path<String>) -> imp
         return axum::response::Redirect::temporary(&format!("https://github.com/jaemk/{path}"))
             .into_response();
     }
-    if is_host(&host, &["photo.kominick.com"]) {
-        return axum::response::Redirect::temporary("https://kominick.myportfolio.com/")
-            .into_response();
-    }
     fallback_handler().await.into_response()
 }
 
@@ -88,24 +75,22 @@ pub async fn favicon_handler(Host(host): Host) -> impl IntoResponse {
     if is_host(&host, &["ugh.kominick.com"]) {
         return serve_file("static/think.jpg").await.into_response();
     }
-    serve_file("static/assets/favicon.ico").await.into_response()
+    serve_file("static/assets/favicon.ico")
+        .await
+        .into_response()
 }
 
 pub async fn serve_file(path: &'static str) -> impl IntoResponse {
-    match ServeFile::new(path).oneshot(Request::new(Body::empty())).await {
+    match ServeFile::new(path)
+        .oneshot(Request::new(Body::empty()))
+        .await
+    {
         Ok(res) => res.into_response(),
         Err(e) => {
             tracing::error!("error serving {}: {:?}", path, e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
-}
-
-pub async fn ugh_dates_end(Host(host): Host) -> impl IntoResponse {
-    if is_host(&host, &["ugh.kominick.com"]) {
-        return ugh::dates_end().await.into_response();
-    }
-    StatusCode::NOT_FOUND.into_response()
 }
 
 pub async fn fallback_handler() -> impl IntoResponse {

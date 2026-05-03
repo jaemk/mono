@@ -18,7 +18,6 @@ pub fn app() -> Router {
     Router::new()
         .route("/", get(handlers::root_handler))
         .route("/status", get(handlers::status_handler))
-        .route("/dates/end", get(handlers::ugh_dates_end))
         .route("/favicon.ico", get(handlers::favicon_handler))
         .route(
             "/robots.txt",

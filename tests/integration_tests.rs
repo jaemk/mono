@@ -34,7 +34,10 @@ async fn test_not_found() {
 #[tokio::test]
 async fn test_homepage_host() {
     let server = TestServer::new(app()).unwrap();
-    let response = server.get("/").add_header(header::HOST, "kominick.com").await;
+    let response = server
+        .get("/")
+        .add_header(header::HOST, "kominick.com")
+        .await;
     response.assert_status_ok();
     response.assert_header(header::CONTENT_TYPE, "text/html");
 }
@@ -48,31 +51,6 @@ async fn test_ugh_host_index_text() {
         .await;
     response.assert_status_ok();
     assert!(response.text().contains("business days left"));
-}
-
-#[tokio::test]
-async fn test_ugh_host_index_html() {
-    let server = TestServer::new(app()).unwrap();
-    let response = server
-        .get("/")
-        .add_header(header::HOST, "ugh.kominick.com")
-        .add_header(header::ACCEPT, "text/html")
-        .await;
-    response.assert_status_ok();
-    response.assert_header(header::CONTENT_TYPE, "text/html");
-}
-
-#[tokio::test]
-async fn test_ugh_dates_end() {
-    let server = TestServer::new(app()).unwrap();
-    let response = server
-        .get("/dates/end")
-        .add_header(header::HOST, "ugh.kominick.com")
-        .await;
-    response.assert_status_ok();
-    let json: serde_json::Value = response.json();
-    assert!(json.get("days_left").is_some());
-    assert!(json.get("business_days_left").is_some());
 }
 
 #[tokio::test]
@@ -96,17 +74,6 @@ async fn test_git_redirect() {
         .await;
     response.assert_status(StatusCode::TEMPORARY_REDIRECT);
     response.assert_header(header::LOCATION, "https://github.com/jaemk/some-repo");
-}
-
-#[tokio::test]
-async fn test_photo_redirect() {
-    let server = TestServer::new(app()).unwrap();
-    let response = server
-        .get("/")
-        .add_header(header::HOST, "photo.kominick.com")
-        .await;
-    response.assert_status(StatusCode::TEMPORARY_REDIRECT);
-    response.assert_header(header::LOCATION, "https://kominick.myportfolio.com/");
 }
 
 #[tokio::test]

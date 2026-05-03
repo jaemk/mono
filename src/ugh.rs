@@ -1,12 +1,11 @@
 use crate::CONFIG;
 use axum::{
     body::Body,
-    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use bdays::HolidayCalendar;
 use cached::proc_macro::{cached, once};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 
 #[cached(time = 60, size = 5)]
 pub fn count_business_days(mut start: chrono::NaiveDate, end: chrono::NaiveDate) -> i64 {
@@ -67,27 +66,14 @@ pub async fn dates_end() -> impl IntoResponse {
     axum::Json(d)
 }
 
-pub async fn index(headers: HeaderMap) -> impl IntoResponse {
-    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
-    if let Some(accept) = accept {
-        if accept.to_lowercase().contains("text/html") {
-            match tokio::fs::read_to_string("static/ugh_index.html").await {
-                Ok(html) => return ([(header::CONTENT_TYPE, "text/html")], html).into_response(),
-                Err(e) => {
-                    tracing::error!("error reading ugh_index.html: {:?}", e);
-                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                }
-            }
-        }
-    }
-
-    // plain text response
+pub async fn index() -> impl IntoResponse {
     let now = Utc::now();
-    let (days, hours, minutes, seconds) = timedelta(&now, &CONFIG.end_date);
-    let bdays_left = count_business_days(now.date_naive(), CONFIG.end_date.date_naive());
+    let (days, hours, minutes, seconds) = timedelta(&CONFIG.start_date, &now);
+    let end_of_year = chrono::NaiveDate::from_ymd_opt(now.year(), 12, 31).unwrap();
+    let bdays_left = count_business_days(now.date_naive(), end_of_year);
     let bdays_done = count_business_days(CONFIG.start_date.date_naive(), now.date_naive());
     Response::new(Body::from(format!(
-        "{days}d {hours}h {minutes}m {seconds}s\nbusiness days left: {bdays_left}\nbusiness days done: {bdays_done}\n"
+        "business days left in year: {bdays_left}\nbusiness days done: {bdays_done}\ntenure: {days}d {hours}h {minutes}m {seconds}s\n"
     )))
 }
 
@@ -110,14 +96,14 @@ mod tests {
     #[test]
     fn test_business_days_logic() {
         let start = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(); // Sunday
-        let end = NaiveDate::from_ymd_opt(2023, 1, 3).unwrap();   // Tuesday
-        // Jan 2 (Monday) is a holiday (New Year's observed) in US settlement calendar
-        // So business days between Jan 1 and Jan 3 should be 0 if Jan 2 is a holiday.
+        let end = NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(); // Tuesday
+                                                                // Jan 2 (Monday) is a holiday (New Year's observed) in US settlement calendar
+                                                                // So business days between Jan 1 and Jan 3 should be 0 if Jan 2 is a holiday.
         let days = count_business_days(start, end);
         assert_eq!(days, 0);
 
         let start2 = NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(); // Tuesday
-        let end2 = NaiveDate::from_ymd_opt(2023, 1, 4).unwrap();   // Wednesday
+        let end2 = NaiveDate::from_ymd_opt(2023, 1, 4).unwrap(); // Wednesday
         assert_eq!(count_business_days(start2, end2), 1);
     }
 }
