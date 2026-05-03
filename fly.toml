@@ -1,9 +1,7 @@
 # fly.toml file generated for kom-mono on 2022-11-03T22:52:27-04:00
 
 app = "kom-mono"
-kill_signal = "SIGINT"
-kill_timeout = 5
-processes = []
+primary_region = "ewr"
 
 [env]
   HOST = "0.0.0.0"
@@ -11,36 +9,26 @@ processes = []
   LOG_LEVEL = "mono=info,tracing=info,axum=info"
   PORT = "3000"
   START_DATE = "2021-10-07T00:00:00Z"
-  END_DATE = "2023-10-07T00:00:00Z"
 
-[experimental]
-  allowed_public_ports = []
-  auto_rollback = true
-
-[[services]]
+[http_service]
   internal_port = 3000
-  processes = ["app"]
-  protocol = "tcp"
-  script_checks = []
-  [services.concurrency]
-    #hard_limit = 500
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  [http_service.concurrency]
     soft_limit = 100
     type = "requests"
 
-  [[services.http_checks]]
+[[vm]]
+  size = "shared-cpu-1x"
+
+[checks]
+  [checks.status]
+    type = "http"
     grace_period = "5s"
     interval = "60s"
     method = "get"
     path = "/status"
-    protocol = "http"
-    restart_limit = 0
     timeout = "2s"
-
-  [[services.ports]]
-    force_https = true
-    handlers = ["http"]
-    port = 80
-
-  [[services.ports]]
-    handlers = ["tls", "http"]
-    port = 443
+    port = 3000

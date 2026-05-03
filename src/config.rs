@@ -13,7 +13,6 @@ pub struct Config {
     pub log_json: bool,
 
     pub start_date: DateTime<Utc>,
-    pub end_date: DateTime<Utc>,
 }
 impl Config {
     pub fn load() -> Self {
@@ -28,15 +27,9 @@ impl Config {
 
         let start_date =
             std::env::var("START_DATE").unwrap_or_else(|_| "2021-01-01T00:00:00Z".to_string());
-        let end_date =
-            std::env::var("END_DATE").unwrap_or_else(|_| "2022-01-01T00:00:00Z".to_string());
 
         let start_date = DateTime::parse_from_rfc3339(&start_date)
             .map_err(|e| format!("error parsing start date: {start_date}, {e}"))
-            .unwrap()
-            .with_timezone(&Utc);
-        let end_date = DateTime::parse_from_rfc3339(&end_date)
-            .map_err(|e| format!("error parsing end date: {end_date}, {e}"))
             .unwrap()
             .with_timezone(&Utc);
         Self {
@@ -46,7 +39,6 @@ impl Config {
             log_level: env_or("LOG_LEVEL", "mono=info,tracing=info,axum=info"),
             log_json: env_or("LOG_JSON", "false") == "true",
             start_date,
-            end_date,
         }
     }
     pub fn initialize(&self) {
@@ -58,7 +50,6 @@ impl Config {
             log_level = %CONFIG.log_level,
             log_json = %CONFIG.log_json,
             start_date = %CONFIG.start_date.to_rfc3339(),
-            end_date = %CONFIG.end_date.to_rfc3339(),
             "initialized config",
         );
     }

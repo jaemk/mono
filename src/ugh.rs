@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bdays::HolidayCalendar;
-use cached::proc_macro::{cached, once};
+use cached::proc_macro::cached;
 use chrono::{DateTime, Datelike, Utc};
 
 #[cached(time = 60, size = 5)]
@@ -34,36 +34,6 @@ pub fn timedelta(start: &DateTime<Utc>, end: &DateTime<Utc>) -> (i64, i64, i64, 
     let days = hours / 24;
     let hours = hours % 24;
     (days, hours, minutes, seconds)
-}
-
-pub async fn dates_end() -> impl IntoResponse {
-    #[derive(serde::Serialize, PartialEq, Clone)]
-    struct Dates {
-        start: String,
-        end: String,
-        days_left: i64,
-        business_days_left: i64,
-        business_days_done: i64,
-    }
-
-    #[once(time = 30)]
-    fn dates_end_calc(start_date: &DateTime<Utc>, end_date: &DateTime<Utc>) -> Dates {
-        tracing::debug!("calculating /dates/end info");
-        let now = Utc::now();
-        let (days_left, _, _, _) = timedelta(&now, end_date);
-        let business_days_left = count_business_days(now.date_naive(), end_date.date_naive());
-        let business_days_done = count_business_days(start_date.date_naive(), now.date_naive());
-        Dates {
-            start: start_date.to_rfc3339(),
-            end: end_date.to_rfc3339(),
-            days_left,
-            business_days_left,
-            business_days_done,
-        }
-    }
-
-    let d = dates_end_calc(&CONFIG.start_date, &CONFIG.end_date);
-    axum::Json(d)
 }
 
 pub async fn index() -> impl IntoResponse {
