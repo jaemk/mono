@@ -32,6 +32,7 @@ RUN rm -rf ./.git
 
 # copy out the binary, static assets, templates and commit_hash
 FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/mono
 COPY --from=builder /app/mono/commit_hash.txt ./commit_hash.txt
 COPY --from=builder /app/mono/static ./static
