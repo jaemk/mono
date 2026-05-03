@@ -114,3 +114,15 @@ async fn test_default_host_behavior() {
     response.assert_status_ok();
     response.assert_header(header::CONTENT_TYPE, "text/html");
 }
+
+#[tokio::test]
+async fn test_outside_host() {
+    let server = TestServer::new(app());
+    let response = server
+        .get("/")
+        .add_header(header::HOST, "outside.kominick.com")
+        .await;
+    // This might fail if network is not available, but let's see.
+    // In the real environment it might fail with "Something went wrong..."
+    response.assert_status_ok();
+}

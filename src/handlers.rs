@@ -1,4 +1,4 @@
-use crate::{dev, homepage, ugh, CONFIG};
+use crate::{dev, homepage, outside, ugh, CONFIG};
 use axum::{
     body::Body,
     extract::Path,
@@ -43,6 +43,9 @@ pub async fn root_handler(Host(host): Host, headers: HeaderMap) -> impl IntoResp
     }
     if is_host(&host, &["ip.kominick.com"]) {
         return ip_index(headers).await.into_response();
+    }
+    if is_host(&host, &["outside.kominick.com"]) {
+        return outside::index().await.into_response();
     }
     if is_host(&host, &["git.jaemk.me"]) {
         return axum::response::Redirect::temporary("https://github.com/jaemk/").into_response();

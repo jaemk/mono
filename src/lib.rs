@@ -3,6 +3,7 @@ pub mod dev;
 pub mod handlers;
 pub mod homepage;
 pub mod middleware;
+pub mod outside;
 pub mod ugh;
 
 use axum::{middleware as axum_middleware, routing::get, Router};
