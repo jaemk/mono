@@ -24,7 +24,7 @@ pub fn app() -> Router {
             get(|| async { handlers::serve_file("static/robots.txt").await }),
         )
         .nest_service("/static", ServeDir::new("static"))
-        .route("/*path", get(handlers::wildcard_handler))
+        .route("/{*path}", get(handlers::wildcard_handler))
         .fallback(handlers::fallback_handler)
         .layer(axum_middleware::from_fn(middleware::trace_middleware))
 }

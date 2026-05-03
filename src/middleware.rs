@@ -1,4 +1,5 @@
-use axum::{body::Body, extract::Host, http::Request, middleware::Next, response::Response};
+use axum::{body::Body, http::Request, middleware::Next, response::Response};
+use axum_extra::extract::Host;
 
 pub async fn trace_middleware(Host(host): Host, request: Request<Body>, next: Next) -> Response {
     let path = request.uri().path().to_string();

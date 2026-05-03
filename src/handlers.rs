@@ -1,10 +1,11 @@
 use crate::{dev, homepage, ugh, CONFIG};
 use axum::{
     body::Body,
-    extract::{Host, Path},
+    extract::Path,
     http::{HeaderMap, Request, StatusCode},
     response::IntoResponse,
 };
+use axum_extra::extract::Host;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
