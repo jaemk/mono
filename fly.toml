@@ -5,10 +5,25 @@ primary_region = "ewr"
 
 [env]
   HOST = "0.0.0.0"
+  PORT = "3000"
   LOG_JSON = "true"
   LOG_LEVEL = "mono=info,tracing=info,axum=info"
-  PORT = "3000"
-  START_DATE = "2021-10-07T00:00:00Z"
+  UGH_START_DATE = "2021-10-07T00:00:00Z"
+  SPOT_DB_USER = "spot"
+  SPOT_DB_NAME = "spot"
+  SPOT_DB_HOST = "kom-db.flycast"
+  SPOT_DB_PORT = "5432"
+  SPOT_HOST = "0.0.0.0"
+  SPOT_PORT = "3000"
+  SPOT_REAL_DOMAIN = "spotie.app"
+  SPOT_REAL_HOSTNAME = "https://spotie.app"
+  PASTE_DB_USER = "paste"
+  PASTE_DB_NAME = "paste"
+  PASTE_DB_HOST = "kom-db.flycast"
+  PASTE_DB_PORT = "5432"
+  AWS_ENDPOINT_URL_S3 = "https://t3.storage.dev"
+  AWS_ENDPOINT_URL_IAM = "https://iam.storage.dev"
+  AWS_REGION = "auto"
 
 [http_service]
   internal_port = 3000
@@ -32,3 +47,18 @@ primary_region = "ewr"
     path = "/status"
     timeout = "2s"
     port = 3000
+
+
+# Note, required secrets:
+#  - SPOT_DATABASE_URL
+#  - SPOT_DB_PASS
+#  - SPOT_ENC_KEY
+#  - SPOT_SPOTIFY_CLIENT_ID
+#  - SPOT_SPOTIFY_SECRET_ID
+#  - PASTE_DB_PASS
+#  - PASTE_DATABASE_URL
+#  - PASTE_ENCRYPTION_KEY
+#  - PASTE_SIGNING_KEY
+#  - AWS_ACCESS_KEY_ID
+#  - AWS_SECRET_ACCESS_KEY
+

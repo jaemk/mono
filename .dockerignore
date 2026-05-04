@@ -1,8 +1,11 @@
 # flyctl launch added from .gitignore
 target
+**/target/
 **/.env
 **/.env.docker
 **/.idea
+**/bin/spot
+
 
 # flyctl launch added from .idea/.gitignore
 # Default ignored files

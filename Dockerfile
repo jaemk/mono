@@ -1,42 +1,51 @@
 FROM rust:1.95.0-bookworm as builder
 
-# create a new empty shell
-RUN mkdir -p /app
+RUN apt-get update && apt-get install --yes ca-certificates curl pkg-config libssl-dev libpq-dev
+RUN cargo install migrant --features postgres
+
 WORKDIR /app
 
-RUN USER=root cargo new --bin mono
-WORKDIR /app/mono
-
-# copy over your manifests
+# Copy manifests, lock file, and the stubbing script to cache dependency compilation
+COPY bin/stub_workspace.sh bin/stub_workspace.sh
+# Copy each crate's Cargo.toml – add a line here when a new crate is introduced
 COPY ./Cargo.toml ./Cargo.toml
-COPY ./Cargo.lock ./Cargo.lock
+COPY crates/common/Cargo.toml crates/common/Cargo.toml
+COPY crates/spot/Cargo.toml crates/spot/Cargo.toml
+COPY crates/mono/Cargo.toml crates/mono/Cargo.toml
+COPY crates/paste/Cargo.toml crates/paste/Cargo.toml
 
-# this build step will cache your dependencies
-RUN cargo build --release
-RUN rm src/*.rs
+# Generate stub source files for every workspace member so cargo can
+# compile and cache all third-party dependencies without the real source.
+RUN chmod +x bin/stub_workspace.sh && bin/stub_workspace.sh .
 
-# copy all source/static/resource files
-COPY ./src ./src
-COPY ./static ./static
-COPY ./templates ./templates
+RUN cargo build --release --bin mono
 
-# build for release
-RUN rm ./target/release/deps/mono*
-RUN cargo build --release
+# Remove stub artifacts so the real source build is not skipped
+RUN rm -f target/release/deps/mono* target/release/mono \
+          target/release/deps/libcommon* target/release/deps/libspot* \
+          target/release/deps/libpaste*
 
-# copy over git dir and embed latest commit hash
-COPY ./.git ./.git
-# make sure there's no trailing newline
-RUN git rev-parse HEAD | awk '{ printf "%s", substr($0, 0, 7)>"commit_hash.txt" }'
-RUN rm -rf ./.git
+# Now copy the real source code and build
+COPY . .
+RUN cargo build --release --bin mono
 
-# copy out the binary, static assets, templates and commit_hash
+# make sure there's no trailing newline for commit_hash
+RUN git rev-parse HEAD | awk '{ printf "%s", substr($0, 0, 7) }' > commit_hash.txt
+
+# Final stage
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-WORKDIR /app/mono
-COPY --from=builder /app/mono/commit_hash.txt ./commit_hash.txt
-COPY --from=builder /app/mono/static ./static
-COPY --from=builder /app/mono/templates ./templates
-COPY --from=builder /app/mono/target/release/mono ./mono
+RUN apt-get update && apt-get install --yes ca-certificates curl libssl3 libpq5 && rm -rf /var/lib/apt/lists/*
 
-CMD ["./mono"]
+COPY --from=builder /usr/local/cargo/bin/migrant /usr/bin/migrant
+
+WORKDIR /app
+COPY --from=builder /app/target/release/mono ./mono
+COPY --from=builder /app/static ./static
+COPY --from=builder /app/templates ./templates
+COPY --from=builder /app/crates/paste/assets ./crates/paste/assets
+COPY --from=builder /app/crates/paste/templates ./crates/paste/templates
+COPY --from=builder /app/commit_hash.txt ./commit_hash.txt
+COPY --from=builder /app/migrations ./migrations
+COPY --from=builder /app/bin ./bin
+
+CMD ["./bin/start.sh", "./mono"]

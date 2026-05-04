@@ -1,27 +1,49 @@
-[package]
-name = "mono"
+[workspace]
+members = [
+    "crates/common",
+    "crates/spot",
+    "crates/mono",
+    "crates/paste",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
 
-[dependencies]
+[workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = "0.8.9"
-axum-extra = { version = "0.10", features = ["typed-header"] }
+axum-extra = { version = "0.10", features = ["typed-header", "cookie"] }
 tower = "0.5"
-tower-http = { version = "0.6.8", features = ["fs", "trace", "set-header"] }
+tower-http = { version = "0.6.8", features = ["fs", "trace", "set-header", "cors"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-chrono = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }
+log = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 bdays = "0.1"
-cached = { version = "0.59.0", features = ["async"] }
+cached = { version = "0.59.0", features = ["tokio", "async"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 lazy_static = "1"
 dotenv = "0.15.0"
 tera = "1"
-reqwest = { version = "0.13.3", features = ["json"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls", "form"] }
 anyhow = "1.0.102"
-
-[dev-dependencies]
+sqlx = { version = "0.6", features = [ "runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "json", "offline" ] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.13"
+hex = "0.4"
+ring = "0.16"
+async-trait = "0.1"
+time = "0.3"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+rand = "0.10.1"
+rmp-serde = "1"
 axum-test = "20.0.0"
+
+common = { path = "crates/common" }
+spot = { path = "crates/spot" }
+paste = { path = "crates/paste" }

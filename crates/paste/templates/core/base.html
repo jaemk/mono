@@ -1,0 +1,42 @@
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+
+        <link href="https://fonts.googleapis.com/css?family=Ubuntu+Mono&amp;subset=latin-ext" rel="stylesheet">
+        <link rel="short icon" type="image/x-icon" href="/favicon.ico"/>
+        <link rel="stylesheet" href="/paste/static/css/base.css">
+
+        <title> uPaste </title>
+
+        {% block head %}
+        {% endblock head %}
+    </head>
+
+    <body>
+        <div class="header">
+            <div class="header-row">
+                <div class="header-left">
+                    <span class="header-title" onclick="window.location.href='/'"> &micro;Paste </span>
+                    {% block title_extra %}
+                    {% endblock title_extra %}
+                </div>
+                <div class="header-extra">
+                    {% block header_extra %}
+                    {% endblock header_extra %}
+                </div>
+            </div>
+            <div class="header-row">
+                <div class="header-left">
+                    {% block header_left_extra %}
+                    {% endblock header_left_extra %}
+                </div>
+            </div>
+        </div>
+        <div id="content">
+            {% block content %}
+            {% endblock content %}
+        </div>
+    </body>
+</html>

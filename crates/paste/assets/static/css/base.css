@@ -1,0 +1,82 @@
+body {
+    font-family: 'Ubuntu Mono', monospace;
+    /*padding: 1% 0px;*/
+    background-color: #272727;
+    color: #efdea9;
+    overflow: hidden;
+}
+
+
+/* header container */
+.header {
+    display: table;
+    width: 100%;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-style: solid;
+    border-width: 0px 0px 1px 0px;
+    border-color: #8d8d8d;
+}
+/* header subcontainer */
+.header-row {
+    display: table-row;
+}
+/* header left side grouping */
+.header-left {
+    display: table-cell;
+    text-align: left;
+    padding: 5px;
+}
+/* header main title */
+.header-title {
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 200%;
+}
+/* header right side content */
+.header-extra {
+    display: table-cell;
+    text-align: right;
+}
+
+
+/* main editor container */
+#editor {
+    margin: 0;
+    position: absolute;
+    /*top: 100;*/
+    left: 0;
+    right: 0;
+    bottom: 0;
+}
+
+
+#type-selector {
+    -webkit-border-radius: 5px;
+    -moz-border-radius: 5px;
+    border-radius: 5px;
+}
+
+
+.clickable {
+    cursor: pointer;
+}
+
+.button {
+    border-style: solid;
+    border-width: .5px;
+    border-color: grey;
+    border-radius: 5px;
+    margin: 5px;
+    padding: 5px;
+    background-color: #272727;
+    color: #efdea9;
+    font-family: 'Ubuntu Mono', monospace;
+}
+.button:hover {
+    background-color: grey;
+}
+
+.tiny {
+    font-size: 100%;
+}

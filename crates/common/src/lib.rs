@@ -1,0 +1,7 @@
+pub mod crypto;
+pub mod db;
+pub mod test_utils;
+pub mod utils;
+
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
+pub type Result<T> = std::result::Result<T, Error>;
