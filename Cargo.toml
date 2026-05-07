@@ -14,35 +14,35 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = "0.8.9"
-axum-extra = { version = "0.10", features = ["typed-header", "cookie"] }
+axum = "0.8"
+axum-extra = { version = "0.12", features = ["typed-header", "cookie"] }
 tower = "0.5"
-tower-http = { version = "0.6.8", features = ["fs", "trace", "set-header", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 bdays = "0.1"
-cached = { version = "0.59.0", features = ["tokio", "async"] }
+cached = { version = "0.59", features = ["tokio", "async"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 lazy_static = "1"
-dotenv = "0.15.0"
+dotenv = "0.15"
 tera = "1"
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls", "form"] }
-anyhow = "1.0.102"
-sqlx = { version = "0.6", features = [ "runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "json", "offline" ] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
+anyhow = "1"
+sqlx = { version = "0.8", features = [ "runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "json" ] }
 uuid = { version = "1", features = ["v4"] }
-base64 = "0.13"
+base64 = "0.22"
 hex = "0.4"
-ring = "0.16"
+ring = "0.17"
 async-trait = "0.1"
 time = "0.3"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
-rand = "0.10.1"
+rand = "0.10"
 rmp-serde = "1"
-axum-test = "20.0.0"
+axum-test = "20"
 
 common = { path = "crates/common" }
 spot = { path = "crates/spot" }

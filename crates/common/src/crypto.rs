@@ -289,12 +289,16 @@ impl Encrypted {
                 buf
             }
         };
-        base64::encode(&buf)
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&buf)
     }
 
     /// Decode from a string produced by [`encode`].
     pub fn decode(s: &str) -> crate::Result<Self> {
-        let bytes = base64::decode(s).map_err(|_| "Encrypted: base64 decode error")?;
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .map_err(|_| "Encrypted: base64 decode error")?;
 
         if bytes.starts_with(KEY_ID_PREFIX) {
             let rest = &bytes[KEY_ID_PREFIX_LEN..];
@@ -434,6 +438,7 @@ pub fn decrypt_with_pw_aad(enc: &Encrypted, password: &[u8], aad: &[u8]) -> crat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     // ---------------------------------------------------------------------------
     // Random helpers
@@ -686,7 +691,8 @@ mod tests {
 
     #[test]
     fn enc_decode_rejects_unknown_prefix() {
-        let bad = base64::encode(b"garbage data here that is long enough");
+        let bad = base64::engine::general_purpose::STANDARD
+            .encode(b"garbage data here that is long enough");
         assert!(Encrypted::decode(&bad).is_err());
     }
 
@@ -799,7 +805,9 @@ mod tests {
         let mut raw = Vec::new();
         raw.extend_from_slice(SALT_PREFIX);
         raw.extend_from_slice(&[0u8; SALT_LEN + NONCE_LEN - 1]);
-        assert!(Encrypted::decode(&base64::encode(&raw)).is_err());
+        assert!(
+            Encrypted::decode(&base64::engine::general_purpose::STANDARD.encode(&raw)).is_err()
+        );
     }
 
     #[test]

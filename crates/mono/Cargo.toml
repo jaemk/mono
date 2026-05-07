@@ -24,8 +24,7 @@ lazy_static.workspace = true
 dotenv.workspace = true
 tera.workspace = true
 anyhow.workspace = true
-sqlx.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
-axum-test = "20.0.0"
+axum-test.workspace = true

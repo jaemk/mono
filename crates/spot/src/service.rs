@@ -6,6 +6,7 @@ use axum::{
     Router,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
+use base64::Engine as _;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use sqlx::PgPool;
 
@@ -122,7 +123,7 @@ async fn auth_callback(
         )
             .into_response();
     }
-    let token_bytes = match base64::decode(&spotify_auth.state) {
+    let token_bytes = match base64::engine::general_purpose::STANDARD.decode(&spotify_auth.state) {
         Ok(b) => b,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("decode error {}", e)).into_response(),
     };
@@ -446,7 +447,7 @@ async fn new_one_time_login_token(pool: &PgPool, redirect: Option<String>) -> Re
         .to_string();
     let s = serde_json::to_string(&OneTimeLoginToken { token: s, redirect })
         .map_err(|e| crate::StringError(format!("token json error {}", e)))?;
-    let token = base64::encode_config(&s, base64::URL_SAFE);
+    let token = base64::engine::general_purpose::URL_SAFE.encode(&s);
     insert_one_time_token(pool, &token).await?;
     Ok(token)
 }
@@ -548,7 +549,7 @@ async fn upsert_user(
     .bind(refresh_token.encode())
     .bind(access_expires)
     .bind(&auth_token)
-    .fetch_one(&mut tr)
+    .fetch_one(&mut *tr)
     .await
     .map_err(|e| format!("error upserting user {:?}", e))?;
     let expires = Utc::now()
@@ -564,7 +565,7 @@ async fn upsert_user(
     .bind(&auth_token)
     .bind(user.id)
     .bind(expires)
-    .execute(&mut tr)
+    .execute(&mut *tr)
     .await
     .map_err(|e| format!("failed to insert user auth token {:?}", e))?;
     tr.commit()
@@ -1040,7 +1041,7 @@ async fn _background_currently_playing_poll_inner(
             "set local lock_timeout = '{}s'",
             config.poll_lock_timeout_seconds
         ))
-        .execute(&mut conn)
+        .execute(&mut *conn)
         .await
         {
             tracing::error!(user_id = %user.id, error = ?e, "error setting lock timeout for user poll");
@@ -1050,7 +1051,7 @@ async fn _background_currently_playing_poll_inner(
         use sqlx::Row;
         let locked: bool = match sqlx::query("select pg_try_advisory_lock($1)")
             .bind(user.id)
-            .fetch_one(&mut conn)
+            .fetch_one(&mut *conn)
             .await
         {
             Ok(row) => row.get(0),
@@ -1087,7 +1088,7 @@ async fn _background_currently_playing_poll_inner(
 
         let _ = sqlx::query("select pg_advisory_unlock($1)")
             .bind(user.id)
-            .execute(&mut conn)
+            .execute(&mut *conn)
             .await;
     }
     Ok(())
@@ -1348,8 +1349,9 @@ mod tests {
             .await
             .expect("generating token with redirect should succeed");
 
-        let bytes =
-            base64::decode_config(&tok, base64::URL_SAFE).expect("token should be valid base64");
+        let bytes = base64::engine::general_purpose::URL_SAFE
+            .decode(&tok)
+            .expect("token should be valid base64");
         let json: OneTimeLoginToken =
             serde_json::from_slice(&bytes).expect("token payload should deserialise");
         assert_eq!(json.redirect.as_deref(), Some("/spot/top"));

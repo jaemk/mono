@@ -5,9 +5,16 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::IntoResponse,
 };
-use axum_extra::extract::Host;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
+
+fn extract_host(headers: &HeaderMap) -> String {
+    headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
 
 pub fn is_host(host: &str, targets: &[&str]) -> bool {
     let host = host.to_lowercase();
@@ -41,7 +48,8 @@ pub async fn ip_index(headers: HeaderMap) -> impl IntoResponse {
     format!("{ip}\n")
 }
 
-pub async fn root_handler(Host(host): Host, headers: HeaderMap) -> impl IntoResponse {
+pub async fn root_handler(headers: HeaderMap) -> impl IntoResponse {
+    let host = extract_host(&headers);
     if is_host(&host, &["spotie.app"]) {
         return axum::response::Redirect::temporary("/spot").into_response();
     }
@@ -77,7 +85,8 @@ pub async fn root_handler(Host(host): Host, headers: HeaderMap) -> impl IntoResp
     homepage::index().await.into_response()
 }
 
-pub async fn wildcard_handler(Host(host): Host, Path(path): Path<String>) -> impl IntoResponse {
+pub async fn wildcard_handler(headers: HeaderMap, Path(path): Path<String>) -> impl IntoResponse {
+    let host = extract_host(&headers);
     if is_host(&host, &["git.jaemk.me"]) {
         return axum::response::Redirect::temporary(&format!("https://github.com/jaemk/{path}"))
             .into_response();
@@ -85,7 +94,8 @@ pub async fn wildcard_handler(Host(host): Host, Path(path): Path<String>) -> imp
     fallback_handler().await.into_response()
 }
 
-pub async fn favicon_handler(Host(host): Host) -> impl IntoResponse {
+pub async fn favicon_handler(headers: HeaderMap) -> impl IntoResponse {
+    let host = extract_host(&headers);
     if is_host(&host, &["spotie.app"]) {
         return serve_file("static/spot/favicon.ico").await.into_response();
     }

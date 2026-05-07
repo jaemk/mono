@@ -18,6 +18,10 @@
 //! the AES-GCM nonce, and — for user-key-encrypted pastes — the PBKDF2 salt.
 
 use anyhow::anyhow;
+use base64::Engine as _;
+
+const B64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use aws_sdk_s3::primitives::ByteStream;
 use serde::{Deserialize, Serialize};
 
@@ -102,10 +106,8 @@ impl BlobHeaderV1 {
                 .map_err(|e| anyhow!("encryption error: {e}"))?;
             let header = BlobHeaderV1 {
                 sig,
-                nonce: base64::encode_config(pwenc.nonce(), base64::URL_SAFE_NO_PAD),
-                salt: pwenc
-                    .salt()
-                    .map(|s| base64::encode_config(s, base64::URL_SAFE_NO_PAD)),
+                nonce: B64.encode(pwenc.nonce()),
+                salt: pwenc.salt().map(|s| B64.encode(s)),
                 key_id: None,
             };
             Ok((header, pwenc.ciphertext().to_vec()))
@@ -114,7 +116,7 @@ impl BlobHeaderV1 {
                 .map_err(|e| anyhow!("encryption error: {e}"))?;
             let header = BlobHeaderV1 {
                 sig,
-                nonce: base64::encode_config(enc.nonce(), base64::URL_SAFE_NO_PAD),
+                nonce: B64.encode(enc.nonce()),
                 salt: None,
                 key_id: Some(key.id.to_string()),
             };
@@ -133,9 +135,11 @@ impl BlobHeaderDecrypt for BlobHeaderV1 {
     ) -> anyhow::Result<Vec<u8>> {
         if let Some(salt_b64) = &self.salt {
             let user_key = user_enc_key.ok_or_else(|| anyhow!("decryption failure"))?;
-            let salt = base64::decode_config(salt_b64, base64::URL_SAFE_NO_PAD)
+            let salt = B64
+                .decode(salt_b64)
                 .map_err(|e| anyhow!("base64 salt: {e}"))?;
-            let nonce = base64::decode_config(&self.nonce, base64::URL_SAFE_NO_PAD)
+            let nonce = B64
+                .decode(&self.nonce)
                 .map_err(|e| anyhow!("base64 nonce: {e}"))?;
             let pwenc = common::crypto::Encrypted::Pw {
                 ciphertext: ciphertext.to_vec(),
@@ -145,7 +149,8 @@ impl BlobHeaderDecrypt for BlobHeaderV1 {
             common::crypto::decrypt_with_pw_aad(&pwenc, user_key, aad)
                 .map_err(|_| anyhow!("failed decrypting content"))
         } else {
-            let nonce = base64::decode_config(&self.nonce, base64::URL_SAFE_NO_PAD)
+            let nonce = B64
+                .decode(&self.nonce)
                 .map_err(|e| anyhow!("base64 nonce: {e}"))?;
             // Legacy blobs without key_id default to "default".
             let key_id = self.key_id.as_deref().unwrap_or("default");
@@ -178,8 +183,8 @@ pub fn encode_blob(header: &BlobHeaderV1, ciphertext: &[u8]) -> anyhow::Result<V
     .map_err(|e| anyhow!("msgpack version: {e}"))?;
     let header_bytes = rmp_serde::to_vec(header).map_err(|e| anyhow!("msgpack header: {e}"))?;
 
-    let version_b64 = base64::encode_config(&version_bytes, base64::URL_SAFE_NO_PAD);
-    let header_b64 = base64::encode_config(&header_bytes, base64::URL_SAFE_NO_PAD);
+    let version_b64 = B64.encode(&version_bytes);
+    let header_b64 = B64.encode(&header_bytes);
 
     let mut out =
         Vec::with_capacity(version_b64.len() + 1 + header_b64.len() + 1 + ciphertext.len());
@@ -203,7 +208,8 @@ pub fn decode_blob(blob: &[u8]) -> anyhow::Result<(Box<dyn BlobHeaderDecrypt>, V
     let rest = &blob[sep1 + 1..];
 
     // Decode version
-    let version_bytes = base64::decode_config(version_b64, base64::URL_SAFE_NO_PAD)
+    let version_bytes = B64
+        .decode(version_b64)
         .map_err(|e| anyhow!("base64 version: {e}"))?;
     let blob_version: BlobVersion =
         rmp_serde::from_slice(&version_bytes).map_err(|e| anyhow!("msgpack version: {e}"))?;
@@ -217,7 +223,8 @@ pub fn decode_blob(blob: &[u8]) -> anyhow::Result<(Box<dyn BlobHeaderDecrypt>, V
     let ciphertext = rest[sep2 + 1..].to_vec();
 
     // Decode header based on version
-    let header_bytes = base64::decode_config(header_b64, base64::URL_SAFE_NO_PAD)
+    let header_bytes = B64
+        .decode(header_b64)
         .map_err(|e| anyhow!("base64 header: {e}"))?;
 
     let header: Box<dyn BlobHeaderDecrypt> = match blob_version.version {
@@ -318,7 +325,7 @@ mod tests {
     fn sample_header() -> BlobHeaderV1 {
         BlobHeaderV1 {
             sig: "deadbeef".to_string(),
-            nonce: base64::encode_config(b"123456789012", base64::URL_SAFE_NO_PAD), // 12 bytes
+            nonce: B64.encode(b"123456789012"), // 12 bytes
             salt: None,
             key_id: None,
         }
@@ -338,11 +345,8 @@ mod tests {
     fn roundtrip_with_salt() {
         let header = BlobHeaderV1 {
             sig: "aabbcc".to_string(),
-            nonce: base64::encode_config(b"123456789012", base64::URL_SAFE_NO_PAD),
-            salt: Some(base64::encode_config(
-                b"1234567890123456",
-                base64::URL_SAFE_NO_PAD,
-            )),
+            nonce: B64.encode(b"123456789012"),
+            salt: Some(B64.encode(b"1234567890123456")),
             key_id: None,
         };
         let ciphertext = b"encrypted";
@@ -365,9 +369,9 @@ mod tests {
     fn decode_rejects_wrong_version() {
         // Build a blob with version=99
         let bad_ver = rmp_serde::to_vec(&BlobVersion { version: 99 }).unwrap();
-        let ver_b64 = base64::encode_config(&bad_ver, base64::URL_SAFE_NO_PAD);
+        let ver_b64 = B64.encode(&bad_ver);
         let hdr_bytes = rmp_serde::to_vec(&sample_header()).unwrap();
-        let hdr_b64 = base64::encode_config(&hdr_bytes, base64::URL_SAFE_NO_PAD);
+        let hdr_b64 = B64.encode(&hdr_bytes);
         let mut blob = Vec::new();
         blob.extend_from_slice(ver_b64.as_bytes());
         blob.push(SEP);

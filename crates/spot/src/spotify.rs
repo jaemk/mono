@@ -2,6 +2,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::models;
+use base64::Engine as _;
 use common::crypto;
 use common::utils;
 use common::Result;
@@ -33,9 +34,8 @@ impl SpotifyAccessParams {
 }
 
 pub async fn new_spotify_access_token(code: &str, config: &Config) -> Result<SpotifyAccess> {
-    let auth = base64::encode(
-        format!("{}:{}", config.spotify_client_id, config.spotify_secret_id).as_bytes(),
-    );
+    let auth = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", config.spotify_client_id, config.spotify_secret_id).as_bytes());
     let client = reqwest::Client::new();
     let resp = client
         .post("https://accounts.spotify.com/api/token")
@@ -67,9 +67,8 @@ impl RefreshParams {
 }
 
 pub async fn refresh_access_token(refresh_token: &str, config: &Config) -> Result<SpotifyAccess> {
-    let auth = base64::encode(
-        format!("{}:{}", config.spotify_client_id, config.spotify_secret_id).as_bytes(),
-    );
+    let auth = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", config.spotify_client_id, config.spotify_secret_id).as_bytes());
     let client = reqwest::Client::new();
     let resp = client
         .post("https://accounts.spotify.com/api/token")

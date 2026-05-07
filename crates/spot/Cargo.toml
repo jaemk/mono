@@ -19,6 +19,3 @@ tracing.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
 time.workspace = true
-async-trait.workspace = true
-lazy_static.workspace = true
-dotenv.workspace = true
