@@ -15,4 +15,10 @@ migrant list
 migrant apply -a || true
 popd
 
+pushd migrations/transfer
+migrant setup
+migrant list
+migrant apply -a || true
+popd
+
 exec "$@"

@@ -4,3 +4,7 @@
 .idea/
 local/
 !local/.gitkeep
+**/**/.DS_Store
+.antigravitycli
+.claude/settings.local.json
+.claude/worktrees/

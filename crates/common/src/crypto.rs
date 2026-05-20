@@ -161,6 +161,22 @@ pub fn derive_encryption_key(pw: &[u8], salt: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Hash a password for server-side storage using PBKDF2-HMAC-SHA512.
+///
+/// Returns `(salt, hash)` where `salt` is [`SALT_LEN`] bytes and `hash` is 32 bytes.
+pub fn hash_password(password: &[u8]) -> crate::Result<(Vec<u8>, Vec<u8>)> {
+    let salt = new_salt()?;
+    let hash = derive_encryption_key(password, &salt);
+    Ok((salt, hash.to_vec()))
+}
+
+/// Verify a password against a stored `(salt, hash)` pair in constant time.
+pub fn verify_password(password: &[u8], salt: &[u8], stored_hash: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    let candidate = derive_encryption_key(password, salt);
+    candidate.ct_eq(stored_hash).into()
+}
+
 // ---------------------------------------------------------------------------
 // AES-256-GCM helpers (no KDF — key must already be 32 bytes)
 // ---------------------------------------------------------------------------

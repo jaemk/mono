@@ -4,7 +4,7 @@
 - `cd` is aliased in this shell — always use `builtin cd` instead
 
 ## Project
-- Rust workspace with four crates: `crates/common`, `crates/spot`, `crates/mono`, `crates/paste`
+- Rust workspace with five crates: `crates/common`, `crates/spot`, `crates/mono`, `crates/paste`, `crates/transfer`
 - Main binary is `mono` in `crates/mono`
 
 ## Build & Check

@@ -4,6 +4,7 @@ members = [
     "crates/spot",
     "crates/mono",
     "crates/paste",
+    "crates/transfer",
 ]
 resolver = "2"
 
@@ -31,8 +32,8 @@ dotenv = "0.15"
 tera = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
 anyhow = "1"
-sqlx = { version = "0.8", features = [ "runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "json" ] }
-uuid = { version = "1", features = ["v4"] }
+sqlx = { version = "0.8", features = [ "runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "json", "uuid" ] }
+uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 hex = "0.4"
 ring = "0.17"
@@ -43,7 +44,11 @@ aws-sdk-s3 = "1"
 rand = "0.10"
 rmp-serde = "1"
 axum-test = "20"
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+subtle = "2"
 
 common = { path = "crates/common" }
 spot = { path = "crates/spot" }
 paste = { path = "crates/paste" }
+transfer = { path = "crates/transfer" }

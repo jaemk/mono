@@ -56,6 +56,9 @@ pub async fn root_handler(headers: HeaderMap) -> impl IntoResponse {
     if is_host(&host, &["paste.kominick.com"]) {
         return axum::response::Redirect::temporary("/paste").into_response();
     }
+    if is_host(&host, &["transfer.kominick.com"]) {
+        return axum::response::Redirect::temporary("/transfer").into_response();
+    }
     if is_host(&host, &["ugh.kominick.com"]) {
         return ugh::index().await.into_response();
     }

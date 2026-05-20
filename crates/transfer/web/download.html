@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>transfer — receive encrypted file</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/transfer/static/style.css">
+  <style>
+    @keyframes tx-blink { 50% { opacity: 0; } }
+    .tx-caret {
+      display: inline-block; width: 1.5px; height: 13px;
+      background: var(--fg); margin-left: 2px; vertical-align: -2px;
+      animation: tx-blink 1s steps(2, end) infinite;
+    }
+  </style>
+</head>
+<body>
+
+<div class="tx-topbar">
+  <a class="tx-brand" href="/transfer">
+    <span class="tx-brand-mark">tx</span>
+    transfer
+  </a>
+  <nav class="tx-nav">
+    <a href="/transfer">Send</a>
+    <a href="/transfer/download" class="is-active">Receive</a>
+  </nav>
+  <div class="tx-spacer"></div>
+  <span class="tx-badge"><span class="tx-dot tx-dot-live"></span>AES-256-GCM · client-side</span>
+</div>
+
+<div class="tx-main">
+  <div class="tx-container">
+
+    <!-- Heading -->
+    <div>
+      <div class="tx-display">Receive a file</div>
+      <div class="tx-meta" style="margin-top:4px">
+        Decryption happens in your browser. Keys never leave your device.
+      </div>
+    </div>
+
+    <!-- Error -->
+    <div class="tx-error" id="error-box" style="display:none"></div>
+
+    <!-- No-key warning (shown when URL is missing key param) -->
+    <div class="tx-error" id="no-key-box" style="display:none">
+      Missing transfer key in URL. Ask the sender to share the full link.
+    </div>
+
+    <!-- ── Stage: locked ── -->
+    <div id="stage-locked" style="display:none">
+
+      <!-- Transfer meta (size shown once we know it; starts generic) -->
+      <div style="margin-bottom:var(--gap-stack)">
+        <div class="tx-row" style="gap:12px;margin-bottom:8px">
+          <div style="width:38px;height:38px;border-radius:9px;background:var(--bg-muted);border:0.5px solid var(--bd);display:grid;place-items:center;color:var(--fg-soft);flex-shrink:0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          </div>
+          <div>
+            <div class="tx-meta" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-faint)">Encrypted transfer</div>
+            <div class="tx-display" style="font-size:18px;margin-top:2px">Enter your passwords</div>
+          </div>
+        </div>
+        <div class="tx-meta">
+          Enter the access password and encryption password the sender shared with you.
+        </div>
+      </div>
+
+      <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+        <div>
+          <label class="tx-label" for="access-pw">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+            Access password
+          </label>
+          <input type="password" class="tx-input" id="access-pw"
+                 placeholder="provided by the sender"
+                 autocomplete="current-password"
+                 oninput="checkDecryptReady()"
+                 onkeydown="if(event.key==='Enter')decryptAndDownload()">
+        </div>
+
+        <div>
+          <label class="tx-label" for="enc-pw">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+            Encryption password
+          </label>
+          <input type="password" class="tx-input" id="enc-pw"
+                 placeholder="provided by the sender"
+                 autocomplete="current-password"
+                 oninput="checkDecryptReady()"
+                 onkeydown="if(event.key==='Enter')decryptAndDownload()">
+        </div>
+
+        <button class="tx-btn is-primary" id="decrypt-btn"
+                style="width:100%;justify-content:center;height:40px;font-size:13px"
+                disabled onclick="decryptAndDownload()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 019.9-1"/></svg>
+          Decrypt &amp; download
+        </button>
+      </div>
+
+      <div class="tx-meta" style="text-align:center;margin-top:4px">
+        Each download counts toward the transfer limit.
+      </div>
+    </div>
+
+    <!-- ── Stage: decrypting ── -->
+    <div id="stage-decrypting" style="display:none">
+      <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+
+        <div class="tx-row" style="gap:12px">
+          <div class="tx-spin-ring">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 019.9-1"/></svg>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:500" id="dec-label">Fetching encrypted file…</div>
+            <div class="tx-meta">Verifying GCM tag · decrypting in-browser</div>
+          </div>
+          <div class="tx-mono" style="font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;flex-shrink:0" id="dec-pct">0%</div>
+        </div>
+
+        <div class="tx-bar"><i id="dec-bar" style="width:0%"></i></div>
+
+        <div class="tx-hex-stream" id="hex-stream"></div>
+
+        <div class="tx-meta" id="dec-status">Preparing…</div>
+      </div>
+    </div>
+
+    <!-- ── Stage: ready ── -->
+    <div id="stage-ready" style="display:none;flex-direction:column;gap:var(--gap-stack)">
+
+      <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+
+        <div class="tx-row" style="gap:12px">
+          <div class="tx-file-icon" id="ready-icon" style="color:var(--fg-mute);width:44px;height:44px;border-radius:8px;font-size:10px">—</div>
+          <div style="flex:1;min-width:0">
+            <div class="tx-mono" style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="ready-filename">download</div>
+            <div class="tx-meta" id="ready-size">—</div>
+          </div>
+          <button class="tx-btn is-primary" id="save-btn" onclick="triggerDownload()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Save
+          </button>
+        </div>
+
+        <div class="tx-divider"></div>
+
+        <div class="tx-meta" style="display:flex;align-items:flex-start;gap:8px">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>Decrypted in your browser. The server never saw the file contents or its name.</span>
+        </div>
+      </div>
+
+      <div class="tx-note">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span id="ready-meta">—</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/transfer/static/app.js"></script>
+<script>
+const T = window.Transfer;
+
+// ── URL params ────────────────────────────────────────────────────────────
+
+const params = new URLSearchParams(location.search);
+const uploadKey    = params.get('key');
+const encFnHex     = params.get('fn');
+
+// ── State ─────────────────────────────────────────────────────────────────
+
+let hexRaf = null;
+let hexTick = 0;
+let decryptedBytes = null;
+let decryptedFilename = 'download';
+
+// ── Init ──────────────────────────────────────────────────────────────────
+
+if (!uploadKey) {
+  document.getElementById('no-key-box').style.display = '';
+} else {
+  showStage('locked');
+}
+
+// ── Stage management ──────────────────────────────────────────────────────
+
+function showStage(s) {
+  ['locked', 'decrypting', 'ready'].forEach(id => {
+    const el = document.getElementById('stage-' + id);
+    const show = id === s;
+    el.style.display = (show && id === 'ready') ? 'flex' : show ? '' : 'none';
+  });
+  hideError();
+}
+
+function checkDecryptReady() {
+  document.getElementById('decrypt-btn').disabled = !T.isDecryptReady(
+    document.getElementById('access-pw').value,
+    document.getElementById('enc-pw').value
+  );
+}
+
+// ── Decrypt & download flow ───────────────────────────────────────────────
+
+async function decryptAndDownload() {
+  const accessPw = document.getElementById('access-pw').value;
+  const encPw    = document.getElementById('enc-pw').value;
+  if (!accessPw.trim() || !encPw.trim()) return;
+
+  showStage('decrypting');
+  startHexStream();
+
+  try {
+    const enc = new TextEncoder();
+    const accessBytes = enc.encode(accessPw);
+    const encBytes    = enc.encode(encPw);
+    const accessHex   = T.toHex(accessBytes);
+
+    setPct(10, 'Verifying access password…');
+
+    const initResp = await T.apiJson('/download/init', {
+      key:             uploadKey,
+      access_password: accessHex,
+    });
+
+    setPct(30, 'Fetching encrypted file…');
+    document.getElementById('dec-label').textContent = `Downloading · ${T.formatBytes(initResp.size)}`;
+
+    const dlRes = await fetch(T.BASE + '/download', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ key: initResp.download_key, access_password: accessHex }),
+    });
+    if (!dlRes.ok) {
+      const j = await dlRes.json().catch(() => ({}));
+      throw new Error(j.error || dlRes.statusText);
+    }
+
+    setPct(55, 'Decrypting…');
+    const ciphertext = new Uint8Array(await dlRes.arrayBuffer());
+    const nonce      = T.fromHex(initResp.nonce);
+
+    const plaintext = await T.decryptFile(ciphertext, nonce, encBytes);
+
+    setPct(80, 'Verifying integrity…');
+    const contentHash = T.toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', ciphertext)));
+    await T.apiJson('/download/confirm', {
+      key:  initResp.confirm_key,
+      hash: contentHash,
+    });
+
+    setPct(95, 'Decrypting filename…');
+    if (encFnHex) {
+      try {
+        decryptedFilename = await T.decryptFilename(T.fromHex(encFnHex), encBytes);
+      } catch {
+        decryptedFilename = 'download';
+      }
+    }
+
+    setPct(100, 'Done');
+    decryptedBytes = plaintext;
+    await T.sleep(400);
+    stopHexStream();
+    showReady(plaintext, decryptedFilename, initResp.size);
+  } catch (e) {
+    stopHexStream();
+    showStage('locked');
+    showError(e.message || String(e));
+  }
+}
+
+function showReady(bytes, filename, encSize) {
+  showStage('ready');
+  const ext = T.fileExtension(filename);
+  const colors = { PDF:'oklch(0.62 0.18 25)', FIG:'oklch(0.62 0.18 280)', ZIP:'oklch(0.62 0.14 75)', PNG:'oklch(0.62 0.18 145)', JPG:'oklch(0.62 0.18 145)', MP4:'oklch(0.62 0.16 220)' };
+  const icon = document.getElementById('ready-icon');
+  icon.textContent = ext;
+  icon.style.color = colors[ext] || 'var(--fg-soft)';
+  document.getElementById('ready-filename').textContent = filename;
+  document.getElementById('ready-size').textContent = T.formatBytes(bytes.length) + ' · decrypted in-browser';
+  document.getElementById('ready-meta').textContent = `Original: ${T.formatBytes(bytes.length)} · Encrypted was ${T.formatBytes(encSize)}`;
+}
+
+function triggerDownload() {
+  if (!decryptedBytes) return;
+  const blob = new Blob([decryptedBytes]);
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = decryptedFilename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  const btn = document.getElementById('save-btn');
+  btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Saved`;
+  btn.disabled = true;
+}
+
+// ── Progress & hex stream ─────────────────────────────────────────────────
+
+function setPct(pct, status) {
+  document.getElementById('dec-pct').textContent = pct + '%';
+  document.getElementById('dec-bar').style.width = pct + '%';
+  if (status) document.getElementById('dec-status').textContent = status;
+}
+
+function startHexStream() {
+  hexTick = 0;
+  function step() {
+    hexTick++;
+    const container = document.getElementById('hex-stream');
+    if (!container) return;
+    const chunkBase = Math.floor(hexTick * 2.5);
+    let html = '';
+    for (let i = 0; i < 5; i++) {
+      const chunkNum = chunkBase - (4 - i);
+      if (chunkNum < 0) continue;
+      const hex = T.hexStream(hexTick * 11 + i * 97, 28);
+      html += `<div class="tx-hex-line${i === 4 ? ' hl' : ''}"><span class="tx-hex-chunk">chunk ${String(chunkNum).padStart(4,'0')}</span>${hex}</div>`;
+    }
+    container.innerHTML = html;
+    hexRaf = requestAnimationFrame(step);
+  }
+  hexRaf = requestAnimationFrame(step);
+}
+
+function stopHexStream() {
+  if (hexRaf) { cancelAnimationFrame(hexRaf); hexRaf = null; }
+}
+
+// ── Error ─────────────────────────────────────────────────────────────────
+
+function showError(msg) {
+  const el = document.getElementById('error-box');
+  el.textContent = msg;
+  el.style.display = '';
+}
+function hideError() {
+  document.getElementById('error-box').style.display = 'none';
+}
+</script>
+</body>
+</html>

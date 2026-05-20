@@ -13,6 +13,7 @@ COPY crates/common/Cargo.toml crates/common/Cargo.toml
 COPY crates/spot/Cargo.toml crates/spot/Cargo.toml
 COPY crates/mono/Cargo.toml crates/mono/Cargo.toml
 COPY crates/paste/Cargo.toml crates/paste/Cargo.toml
+COPY crates/transfer/Cargo.toml crates/transfer/Cargo.toml
 
 # Generate stub source files for every workspace member so cargo can
 # compile and cache all third-party dependencies without the real source.
@@ -23,7 +24,7 @@ RUN cargo build --release --bin mono
 # Remove stub artifacts so the real source build is not skipped
 RUN rm -f target/release/deps/mono* target/release/mono \
           target/release/deps/libcommon* target/release/deps/libspot* \
-          target/release/deps/libpaste*
+          target/release/deps/libpaste* target/release/deps/libtransfer*
 
 # Now copy the real source code and build
 COPY . .
@@ -44,6 +45,7 @@ COPY --from=builder /app/static ./static
 COPY --from=builder /app/templates ./templates
 COPY --from=builder /app/crates/paste/assets ./crates/paste/assets
 COPY --from=builder /app/crates/paste/templates ./crates/paste/templates
+COPY --from=builder /app/crates/transfer/web ./crates/transfer/web
 COPY --from=builder /app/commit_hash.txt ./commit_hash.txt
 COPY --from=builder /app/migrations ./migrations
 COPY --from=builder /app/bin ./bin

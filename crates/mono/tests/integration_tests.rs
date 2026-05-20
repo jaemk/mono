@@ -26,7 +26,11 @@ async fn get_server() -> TestServer {
         .await
         .expect("failed to initialize paste state");
 
-    TestServer::new(app(spot_state, paste_state))
+    let transfer_state = transfer::service::init(transfer::Config::load())
+        .await
+        .expect("failed to initialize transfer state");
+
+    TestServer::new(app(spot_state, paste_state, transfer_state))
 }
 
 #[tokio::test]

@@ -1,31 +1,29 @@
 [package]
-name = "mono"
+name = "transfer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 common.workspace = true
-spot.workspace = true
-paste.workspace = true
-transfer.workspace = true
 tokio.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
-tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 chrono.workspace = true
-bdays.workspace = true
-cached.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-lazy_static.workspace = true
-dotenv.workspace = true
-tera.workspace = true
 anyhow.workspace = true
-reqwest.workspace = true
+sqlx.workspace = true
+hex.workspace = true
+uuid.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+futures.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
+serde_json.workspace = true
+ring.workspace = true

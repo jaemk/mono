@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>transfer — send encrypted file</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/transfer/static/style.css">
+</head>
+<body>
+
+<div class="tx-topbar">
+  <a class="tx-brand" href="/transfer">
+    <span class="tx-brand-mark">tx</span>
+    transfer
+  </a>
+  <nav class="tx-nav">
+    <a href="/transfer" class="is-active">Send</a>
+    <a href="/transfer/download">Receive</a>
+  </nav>
+  <div class="tx-spacer"></div>
+  <span class="tx-badge"><span class="tx-dot tx-dot-live"></span>AES-256-GCM · client-side</span>
+</div>
+
+<div class="tx-main">
+  <div class="tx-container">
+
+    <!-- Heading -->
+    <div>
+      <div class="tx-row" style="justify-content:space-between;align-items:baseline;gap:12px">
+        <div class="tx-display">Send a file</div>
+        <button class="tx-btn is-sm is-ghost" id="action-btn" style="display:none" onclick="handleActionBtn()"></button>
+      </div>
+      <div class="tx-meta" style="margin-top:4px">
+        Files are encrypted in your browser. Keys never touch our servers.
+      </div>
+    </div>
+
+    <!-- Stepper -->
+    <div class="tx-stepper" id="stepper"></div>
+
+    <!-- Error -->
+    <div class="tx-error" id="error-box" style="display:none"></div>
+
+    <!-- ── Stage: idle ── -->
+    <div id="stage-idle">
+      <div class="tx-card tx-dropzone" id="dropzone"
+           ondragover="event.preventDefault();this.classList.add('drag-over')"
+           ondragleave="this.classList.remove('drag-over')"
+           ondrop="onDrop(event)">
+        <div class="tx-dropzone-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <div>
+          <div style="font-size:14px;font-weight:500">Drop a file here</div>
+          <div class="tx-meta" style="margin-top:3px">or click to select · up to <span id="limit-display">—</span></div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center">
+          <span class="tx-badge">end-to-end encrypted</span>
+          <span class="tx-badge">AES-256-GCM</span>
+          <span class="tx-badge">auto-expire</span>
+        </div>
+        <input type="file" id="file-input" style="display:none" onchange="onFileInputChange(this)">
+      </div>
+    </div>
+
+    <!-- ── Stage: configure ── -->
+    <div id="stage-configure" style="display:none;flex-direction:column;gap:var(--gap-stack)">
+
+      <!-- File card -->
+      <div class="tx-card" style="padding:var(--pad-card)">
+        <div class="tx-row" style="gap:12px">
+          <div class="tx-file-icon" id="file-icon" style="color:var(--fg-mute)">—</div>
+          <div style="min-width:0;flex:1">
+            <div style="font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="file-name">—</div>
+            <div class="tx-meta tx-mono" id="file-size">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Form card -->
+      <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+
+        <!-- Encryption password -->
+        <div>
+          <label class="tx-label" for="enc-pw">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+            Encryption password
+            <span style="color:var(--danger);font-weight:400">*</span>
+            <span class="tx-meta" style="margin-left:auto;font-weight:400">required to decrypt</span>
+          </label>
+          <input type="password" class="tx-input" id="enc-pw" placeholder="choose a strong password" autocomplete="new-password" oninput="onEncPwInput(this.value)">
+          <div class="tx-meta" style="margin-top:4px">Used for client-side encryption. Never sent to the server — share via a separate channel.</div>
+        </div>
+
+        <!-- Access password -->
+        <div>
+          <label class="tx-label" for="access-pw">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+            Access password
+            <span class="tx-meta" style="margin-left:auto;font-weight:400">optional to edit</span>
+          </label>
+          <div class="tx-row" style="gap:8px">
+            <input type="text" class="tx-input tx-mono" id="access-pw" autocomplete="off" style="flex:1;font-size:12px">
+            <button class="tx-btn" id="copy-access-cfg-btn" onclick="copyAccessPw()">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              copy
+            </button>
+          </div>
+          <div class="tx-meta" style="margin-top:4px">Randomly generated server-side protection against harvest-now-decrypt-later attacks.</div>
+        </div>
+
+        <!-- Deletion password -->
+        <div>
+          <label class="tx-label" for="deletion-pw">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+            Deletion password
+            <span class="tx-meta" style="margin-left:auto;font-weight:400">optional</span>
+          </label>
+          <input type="password" class="tx-input" id="deletion-pw" placeholder="lets you delete before expiry" autocomplete="new-password">
+        </div>
+
+        <!-- Expiry + downloads grid -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap-stack)">
+          <div>
+            <div class="tx-label">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              Expires after
+            </div>
+            <div class="tx-seg" id="expire-seg">
+              <button data-val="3600">1h</button>
+              <button data-val="86400">24h</button>
+              <button data-val="604800" class="is-active">7d</button>
+              <button data-val="2592000">30d</button>
+            </div>
+          </div>
+          <div>
+            <div class="tx-label">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Max downloads
+            </div>
+            <div class="tx-seg" id="limit-seg">
+              <button data-val="1">1</button>
+              <button data-val="3" class="is-active">3</button>
+              <button data-val="10">10</button>
+              <button data-val="">∞</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <button class="tx-btn is-primary" id="upload-btn"
+                style="width:100%;justify-content:center;height:40px;font-size:13px"
+                disabled onclick="doUpload()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          Encrypt &amp; upload
+        </button>
+        <div class="tx-meta" style="text-align:center">
+          Encryption happens in this browser before upload.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Stage: encrypting ── -->
+    <div id="stage-encrypting" style="display:none">
+      <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+
+        <div class="tx-row" style="gap:12px">
+          <div class="tx-spin-ring">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="enc-filename">Encrypting…</div>
+            <div class="tx-meta" id="enc-phase">AES-256-GCM · client-side</div>
+          </div>
+          <div class="tx-mono" style="font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;flex-shrink:0" id="enc-pct">0%</div>
+        </div>
+
+        <div class="tx-bar"><i id="enc-bar" style="width:0%"></i></div>
+
+        <div class="tx-hex-stream" id="hex-stream"></div>
+
+        <div class="tx-row" style="justify-content:space-between">
+          <div class="tx-meta" id="enc-status">Preparing…</div>
+          <div class="tx-meta tx-mono" id="enc-bytes"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Stage: done ── -->
+    <div id="stage-done" style="display:none;flex-direction:column;gap:var(--gap-stack)">
+
+      <!-- Ready to share card -->
+      <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:14px">
+
+        <!-- Header -->
+        <div class="tx-row" style="justify-content:space-between;gap:10px">
+          <div class="tx-row" style="gap:10px;min-width:0;flex:1">
+            <div class="tx-check-ring">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div style="min-width:0">
+              <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="done-filename">—</div>
+              <div class="tx-meta" id="done-meta">—</div>
+            </div>
+          </div>
+          <button class="tx-btn is-sm" id="copy-both-btn">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            copy both
+          </button>
+        </div>
+
+        <!-- Download link -->
+        <div>
+          <div class="tx-label">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+            Share link
+          </div>
+          <div class="tx-row" style="gap:8px">
+            <div class="tx-input-display tx-mono" id="done-link"
+                 style="flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11.5px"></div>
+            <button class="tx-btn" id="copy-link-btn" onclick="copyField('copy-link-btn', 'done-link-val')">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Encryption password (hidden by default) -->
+        <div>
+          <div class="tx-label">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+            Encryption password
+          </div>
+          <div class="tx-row" style="gap:8px">
+            <input type="password" class="tx-input-display tx-mono" id="done-enc-pw" readonly
+                   style="flex:1;overflow:hidden;white-space:nowrap;font-size:12px">
+            <button class="tx-btn" id="reveal-enc-btn" onclick="toggleReveal('done-enc-pw','reveal-enc-btn')">reveal</button>
+            <button class="tx-btn" id="copy-enc-pw-btn" onclick="copyField('copy-enc-pw-btn','done-enc-pw-val')">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              copy
+            </button>
+          </div>
+          <div class="tx-meta" style="margin-top:4px">Required for decryption. Share via a separate channel.</div>
+        </div>
+
+        <!-- Access password (hidden by default) -->
+        <div>
+          <div class="tx-label">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+            Access password
+            <span class="tx-meta" style="margin-left:auto;font-weight:400">server protection layer</span>
+          </div>
+          <div class="tx-row" style="gap:8px">
+            <input type="password" class="tx-input-display tx-mono" id="done-access-pw" readonly
+                   style="flex:1;overflow:hidden;white-space:nowrap;font-size:12px">
+            <button class="tx-btn" id="reveal-access-btn" onclick="toggleReveal('done-access-pw','reveal-access-btn')">reveal</button>
+            <button class="tx-btn" id="copy-access-pw-btn" onclick="copyField('copy-access-pw-btn','done-access-pw-val')">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Hint -->
+        <div class="tx-note">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>
+            Send the link <strong>and</strong> encryption password to the recipient —
+            they need both to download.
+          </span>
+        </div>
+      </div>
+
+      <!-- Out-of-band warning -->
+      <div class="tx-note tx-note-warn">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <div>
+          <strong style="color:var(--fg)">Send the encryption password out-of-band.</strong>
+          Use a different channel than the link — text, Signal, in person.
+          We can't recover it if it's lost.
+        </div>
+      </div>
+
+      <!-- Delete card (shown only if deletion password was set) -->
+      <div class="tx-card" id="delete-card" style="display:none;padding:var(--pad-card);flex-direction:column;gap:10px">
+        <div class="tx-label" style="margin-bottom:0">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+          Delete link
+          <span class="tx-meta" style="margin-left:auto;font-weight:400">keep private</span>
+        </div>
+        <div class="tx-row" style="gap:8px">
+          <div class="tx-input-display tx-mono" id="done-delete-link"
+               style="flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11.5px"></div>
+          <button class="tx-btn" id="copy-delete-btn" onclick="copyField('copy-delete-btn', 'done-delete-val')">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            copy
+          </button>
+        </div>
+        <div class="tx-meta">Your private link to delete this transfer before it expires.</div>
+      </div>
+
+    </div><!-- /stage-done -->
+
+    <!-- Hidden value store for copy -->
+    <span id="done-link-val" style="display:none"></span>
+    <span id="done-enc-pw-val" style="display:none"></span>
+    <span id="done-access-pw-val" style="display:none"></span>
+    <span id="done-both-val" style="display:none"></span>
+    <span id="done-delete-val" style="display:none"></span>
+
+  </div><!-- /container -->
+</div><!-- /main -->
+
+<script src="/transfer/static/app.js"></script>
+<script>
+const T = window.Transfer;
+
+// ── State ─────────────────────────────────────────────────────────────────
+
+let stage = 'idle';
+let selectedFile = null;
+let lifespan = 604800;
+let downloadLimit = 3;
+let encPwVal = '';
+let hexRaf = null;
+let hexTick = 0;
+let currentPct = 0;
+
+// ── Init ──────────────────────────────────────────────────────────────────
+
+(async function init() {
+  setupSeg('expire-seg', v => { lifespan = parseInt(v); });
+  setupSeg('limit-seg', v => { downloadLimit = v ? parseInt(v) : null; });
+
+  document.getElementById('dropzone').addEventListener('click', e => {
+    if (e.target !== document.getElementById('file-input')) {
+      document.getElementById('file-input').click();
+    }
+  });
+
+  try {
+    const d = await T.apiGet('/upload/defaults');
+    document.getElementById('limit-display').textContent = T.formatBytes(d.upload_limit_bytes);
+  } catch {}
+
+  document.getElementById('access-pw').value = T.genAccessPassword();
+  renderStepper();
+})();
+
+// ── Segmented controls ────────────────────────────────────────────────────
+
+function setupSeg(id, onChange) {
+  const seg = document.getElementById(id);
+  seg.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      seg.querySelectorAll('button').forEach(b => b.classList.remove('is-active'));
+      btn.classList.add('is-active');
+      onChange(btn.dataset.val);
+    });
+  });
+}
+
+// ── File handling ─────────────────────────────────────────────────────────
+
+function onDrop(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) selectFile(file);
+}
+
+function onFileInputChange(input) {
+  if (input.files[0]) selectFile(input.files[0]);
+}
+
+function selectFile(file) {
+  selectedFile = file;
+  const ext = T.fileExtension(file.name);
+  const colors = { PDF:'oklch(0.62 0.18 25)', FIG:'oklch(0.62 0.18 280)', ZIP:'oklch(0.62 0.14 75)', PNG:'oklch(0.62 0.18 145)', JPG:'oklch(0.62 0.18 145)', MP4:'oklch(0.62 0.16 220)', DOC:'oklch(0.62 0.16 230)' };
+  const icon = document.getElementById('file-icon');
+  icon.textContent = ext;
+  icon.style.color = colors[ext] || 'var(--fg-soft)';
+  document.getElementById('file-name').textContent = file.name;
+  document.getElementById('file-size').textContent = T.formatBytes(file.size);
+  showStage('configure');
+}
+
+// ── Password validation ───────────────────────────────────────────────────
+
+function onEncPwInput(val) {
+  encPwVal = val;
+  document.getElementById('upload-btn').disabled = !val.trim();
+}
+
+// ── Stage management ──────────────────────────────────────────────────────
+
+function showStage(s) {
+  stage = s;
+  const stages = ['idle', 'configure', 'encrypting', 'done'];
+  stages.forEach(id => {
+    const el = document.getElementById('stage-' + id);
+    const show = id === s;
+    if (id === 'configure' || id === 'done') {
+      el.style.display = show ? 'flex' : 'none';
+    } else {
+      el.style.display = show ? '' : 'none';
+    }
+  });
+
+  const btn = document.getElementById('action-btn');
+  if (s === 'configure' || s === 'encrypting') {
+    btn.style.display = '';
+    btn.innerHTML = svgX(12) + ' start over';
+  } else if (s === 'done') {
+    btn.style.display = '';
+    btn.innerHTML = svgPlus(12) + ' new transfer';
+  } else {
+    btn.style.display = 'none';
+  }
+
+  hideError();
+  renderStepper();
+}
+
+function handleActionBtn() {
+  if (stage === 'done') {
+    reset();
+  } else {
+    reset();
+  }
+}
+
+function reset() {
+  stopHexStream();
+  selectedFile = null;
+  encPwVal = '';
+  document.getElementById('enc-pw').value = '';
+  document.getElementById('access-pw').value = T.genAccessPassword();
+  document.getElementById('deletion-pw').value = '';
+  document.getElementById('upload-btn').disabled = true;
+  document.getElementById('file-input').value = '';
+  showStage('idle');
+}
+
+// ── Stepper ───────────────────────────────────────────────────────────────
+
+function renderStepper() {
+  const steps = ['Select', 'Configure', 'Encrypt', 'Share'];
+  const order = ['idle', 'configure', 'encrypting', 'done'];
+  const idx = order.indexOf(stage);
+  const el = document.getElementById('stepper');
+  el.innerHTML = steps.map((label, i) => {
+    const done = i < idx;
+    const active = i === idx;
+    const numCls = done ? 'done' : active ? 'active' : '';
+    const numInner = done
+      ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      : (i + 1);
+    const line = i < steps.length - 1 ? '<div class="tx-stepper-line"></div>' : '';
+    return `<div class="tx-stepper-step">
+      <span class="tx-stepper-num ${numCls}">${numInner}</span>
+      <span class="tx-stepper-label ${active ? 'active' : ''}">${label}</span>
+    </div>${line}`;
+  }).join('');
+}
+
+// ── Upload flow ───────────────────────────────────────────────────────────
+
+async function doUpload() {
+  const encPwRaw = document.getElementById('enc-pw').value;
+  const accessPwRaw = document.getElementById('access-pw').value;
+  if (!selectedFile || !encPwRaw.trim()) return;
+  const deletionPwRaw = document.getElementById('deletion-pw').value;
+
+  showStage('encrypting');
+  startHexStream();
+
+  try {
+    const enc = new TextEncoder();
+    const encBytes    = enc.encode(encPwRaw);
+    const accessBytes = enc.encode(accessPwRaw);
+
+    setProgress(8, 'Reading file…', '');
+    const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
+
+    setProgress(15, 'Encrypting…', T.formatBytes(selectedFile.size));
+    document.getElementById('enc-filename').textContent = selectedFile.name;
+
+    const { nonce, ciphertext } = await T.encryptFile(fileBytes, encBytes);
+
+    setProgress(38, 'Computing hashes…', T.formatBytes(ciphertext.length) + ' encrypted');
+    const encFilename = await T.encryptFilename(selectedFile.name, encBytes);
+    const fileNameHash = T.toHex(await T.sha256(encFilename));
+    const contentHash  = T.toHex(await T.sha256(ciphertext));
+    const accessHex    = T.toHex(accessBytes);
+
+    let deletionHex = null;
+    if (deletionPwRaw.trim()) deletionHex = T.toHex(enc.encode(deletionPwRaw));
+
+    setProgress(52, 'Registering upload…', '');
+    const initResp = await T.apiJson('/upload/init', {
+      nonce:             T.toHex(nonce),
+      file_name_hash:    fileNameHash,
+      content_hash:      contentHash,
+      size:              ciphertext.length,
+      access_password:   accessHex,
+      deletion_password: deletionHex,
+      download_limit:    downloadLimit,
+      lifespan,
+    });
+
+    // Fake progress while uploading (fetch has no upload progress)
+    let uploadDone = false;
+    setProgress(62, 'Uploading encrypted bytes…', T.formatBytes(ciphertext.length));
+    const tick = () => {
+      if (uploadDone) return;
+      currentPct += (95 - currentPct) * 0.04;
+      setProgressRaw(currentPct, 'Uploading encrypted bytes…', T.formatBytes(ciphertext.length));
+      hexRaf && requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+
+    await T.apiUploadBytes(initResp.key, ciphertext);
+    uploadDone = true;
+
+    setProgress(100, 'Upload complete', T.formatBytes(ciphertext.length) + ' uploaded');
+    await T.sleep(500);
+    stopHexStream();
+
+    const encFnHex = T.toHex(encFilename);
+    const downloadUrl = `${location.origin}/transfer/download?key=${initResp.key}&fn=${encFnHex}`;
+    const deleteUrl   = deletionHex ? `${location.origin}/transfer/delete?key=${initResp.key}` : null;
+
+    showDone({ downloadUrl, deleteUrl, encPw: encPwRaw, accessPw: accessPwRaw });
+  } catch (e) {
+    stopHexStream();
+    showStage('configure');
+    showError(e.message || String(e));
+  }
+}
+
+function showDone({ downloadUrl, deleteUrl, encPw, accessPw }) {
+  showStage('done');
+  document.getElementById('delete-card').style.display = 'none';
+
+  document.getElementById('done-filename').textContent = selectedFile.name;
+  const lifespanStr = T.lifespanLabel(lifespan);
+  const dlStr = T.downloadLimitLabel(downloadLimit);
+  document.getElementById('done-meta').textContent = `${T.formatBytes(selectedFile.size)} · expires in ${lifespanStr} · ${dlStr}`;
+
+  document.getElementById('done-link').textContent = downloadUrl;
+  document.getElementById('done-link-val').textContent = downloadUrl;
+
+  const encPwInput = document.getElementById('done-enc-pw');
+  encPwInput.value = encPw;
+  encPwInput.type = 'password';
+  document.getElementById('reveal-enc-btn').textContent = 'reveal';
+  document.getElementById('done-enc-pw-val').textContent = encPw;
+
+  const accessPwInput = document.getElementById('done-access-pw');
+  accessPwInput.value = accessPw;
+  accessPwInput.type = 'password';
+  document.getElementById('reveal-access-btn').textContent = 'reveal';
+  document.getElementById('done-access-pw-val').textContent = accessPw;
+
+  document.getElementById('done-both-val').textContent =
+    `${downloadUrl}\nEncryption password: ${encPw}\nAccess password: ${accessPw}`;
+  document.getElementById('copy-both-btn').onclick = () => copyField('copy-both-btn', 'done-both-val', 'copy both');
+
+  if (deleteUrl) {
+    const card = document.getElementById('delete-card');
+    card.style.display = 'flex';
+    document.getElementById('done-delete-link').textContent = deleteUrl;
+    document.getElementById('done-delete-val').textContent = deleteUrl;
+  }
+}
+
+// ── Progress & hex stream ─────────────────────────────────────────────────
+
+function setProgress(pct, status, bytes) {
+  currentPct = pct;
+  setProgressRaw(pct, status, bytes);
+}
+
+function setProgressRaw(pct, status, bytes) {
+  document.getElementById('enc-pct').textContent = Math.round(pct) + '%';
+  document.getElementById('enc-bar').style.width = pct + '%';
+  if (status) document.getElementById('enc-status').textContent = status;
+  if (bytes !== undefined) document.getElementById('enc-bytes').textContent = bytes;
+}
+
+function startHexStream() {
+  hexTick = 0;
+  function step() {
+    hexTick++;
+    const container = document.getElementById('hex-stream');
+    if (!container) return;
+    const chunkBase = Math.floor(hexTick * 2.5);
+    let html = '';
+    for (let i = 0; i < 5; i++) {
+      const chunkNum = chunkBase - (4 - i);
+      if (chunkNum < 0) continue;
+      const hex = T.hexStream(hexTick * 7 + i * 113, 28);
+      html += `<div class="tx-hex-line${i === 4 ? ' hl' : ''}"><span class="tx-hex-chunk">chunk ${String(chunkNum).padStart(4,'0')}</span>${hex}</div>`;
+    }
+    container.innerHTML = html;
+    hexRaf = requestAnimationFrame(step);
+  }
+  hexRaf = requestAnimationFrame(step);
+}
+
+function stopHexStream() {
+  if (hexRaf) { cancelAnimationFrame(hexRaf); hexRaf = null; }
+}
+
+// ── Error ─────────────────────────────────────────────────────────────────
+
+function showError(msg) {
+  const el = document.getElementById('error-box');
+  el.textContent = msg;
+  el.style.display = '';
+}
+function hideError() {
+  document.getElementById('error-box').style.display = 'none';
+}
+
+// ── Copy helpers ──────────────────────────────────────────────────────────
+
+function copyField(btnId, valId, label) {
+  const val = document.getElementById(valId).textContent;
+  try { navigator.clipboard.writeText(val); } catch {}
+  const btn = document.getElementById(btnId);
+  const orig = btn.innerHTML;
+  btn.innerHTML = svgCheck(11) + (label ? ' copied!' : ' copied!');
+  setTimeout(() => { btn.innerHTML = orig; }, 1600);
+}
+
+// ── Inline SVG helpers ────────────────────────────────────────────────────
+
+function toggleReveal(inputId, btnId) {
+  T.toggleReveal(document.getElementById(inputId), document.getElementById(btnId));
+}
+
+function copyAccessPw() {
+  const val = document.getElementById('access-pw').value;
+  try { navigator.clipboard.writeText(val); } catch {}
+  const btn = document.getElementById('copy-access-cfg-btn');
+  const orig = btn.innerHTML;
+  btn.innerHTML = svgCheck(11) + ' copied!';
+  setTimeout(() => { btn.innerHTML = orig; }, 1600);
+}
+
+function svgCheck(s) {
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+}
+function svgX(s) {
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+}
+function svgPlus(s) {
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+}
+</script>
+</body>
+</html>

@@ -3,15 +3,19 @@
 -include .env
 export
 
-.PHONY: fmt test lint run push \
+.PHONY: fmt test test-js lint run push \
 	db-setup db-setup-spot db-setup-spot-create db-setup-paste db-setup-paste-create \
-	db-migrate db-migrate-spot db-migrate-paste migrant db-shell f
+	db-setup-transfer db-setup-transfer-create \
+	db-migrate db-migrate-spot db-migrate-paste db-migrate-transfer migrant db-shell f
 
 fmt:
 	cargo fmt --all
 
 test:
 	./bin/test-db.sh
+
+test-js:
+	node --test crates/transfer/web/static/app.test.mjs
 
 lint:
 	cargo clippy --workspace --tests -- -D warnings
@@ -45,8 +49,18 @@ db-setup-paste-create:
 
 db-setup-paste: db-setup-paste-create db-migrate-paste
 
-db-setup: db-setup-spot db-setup-paste
-db-migrate: db-migrate-spot db-migrate-paste
+db-migrate-transfer: migrant
+	cd migrations/transfer && \
+		migrant setup && \
+		(migrant apply -a || echo "ok")
+
+db-setup-transfer-create:
+	DB_NAME=transfer DB_USER=transfer DB_PASS=transfer DB_HOST=localhost DB_PORT=5432 ./bin/setup-dev-db.sh
+
+db-setup-transfer: db-setup-transfer-create db-migrate-transfer
+
+db-setup: db-setup-spot db-setup-paste db-setup-transfer
+db-migrate: db-migrate-spot db-migrate-paste db-migrate-transfer
 
 db-shell:
 	LOG_LEVEL=info fly pg connect -a kom-db

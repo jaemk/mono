@@ -31,6 +31,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_ID="$(openssl rand -hex 4)"
 SPOT_TEST_DB="spot_test_${TEST_ID}"
 PASTE_TEST_DB="paste_test_${TEST_ID}"
+TRANSFER_TEST_DB="transfer_test_${TEST_ID}"
 
 # ---------------------------------------------------------------------------
 # Load base credentials from .env (if it exists) so DB_HOST / ports etc. are
@@ -55,15 +56,23 @@ PASTE_DB_PASS="${PASTE_DB_PASS:-paste}"
 PASTE_DB_HOST="${PASTE_DB_HOST:-localhost}"
 PASTE_DB_PORT="${PASTE_DB_PORT:-5432}"
 
+TRANSFER_DB_USER="${TRANSFER_DB_USER:-transfer}"
+TRANSFER_DB_PASS="${TRANSFER_DB_PASS:-transfer}"
+TRANSFER_DB_HOST="${TRANSFER_DB_HOST:-localhost}"
+TRANSFER_DB_PORT="${TRANSFER_DB_PORT:-5432}"
+
 # Override database URLs to point at ephemeral DBs.
 export SPOT_DB_NAME="${SPOT_TEST_DB}"
 export PASTE_DB_NAME="${PASTE_TEST_DB}"
+export TRANSFER_DB_NAME="${TRANSFER_TEST_DB}"
 export SPOT_DATABASE_URL="postgres://${SPOT_DB_USER}:${SPOT_DB_PASS}@${SPOT_DB_HOST}:${SPOT_DB_PORT}/${SPOT_TEST_DB}"
 export PASTE_DATABASE_URL="postgres://${PASTE_DB_USER}:${PASTE_DB_PASS}@${PASTE_DB_HOST}:${PASTE_DB_PORT}/${PASTE_TEST_DB}"
+export TRANSFER_DATABASE_URL="postgres://${TRANSFER_DB_USER}:${TRANSFER_DB_PASS}@${TRANSFER_DB_HOST}:${TRANSFER_DB_PORT}/${TRANSFER_TEST_DB}"
 
 echo "==> Test run ID: ${TEST_ID}"
-echo "    SPOT_DATABASE_URL  = ${SPOT_DATABASE_URL}"
-echo "    PASTE_DATABASE_URL = ${PASTE_DATABASE_URL}"
+echo "    SPOT_DATABASE_URL     = ${SPOT_DATABASE_URL}"
+echo "    PASTE_DATABASE_URL    = ${PASTE_DATABASE_URL}"
+echo "    TRANSFER_DATABASE_URL = ${TRANSFER_DATABASE_URL}"
 
 # ---------------------------------------------------------------------------
 # Helper: run psql as the postgres superuser
@@ -85,6 +94,9 @@ cleanup() {
 
     pg_exec "${PASTE_DB_HOST}" "${PASTE_DB_PORT}" \
         "DROP DATABASE IF EXISTS ${PASTE_TEST_DB};" 2>/dev/null || true
+
+    pg_exec "${TRANSFER_DB_HOST}" "${TRANSFER_DB_PORT}" \
+        "DROP DATABASE IF EXISTS ${TRANSFER_TEST_DB};" 2>/dev/null || true
 
     echo "==> Done."
 }
@@ -122,6 +134,21 @@ pg_exec "${PASTE_DB_HOST}" "${PASTE_DB_PORT}" \
     "GRANT ALL PRIVILEGES ON DATABASE ${PASTE_TEST_DB} TO ${PASTE_DB_USER};"
 
 # ---------------------------------------------------------------------------
+# Create ephemeral transfer test database
+# ---------------------------------------------------------------------------
+echo "==> Creating ephemeral transfer database '${TRANSFER_TEST_DB}'..."
+pg_exec "${TRANSFER_DB_HOST}" "${TRANSFER_DB_PORT}" \
+    "DO \$\$ BEGIN
+       IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${TRANSFER_DB_USER}') THEN
+         CREATE ROLE ${TRANSFER_DB_USER} WITH LOGIN PASSWORD '${TRANSFER_DB_PASS}';
+       END IF;
+     END \$\$;"
+pg_exec "${TRANSFER_DB_HOST}" "${TRANSFER_DB_PORT}" \
+    "CREATE DATABASE ${TRANSFER_TEST_DB} OWNER ${TRANSFER_DB_USER};"
+pg_exec "${TRANSFER_DB_HOST}" "${TRANSFER_DB_PORT}" \
+    "GRANT ALL PRIVILEGES ON DATABASE ${TRANSFER_TEST_DB} TO ${TRANSFER_DB_USER};"
+
+# ---------------------------------------------------------------------------
 # Ensure migrant is installed
 # ---------------------------------------------------------------------------
 if ! which migrant > /dev/null 2>&1; then
@@ -139,6 +166,9 @@ echo "==> Running spot migrations on '${SPOT_TEST_DB}'..."
 echo "==> Running paste migrations on '${PASTE_TEST_DB}'..."
 (builtin cd "${ROOT}/migrations/paste" && migrant setup && (migrant apply -a || echo "ok"))
 
+echo "==> Running transfer migrations on '${TRANSFER_TEST_DB}'..."
+(builtin cd "${ROOT}/migrations/transfer" && migrant setup && (migrant apply -a || echo "ok"))
+
 # ---------------------------------------------------------------------------
 # Run the test suite
 # ---------------------------------------------------------------------------
@@ -151,4 +181,11 @@ if [ $# -gt 0 ]; then
 else
     cargo test --workspace -- --test-threads=1
 fi
+
+# ---------------------------------------------------------------------------
+# JS / frontend tests (no DB required)
+# ---------------------------------------------------------------------------
+echo ""
+echo "==> Running JS tests..."
+node --test crates/transfer/web/static/app.test.mjs
 
