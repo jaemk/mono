@@ -36,6 +36,323 @@ pub async fn get_auth(pool: &common::db::DbPool, id: i32) -> anyhow::Result<Opti
 }
 
 // ---------------------------------------------------------------------------
+// TransferUser
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, FromRow)]
+pub struct TransferUser {
+    pub id:           i32,
+    pub email:        String,
+    pub auth_id:      Option<i32>,
+    pub google_sub:   Option<String>,
+    pub date_created: DateTime<Utc>,
+}
+
+pub async fn insert_user(
+    pool: &common::db::DbPool,
+    email: &str,
+    auth_id: Option<i32>,
+    google_sub: Option<&str>,
+) -> anyhow::Result<TransferUser> {
+    let row = sqlx::query_as::<_, TransferUser>(
+        "insert into transfer_user (email, auth_id, google_sub)
+         values ($1, $2, $3) returning *",
+    )
+    .bind(email)
+    .bind(auth_id)
+    .bind(google_sub)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn get_user_by_email(
+    pool: &common::db::DbPool,
+    email: &str,
+) -> anyhow::Result<Option<TransferUser>> {
+    let row = sqlx::query_as::<_, TransferUser>(
+        "select * from transfer_user where email = $1",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn get_user_by_id(
+    pool: &common::db::DbPool,
+    id: i32,
+) -> anyhow::Result<Option<TransferUser>> {
+    let row = sqlx::query_as::<_, TransferUser>(
+        "select * from transfer_user where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn set_user_google_sub(
+    pool: &common::db::DbPool,
+    user_id: i32,
+    google_sub: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("update transfer_user set google_sub = $1 where id = $2")
+        .bind(google_sub)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_user_auth_id(
+    pool: &common::db::DbPool,
+    user_id: i32,
+    auth_id: i32,
+) -> anyhow::Result<()> {
+    sqlx::query("update transfer_user set auth_id = $1 where id = $2")
+        .bind(auth_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PendingRegistration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+pub struct PendingRegistration {
+    pub id:           i32,
+    pub uuid_:        Uuid,
+    pub email:        String,
+    pub auth_id:      i32,
+    pub code_hash:    Vec<u8>,
+    pub attempts:     i32,
+    pub resend_after: DateTime<Utc>,
+    pub expire_date:  DateTime<Utc>,
+    pub date_created: DateTime<Utc>,
+}
+
+pub async fn insert_pending_registration(
+    pool: &common::db::DbPool,
+    uuid_: Uuid,
+    email: &str,
+    auth_id: i32,
+    code_hash: Vec<u8>,
+    expire_date: DateTime<Utc>,
+) -> anyhow::Result<PendingRegistration> {
+    let row = sqlx::query_as::<_, PendingRegistration>(
+        "insert into pending_registration (uuid_, email, auth_id, code_hash, expire_date)
+         values ($1, $2, $3, $4, $5) returning *",
+    )
+    .bind(uuid_)
+    .bind(email)
+    .bind(auth_id)
+    .bind(&code_hash)
+    .bind(expire_date)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn get_pending_registration(
+    pool: &common::db::DbPool,
+    uuid_: Uuid,
+) -> anyhow::Result<Option<PendingRegistration>> {
+    let row = sqlx::query_as::<_, PendingRegistration>(
+        "select * from pending_registration where uuid_ = $1",
+    )
+    .bind(uuid_)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn increment_pending_attempts(
+    pool: &common::db::DbPool,
+    id: i32,
+) -> anyhow::Result<i32> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        "update pending_registration set attempts = attempts + 1 where id = $1 returning attempts",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get(0))
+}
+
+pub async fn set_pending_resend_after(
+    pool: &common::db::DbPool,
+    id: i32,
+    after: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "update pending_registration set resend_after = $1, attempts = 0, code_hash = $2 where id = $3",
+    )
+    .bind(after)
+    .bind(Vec::<u8>::new()) // placeholder; caller updates code_hash separately via update_pending_code
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_pending_code(
+    pool: &common::db::DbPool,
+    id: i32,
+    code_hash: Vec<u8>,
+    resend_after: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "update pending_registration
+         set code_hash = $1, attempts = 0, resend_after = $2
+         where id = $3",
+    )
+    .bind(&code_hash)
+    .bind(resend_after)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_pending_registration(
+    pool: &common::db::DbPool,
+    id: i32,
+) -> anyhow::Result<()> {
+    // Delete the auth row; ON DELETE CASCADE removes the pending_registration row.
+    sqlx::query(
+        "delete from auth where id = (select auth_id from pending_registration where id = $1)",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_pending_by_email(
+    pool: &common::db::DbPool,
+    email: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "delete from auth where id = (select auth_id from pending_registration where email = $1)",
+    )
+    .bind(email)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_expired_pending_registrations(
+    pool: &common::db::DbPool,
+    now: DateTime<Utc>,
+) -> anyhow::Result<u64> {
+    let result = sqlx::query(
+        "delete from auth where id in (
+             select auth_id from pending_registration where expire_date < $1
+         )",
+    )
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+// ---------------------------------------------------------------------------
+// TransferSession
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+pub struct TransferSession {
+    pub id:           i32,
+    pub uuid_:        Uuid,
+    pub user_id:      i32,
+    pub expire_date:  DateTime<Utc>,
+    pub date_created: DateTime<Utc>,
+}
+
+pub async fn insert_session(
+    pool: &common::db::DbPool,
+    token: Uuid,
+    user_id: i32,
+    expire_date: DateTime<Utc>,
+) -> anyhow::Result<TransferSession> {
+    let row = sqlx::query_as::<_, TransferSession>(
+        "insert into transfer_session (uuid_, user_id, expire_date) values ($1, $2, $3) returning *",
+    )
+    .bind(token)
+    .bind(user_id)
+    .bind(expire_date)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn get_session_with_user(
+    pool: &common::db::DbPool,
+    token_uuid: Uuid,
+) -> anyhow::Result<Option<(TransferSession, TransferUser)>> {
+    let session = sqlx::query_as::<_, TransferSession>(
+        "select * from transfer_session where uuid_ = $1",
+    )
+    .bind(token_uuid)
+    .fetch_optional(pool)
+    .await?;
+
+    let session = match session {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let user = sqlx::query_as::<_, TransferUser>(
+        "select * from transfer_user where id = $1",
+    )
+    .bind(session.user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(user.map(|u| (session, u)))
+}
+
+pub async fn renew_session(
+    pool: &common::db::DbPool,
+    session_id: i32,
+    new_expire_date: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query("update transfer_session set expire_date = $1 where id = $2")
+        .bind(new_expire_date)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_session(
+    pool: &common::db::DbPool,
+    token_uuid: Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query("delete from transfer_session where uuid_ = $1")
+        .bind(token_uuid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_expired_sessions(
+    pool: &common::db::DbPool,
+    now: DateTime<Utc>,
+) -> anyhow::Result<u64> {
+    let result = sqlx::query("delete from transfer_session where expire_date < $1")
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+// ---------------------------------------------------------------------------
 // InitUpload — temporary upload session before bytes arrive
 // ---------------------------------------------------------------------------
 
@@ -51,6 +368,7 @@ pub struct InitUpload {
     pub deletion_password: Option<i32>,
     pub download_limit: Option<i32>,
     pub expire_date: DateTime<Utc>,
+    pub user_id: Option<i32>,
     pub date_created: DateTime<Utc>,
 }
 
@@ -66,12 +384,13 @@ pub async fn insert_init_upload(
     deletion_password: Option<i32>,
     download_limit: Option<i32>,
     expire_date: DateTime<Utc>,
+    user_id: Option<i32>,
 ) -> anyhow::Result<InitUpload> {
     let row = sqlx::query_as::<_, InitUpload>(
         "insert into init_upload
          (uuid_, file_name_hash, content_hash, size_, nonce, access_password, deletion_password,
-          download_limit, expire_date)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          download_limit, expire_date, user_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          returning *",
     )
     .bind(uuid_)
@@ -83,6 +402,7 @@ pub async fn insert_init_upload(
     .bind(deletion_password)
     .bind(download_limit)
     .bind(expire_date)
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
     Ok(row)
@@ -125,6 +445,7 @@ pub struct Upload {
     pub download_limit: Option<i32>,
     pub expire_date: DateTime<Utc>,
     pub deleted: bool,
+    pub user_id: Option<i32>,
     pub date_created: DateTime<Utc>,
 }
 
@@ -141,12 +462,13 @@ pub async fn insert_upload(
     deletion_password: Option<i32>,
     download_limit: Option<i32>,
     expire_date: DateTime<Utc>,
+    user_id: Option<i32>,
 ) -> anyhow::Result<Upload> {
     let row = sqlx::query_as::<_, Upload>(
         "insert into upload
          (uuid_, file_name_hash, content_hash, size_, storage_uri, nonce, access_password,
-          deletion_password, download_limit, expire_date)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          deletion_password, download_limit, expire_date, user_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          returning *",
     )
     .bind(uuid_)
@@ -159,6 +481,7 @@ pub async fn insert_upload(
     .bind(deletion_password)
     .bind(download_limit)
     .bind(expire_date)
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
     Ok(row)
@@ -170,6 +493,21 @@ pub async fn get_upload(pool: &common::db::DbPool, uuid_: Uuid) -> anyhow::Resul
             .bind(uuid_)
             .fetch_optional(pool)
             .await?;
+    Ok(row)
+}
+
+pub async fn get_upload_by_uuid_and_owner(
+    pool: &common::db::DbPool,
+    uuid_: Uuid,
+    user_id: i32,
+) -> anyhow::Result<Option<Upload>> {
+    let row = sqlx::query_as::<_, Upload>(
+        "select * from upload where uuid_ = $1 and user_id = $2",
+    )
+    .bind(uuid_)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(row)
 }
 
@@ -196,6 +534,40 @@ pub async fn count_downloads(pool: &common::db::DbPool, upload_id: i32) -> anyho
         .fetch_one(pool)
         .await?;
     Ok(row.get(0))
+}
+
+// ---------------------------------------------------------------------------
+// My Transfers dashboard
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+pub struct MyTransferRow {
+    pub uuid_:          Uuid,
+    pub size_:          i64,
+    pub expire_date:    DateTime<Utc>,
+    pub download_limit: Option<i32>,
+    pub deleted:        bool,
+    pub date_created:   DateTime<Utc>,
+    pub download_count: i64,
+}
+
+pub async fn list_uploads_by_user(
+    pool: &common::db::DbPool,
+    user_id: i32,
+) -> anyhow::Result<Vec<MyTransferRow>> {
+    let rows = sqlx::query_as::<_, MyTransferRow>(
+        "select u.uuid_, u.size_, u.expire_date, u.download_limit, u.deleted, u.date_created,
+                count(d.id) as download_count
+         from upload u
+         left join download d on d.upload_id = u.id
+         where u.user_id = $1
+         group by u.id
+         order by u.date_created desc",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 // ---------------------------------------------------------------------------

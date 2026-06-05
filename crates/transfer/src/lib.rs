@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod config;
 pub mod handlers;
 pub mod models;
@@ -12,7 +13,8 @@ use std::sync::Arc;
 pub type State = Arc<Resources>;
 
 pub struct Resources {
-    pub db: common::db::DbPool,
-    pub s3: aws_sdk_s3::Client,
+    pub db:     common::db::DbPool,
+    pub s3:     aws_sdk_s3::Client,
+    pub http:   reqwest::Client,
     pub config: Config,
 }

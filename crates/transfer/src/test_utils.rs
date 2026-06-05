@@ -24,8 +24,16 @@ pub async fn clean_transfer_db(
         }
     }
 
-    // Truncate in dependency order: children first, then parents.
-    for table in &["download", "init_download", "upload", "init_upload", "auth"] {
+    for table in &[
+        "download",
+        "init_download",
+        "pending_registration",
+        "transfer_session",
+        "upload",
+        "init_upload",
+        "transfer_user",
+        "auth",
+    ] {
         sqlx::query(&format!("truncate {table} restart identity cascade"))
             .execute(pool)
             .await

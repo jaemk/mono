@@ -29,7 +29,7 @@
     <a href="/transfer/download" class="is-active">Receive</a>
   </nav>
   <div class="tx-spacer"></div>
-  <span class="tx-badge"><span class="tx-dot tx-dot-live"></span>AES-256-GCM · client-side</span>
+  <div id="tx-auth-bar"></div>
 </div>
 
 <div class="tx-main">
@@ -168,6 +168,8 @@
 <script src="/transfer/static/app.js"></script>
 <script>
 const T = window.Transfer;
+(async () => { const u = await window.Transfer.checkAuth(); window.Transfer.updateTopbar(u); })();
+
 
 // ── URL params ────────────────────────────────────────────────────────────
 

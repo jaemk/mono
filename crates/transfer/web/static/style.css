@@ -518,3 +518,84 @@ html, body {
   color: var(--accent-fg);
   font-size: 12.5px;
 }
+
+/* ── Auth bar ────────────────────────────────────────── */
+
+#tx-auth-bar { display: flex; align-items: center; gap: 8px; }
+
+/* ── Status chip variants ────────────────────────────── */
+
+.tx-status-live {
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+  border-color: oklch(from var(--accent) l c h / 0.3);
+}
+.tx-status-expired { background: var(--bg-muted); color: var(--fg-mute); }
+.tx-status-deleted {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: oklch(from var(--danger) l c h / 0.3);
+}
+
+/* ── Form page layout ────────────────────────────────── */
+
+.tx-form-page { max-width: 400px; width: 100%; margin: 0 auto; }
+
+/* ── Link ────────────────────────────────────────────── */
+
+.tx-link { color: var(--accent-fg); text-decoration: none; font-weight: 500; }
+.tx-link:hover { text-decoration: underline; }
+
+/* ── Google button ───────────────────────────────────── */
+
+.tx-google-btn { width: 100%; justify-content: center; height: 38px; gap: 8px; font-size: 13px; }
+
+/* ── Or divider ──────────────────────────────────────── */
+
+.tx-or-divider {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--fg-mute); font-size: 11.5px;
+}
+.tx-or-divider::before,
+.tx-or-divider::after { content: ""; flex: 1; height: 0.5px; background: var(--bd); }
+
+/* ── Code input ──────────────────────────────────────── */
+
+.tx-code-input {
+  font-family: var(--font-mono);
+  font-size: 28px; font-weight: 600;
+  letter-spacing: 0.15em; text-align: center;
+  height: 60px;
+}
+
+/* ── Countdown ───────────────────────────────────────── */
+
+.tx-countdown { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-mute); }
+
+/* ── Empty state ─────────────────────────────────────── */
+
+.tx-empty-state {
+  text-align: center; padding: 40px 20px;
+  color: var(--fg-mute); font-size: 13px;
+}
+.tx-empty-state strong {
+  display: block; color: var(--fg-soft); font-weight: 600;
+  margin-bottom: 6px; font-size: 14px;
+}
+
+/* ── Transfer table (my.html) ────────────────────────── */
+
+.tx-table { width: 100%; border-collapse: collapse; }
+.tx-table th {
+  text-align: left; font-size: 11px; font-weight: 500;
+  color: var(--fg-mute); padding: 0 12px 8px;
+  letter-spacing: 0.03em; text-transform: uppercase;
+  border-bottom: 0.5px solid var(--bd);
+}
+.tx-table td {
+  padding: 10px 12px; font-size: 12.5px;
+  border-bottom: 0.5px solid var(--bd-soft);
+  vertical-align: middle;
+}
+.tx-table tr:last-child td { border-bottom: none; }
+.tx-table tr:hover td { background: var(--bg-hover); }

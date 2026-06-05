@@ -13,3 +13,4 @@ sqlx.workspace = true
 chrono.workspace = true
 serde.workspace = true
 log.workspace = true
+lettre.workspace = true

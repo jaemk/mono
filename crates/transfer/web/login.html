@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>transfer — sign in</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/transfer/static/style.css">
+</head>
+<body>
+
+<div class="tx-topbar">
+  <a class="tx-brand" href="/transfer">
+    <span class="tx-brand-mark">tx</span>
+    transfer
+  </a>
+  <nav class="tx-nav">
+    <a href="/transfer">Send</a>
+    <a href="/transfer/download">Receive</a>
+  </nav>
+  <div class="tx-spacer"></div>
+  <div id="tx-auth-bar"></div>
+</div>
+
+<div class="tx-main">
+  <div class="tx-container tx-form-page">
+
+    <div>
+      <div class="tx-display">Sign in</div>
+      <div class="tx-meta" style="margin-top:4px">Track and manage your encrypted transfers.</div>
+    </div>
+
+    <div class="tx-error" id="error-box" style="display:none"></div>
+
+    <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+
+      <!-- Google sign-in -->
+      <div id="google-section" style="display:none">
+        <div id="google-btn-container"></div>
+      </div>
+
+      <div class="tx-or-divider" id="or-divider" style="display:none">or</div>
+
+      <!-- Email / password -->
+      <div id="email-section" style="display:none;flex-direction:column;gap:var(--gap-stack)">
+        <div>
+          <label class="tx-label" for="login-email">Email</label>
+          <input type="email" class="tx-input" id="login-email" placeholder="you@example.com" autocomplete="email">
+        </div>
+        <div>
+          <label class="tx-label" for="login-password">Password</label>
+          <input type="password" class="tx-input" id="login-password" placeholder="your password" autocomplete="current-password"
+                 onkeydown="if(event.key==='Enter')doLogin()">
+        </div>
+        <button class="tx-btn is-primary" id="login-btn" style="width:100%;justify-content:center;height:38px" onclick="doLogin()">Sign in</button>
+      </div>
+
+      <div style="text-align:center;font-size:12px;color:var(--fg-mute)">
+        No account? <a class="tx-link" href="/transfer/register">Create one</a>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/transfer/static/app.js"></script>
+<script>
+const T = window.Transfer;
+let googleClientId = null;
+
+(async function init() {
+  const me = await T.checkAuth();
+  if (me) {
+    const redirect = new URLSearchParams(location.search).get('redirect') || '/transfer/my';
+    location.href = redirect;
+    return;
+  }
+  T.updateTopbar(null);
+
+  try {
+    const d = await T.apiGet('/upload/defaults');
+    if (d.google_enabled && d.google_client_id) {
+      googleClientId = d.google_client_id;
+      document.getElementById('google-section').style.display = '';
+      loadGSI(d.google_client_id);
+    }
+    if (d.email_enabled) {
+      document.getElementById('email-section').style.display = 'flex';
+    }
+    if (d.google_enabled && d.email_enabled) {
+      document.getElementById('or-divider').style.display = '';
+    }
+    if (!d.google_enabled && !d.email_enabled) {
+      showError('Authentication is not configured on this server.');
+    }
+  } catch (e) {
+    showError('Failed to load config: ' + (e.message || e));
+  }
+})();
+
+function loadGSI(clientId) {
+  const s = document.createElement('script');
+  s.src = 'https://accounts.google.com/gsi/client';
+  s.async = true;
+  s.onload = () => {
+    google.accounts.id.initialize({ client_id: clientId, callback: onGoogleCredential });
+    google.accounts.id.renderButton(document.getElementById('google-btn-container'), {
+      type: 'standard', size: 'large', width: 356,
+    });
+  };
+  document.head.appendChild(s);
+}
+
+async function onGoogleCredential(resp) {
+  hideError();
+  try {
+    await T.apiJson('/auth/google', { id_token: resp.credential });
+    const redirect = new URLSearchParams(location.search).get('redirect') || '/transfer/my';
+    location.href = redirect;
+  } catch (e) {
+    showError(e.message || 'Google sign-in failed');
+  }
+}
+
+async function doLogin() {
+  const email    = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  if (!email || !password) return showError('Enter your email and password.');
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  hideError();
+  try {
+    await T.apiJson('/auth/login', { email, password });
+    const redirect = new URLSearchParams(location.search).get('redirect') || '/transfer/my';
+    location.href = redirect;
+  } catch (e) {
+    showError(e.message || 'Sign in failed');
+    btn.disabled = false; btn.textContent = 'Sign in';
+  }
+}
+
+function showError(msg) { const e = document.getElementById('error-box'); e.textContent = msg; e.style.display = ''; }
+function hideError()    { document.getElementById('error-box').style.display = 'none'; }
+</script>
+</body>
+</html>

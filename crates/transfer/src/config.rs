@@ -7,16 +7,15 @@ pub struct Config {
     pub s3_bucket: String,
     pub s3_endpoint: String,
     pub s3_region: String,
-    /// Maximum size of a single upload in bytes (default 300 MB).
     pub upload_limit_bytes: usize,
-    /// Seconds after which an uncommitted init_upload expires (default 300).
     pub upload_timeout_secs: i64,
-    /// Default upload lifespan in seconds (default 7 days).
     pub upload_lifespan_secs_default: i64,
-    /// Seconds after which an init_download token expires (default 300).
     pub download_timeout_secs: i64,
-    /// How often the sweeper runs in seconds (default 120).
     pub expired_cleanup_interval_secs: u64,
+    pub google_client_id: Option<String>,
+    pub smtp_config: Option<common::smtp::SmtpConfig>,
+    pub base_url: String,
+    pub registration_code_secs: i64,
 }
 
 impl Config {
@@ -59,6 +58,23 @@ impl Config {
             )
             .parse()
             .unwrap_or(120),
+            google_client_id: std::env::var("TRANSFER_GOOGLE_CLIENT_ID").ok(),
+            smtp_config: common::smtp::SmtpConfig::from_env().ok(),
+            base_url: common::utils::env_or("TRANSFER_BASE_URL", "http://localhost:3000"),
+            registration_code_secs: common::utils::env_or(
+                "TRANSFER_REGISTRATION_CODE_SECS",
+                "600",
+            )
+            .parse()
+            .unwrap_or(600),
         }
+    }
+
+    pub fn smtp_enabled(&self) -> bool {
+        self.smtp_config.is_some()
+    }
+
+    pub fn google_enabled(&self) -> bool {
+        self.google_client_id.is_some()
     }
 }

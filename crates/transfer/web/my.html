@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>transfer — my transfers</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/transfer/static/style.css">
+</head>
+<body>
+
+<div class="tx-topbar">
+  <a class="tx-brand" href="/transfer">
+    <span class="tx-brand-mark">tx</span>
+    transfer
+  </a>
+  <nav class="tx-nav">
+    <a href="/transfer">Send</a>
+    <a href="/transfer/download">Receive</a>
+  </nav>
+  <div class="tx-spacer"></div>
+  <div id="tx-auth-bar"></div>
+</div>
+
+<div class="tx-main">
+  <div class="tx-container" style="max-width:720px">
+
+    <div class="tx-row" style="justify-content:space-between;align-items:baseline">
+      <div class="tx-display">My transfers</div>
+      <a class="tx-btn is-primary is-sm" href="/transfer">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New transfer
+      </a>
+    </div>
+
+    <div class="tx-error" id="error-box" style="display:none"></div>
+
+    <div id="loading" class="tx-meta" style="text-align:center;padding:20px">Loading…</div>
+
+    <div id="empty-state" class="tx-empty-state" style="display:none">
+      <strong>No transfers yet</strong>
+      Upload a file to get started — your transfers will appear here.
+    </div>
+
+    <div id="transfers-wrap" style="display:none">
+      <div class="tx-card" style="overflow:hidden">
+        <table class="tx-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Size</th>
+              <th>Created</th>
+              <th>Expires</th>
+              <th>Downloads</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="transfers-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/transfer/static/app.js"></script>
+<script>
+const T = window.Transfer;
+
+(async function init() {
+  const me = await T.checkAuth();
+  if (!me) { location.href = '/transfer/login?redirect=/transfer/my'; return; }
+  T.updateTopbar(me);
+  await loadTransfers();
+})();
+
+async function loadTransfers() {
+  try {
+    const items = await T.apiGet('/my/transfers');
+    document.getElementById('loading').style.display = 'none';
+    if (!items.length) {
+      document.getElementById('empty-state').style.display = '';
+      return;
+    }
+    renderTransfers(items);
+    document.getElementById('transfers-wrap').style.display = '';
+  } catch (e) {
+    document.getElementById('loading').style.display = 'none';
+    showError(e.message || 'Failed to load transfers');
+  }
+}
+
+function renderTransfers(items) {
+  const tbody = document.getElementById('transfers-body');
+  tbody.innerHTML = items.map(item => {
+    const status   = item.deleted ? 'deleted' : item.expired ? 'expired' : 'live';
+    const chipCls  = status === 'live' ? 'tx-status-live' : status === 'expired' ? 'tx-status-expired' : 'tx-status-deleted';
+    const dlCount  = item.download_limit ? `${item.download_count}/${item.download_limit}` : String(item.download_count);
+    const expiry   = new Date(item.expire_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const created  = T.relativeTime(item.date_created);
+    const linkHref = `/transfer/download?key=${item.key}`;
+    const canDelete = !item.deleted;
+    return `<tr>
+      <td><span class="tx-badge ${chipCls}">${status}</span></td>
+      <td class="tx-mono" style="font-size:12px">${T.formatBytes(item.size)}</td>
+      <td class="tx-meta">${created}</td>
+      <td class="tx-meta">${item.deleted || item.expired ? '—' : expiry}</td>
+      <td class="tx-meta tx-mono" style="font-size:12px">${dlCount}</td>
+      <td>
+        <div class="tx-row" style="gap:6px;justify-content:flex-end">
+          ${status === 'live' ? `<a class="tx-btn is-sm is-ghost" href="${linkHref}">view</a>` : ''}
+          ${canDelete ? `<button class="tx-btn is-sm is-ghost" style="color:var(--danger)" onclick="doDelete('${item.key}', this)">delete</button>` : ''}
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function doDelete(key, btn) {
+  if (!confirm('Delete this transfer? This cannot be undone.')) return;
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await T.apiJson('/my/delete', { key });
+    await loadTransfers();
+  } catch (e) {
+    showError(e.message || 'Delete failed');
+    btn.disabled = false; btn.textContent = 'delete';
+  }
+}
+
+function showError(msg) { const e = document.getElementById('error-box'); e.textContent = msg; e.style.display = ''; }
+</script>
+</body>
+</html>

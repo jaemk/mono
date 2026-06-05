@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>transfer — create account</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/transfer/static/style.css">
+</head>
+<body>
+
+<div class="tx-topbar">
+  <a class="tx-brand" href="/transfer">
+    <span class="tx-brand-mark">tx</span>
+    transfer
+  </a>
+  <nav class="tx-nav">
+    <a href="/transfer">Send</a>
+    <a href="/transfer/download">Receive</a>
+  </nav>
+  <div class="tx-spacer"></div>
+  <div id="tx-auth-bar"></div>
+</div>
+
+<div class="tx-main">
+  <div class="tx-container tx-form-page">
+
+    <div>
+      <div class="tx-display" id="page-title">Create account</div>
+      <div class="tx-meta" id="page-sub" style="margin-top:4px">Track and manage your encrypted transfers.</div>
+    </div>
+
+    <div class="tx-error" id="error-box" style="display:none"></div>
+
+    <!-- Stage: registration form -->
+    <div id="stage-form" class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+      <div>
+        <label class="tx-label" for="reg-email">Email</label>
+        <input type="email" class="tx-input" id="reg-email" placeholder="you@example.com" autocomplete="email">
+      </div>
+      <div>
+        <label class="tx-label" for="reg-password">Password <span style="color:var(--danger)">*</span></label>
+        <input type="password" class="tx-input" id="reg-password" placeholder="at least 8 characters" autocomplete="new-password"
+               onkeydown="if(event.key==='Enter')doRegister()">
+      </div>
+      <button class="tx-btn is-primary" id="reg-btn" style="width:100%;justify-content:center;height:38px" onclick="doRegister()">Create account</button>
+      <div style="text-align:center;font-size:12px;color:var(--fg-mute)">
+        Already have an account? <a class="tx-link" href="/transfer/login">Sign in</a>
+      </div>
+    </div>
+
+    <!-- Stage: verify code -->
+    <div id="stage-verify" style="display:none">
+      <div class="tx-card" style="padding:var(--pad-card);display:flex;flex-direction:column;gap:var(--gap-stack)">
+        <div>
+          <div style="font-size:13px;font-weight:500;margin-bottom:4px">Check your email</div>
+          <div class="tx-meta">We sent a 6-digit code to <strong id="verify-email-display" style="color:var(--fg-soft)"></strong></div>
+        </div>
+        <div>
+          <label class="tx-label" for="verify-code">Verification code</label>
+          <input type="text" class="tx-input tx-code-input" id="verify-code" placeholder="000000"
+                 maxlength="6" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"
+                 onkeydown="if(event.key==='Enter')doVerify()">
+        </div>
+        <button class="tx-btn is-primary" id="verify-btn" style="width:100%;justify-content:center;height:38px" onclick="doVerify()">Verify</button>
+        <div class="tx-row" style="justify-content:space-between">
+          <span class="tx-countdown" id="resend-countdown"></span>
+          <button class="tx-btn is-sm is-ghost" id="resend-btn" onclick="doResend()" disabled>Resend code</button>
+        </div>
+        <div style="text-align:center;font-size:12px;color:var(--fg-mute)">
+          Wrong email? <a class="tx-link" href="/transfer/register">Start over</a>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/transfer/static/app.js"></script>
+<script>
+const T = window.Transfer;
+let pendingId    = null;
+let resendTimer  = null;
+let resendSecs   = 0;
+
+(async function init() {
+  const me = await T.checkAuth();
+  if (me) { location.href = '/transfer/my'; return; }
+  T.updateTopbar(null);
+
+  try {
+    const d = await T.apiGet('/upload/defaults');
+    if (!d.email_enabled) {
+      document.getElementById('stage-form').innerHTML =
+        '<div class="tx-meta" style="text-align:center">Email registration is not enabled on this server.</div>';
+    }
+  } catch {}
+})();
+
+async function doRegister() {
+  const email    = document.getElementById('reg-email').value.trim();
+  const password = document.getElementById('reg-password').value;
+  if (!email)          return showError('Enter your email address.');
+  if (password.length < 8) return showError('Password must be at least 8 characters.');
+  const btn = document.getElementById('reg-btn');
+  btn.disabled = true; btn.textContent = 'Creating account…';
+  hideError();
+  try {
+    const r = await T.apiJson('/auth/register', { email, password });
+    pendingId = r.pending_id;
+    document.getElementById('verify-email-display').textContent = email;
+    document.getElementById('stage-form').style.display = 'none';
+    document.getElementById('stage-verify').style.display = '';
+    document.getElementById('page-title').textContent = 'Verify your email';
+    document.getElementById('page-sub').textContent = 'Enter the code we sent you to complete registration.';
+    startResendCountdown(60);
+  } catch (e) {
+    showError(e.message || 'Registration failed');
+    btn.disabled = false; btn.textContent = 'Create account';
+  }
+}
+
+async function doVerify() {
+  const code = document.getElementById('verify-code').value.trim();
+  if (code.length !== 6) return showError('Enter the 6-digit code from your email.');
+  const btn = document.getElementById('verify-btn');
+  btn.disabled = true; btn.textContent = 'Verifying…';
+  hideError();
+  try {
+    await T.apiJson('/auth/verify-code', { pending_id: pendingId, code });
+    location.href = '/transfer/my';
+  } catch (e) {
+    showError(e.message || 'Verification failed');
+    btn.disabled = false; btn.textContent = 'Verify';
+  }
+}
+
+async function doResend() {
+  if (!pendingId) return;
+  const btn = document.getElementById('resend-btn');
+  btn.disabled = true;
+  hideError();
+  try {
+    await T.apiJson('/auth/resend-code', { pending_id: pendingId });
+    startResendCountdown(60);
+  } catch (e) {
+    showError(e.message || 'Failed to resend');
+    btn.disabled = false;
+  }
+}
+
+function startResendCountdown(secs) {
+  resendSecs = secs;
+  const btn = document.getElementById('resend-btn');
+  const countdown = document.getElementById('resend-countdown');
+  btn.disabled = true;
+  clearInterval(resendTimer);
+  resendTimer = setInterval(() => {
+    resendSecs--;
+    if (resendSecs <= 0) {
+      clearInterval(resendTimer);
+      countdown.textContent = '';
+      btn.disabled = false;
+    } else {
+      countdown.textContent = 'Resend in ' + resendSecs + 's';
+    }
+  }, 1000);
+  countdown.textContent = 'Resend in ' + resendSecs + 's';
+}
+
+function showError(msg) { const e = document.getElementById('error-box'); e.textContent = msg; e.style.display = ''; }
+function hideError()    { document.getElementById('error-box').style.display = 'none'; }
+</script>
+</body>
+</html>

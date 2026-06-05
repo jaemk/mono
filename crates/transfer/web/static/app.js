@@ -161,6 +161,49 @@ function genAccessPassword() {
   return Array.from(bytes).map(b => chars[b % chars.length]).join('');
 }
 
+// ── Auth helpers ──────────────────────────────────────────────────────────
+
+async function checkAuth() {
+  try {
+    const res = await fetch(BASE + '/auth/me');
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function logout() {
+  try { await fetch(BASE + '/auth/logout', { method: 'POST' }); } catch {}
+  location.href = '/transfer/login';
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function updateTopbar(user) {
+  const bar = document.getElementById('tx-auth-bar');
+  if (!bar) return;
+  if (user) {
+    bar.innerHTML =
+      `<a class="tx-btn is-sm is-ghost" href="/transfer/my">my transfers</a>` +
+      `<span class="tx-meta" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px">${escapeHtml(user.email)}</span>` +
+      `<button class="tx-btn is-sm is-ghost" onclick="window.Transfer.logout()">sign out</button>`;
+  } else {
+    bar.innerHTML = `<a class="tx-btn is-sm" href="/transfer/login">sign in</a>`;
+  }
+}
+
+function relativeTime(iso) {
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60)    return 'just now';
+  if (secs < 3600)  return Math.floor(secs / 60) + ' min ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + ' hr ago';
+  const days = Math.floor(secs / 86400);
+  return days + (days === 1 ? ' day ago' : ' days ago');
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────
 
 const Transfer = {
@@ -173,6 +216,7 @@ const Transfer = {
   genAccessPassword,
   toggleReveal, isDecryptReady,
   fileExtension, lifespanLabel, downloadLimitLabel,
+  checkAuth, logout, updateTopbar, relativeTime, escapeHtml,
   BASE,
 };
 // Browser: expose as window.Transfer; Node (tests): export as CommonJS module.

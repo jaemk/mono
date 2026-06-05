@@ -3,7 +3,6 @@ use tracing::{debug, error, info};
 
 use crate::{models, storage, State};
 
-/// Stable numeric encoding of "trns_sw" for the advisory lock.
 const TRANSFER_SWEEP_LOCK_ID: i64 = 0x74726e735f737700_u64 as i64;
 
 pub fn start(state: State) {
@@ -59,6 +58,22 @@ pub fn start(state: State) {
                 Err(e) => {
                     error!("transfer sweeper: error deleting expired init_downloads: {e}")
                 }
+            }
+
+            match models::delete_expired_pending_registrations(&state.db, now).await {
+                Ok(n) if n > 0 => {
+                    info!("transfer sweeper: deleted {n} expired pending_registration rows")
+                }
+                Ok(_) => {}
+                Err(e) => error!(
+                    "transfer sweeper: error deleting expired pending_registrations: {e}"
+                ),
+            }
+
+            match models::delete_expired_sessions(&state.db, now).await {
+                Ok(n) if n > 0 => info!("transfer sweeper: deleted {n} expired session rows"),
+                Ok(_) => {}
+                Err(e) => error!("transfer sweeper: error deleting expired sessions: {e}"),
             }
 
             match models::get_expired_uploads(&state.db, now).await {
