@@ -109,6 +109,7 @@ async fn insert_fake_upload(
         deletion_auth_id,
         download_limit,
         expire_date,
+        None, // user_id (anonymous upload)
     )
     .await
     .unwrap()
@@ -577,7 +578,6 @@ async fn test_download_confirm_correct_hash_returns_file_name_hash() {
     setup(&state).await;
 }
 
-
 // ---------------------------------------------------------------------------
 // Input validation — no DB / S3 required
 // ---------------------------------------------------------------------------
@@ -724,7 +724,10 @@ async fn test_download_confirm_invalid_hash_hex_with_record() {
     let expire = Utc::now() + chrono::Duration::hours(1);
     let upload = insert_fake_upload(&state, b"pw", None, None, expire).await;
     let tok = transfer::models::insert_init_download(
-        &state.db, uuid::Uuid::new_v4(), "confirm", upload.id,
+        &state.db,
+        uuid::Uuid::new_v4(),
+        "confirm",
+        upload.id,
     )
     .await
     .unwrap();
@@ -740,7 +743,10 @@ async fn test_download_confirm_invalid_hash_hex_with_record() {
         }))
         .await;
     resp.assert_status(StatusCode::BAD_REQUEST);
-    assert_eq!(resp.json::<serde_json::Value>()["error"], "invalid hash hex");
+    assert_eq!(
+        resp.json::<serde_json::Value>()["error"],
+        "invalid hash hex"
+    );
 
     setup(&state).await;
 }
@@ -886,7 +892,7 @@ async fn test_download_init_returns_correct_fields() {
 
     assert_eq!(body["nonce"].as_str().unwrap(), hex::encode(&nonce_bytes));
     assert_eq!(body["size"].as_i64().unwrap(), 64); // insert_fake_upload uses size=64
-    // download_key and confirm_key must be valid UUIDs.
+                                                    // download_key and confirm_key must be valid UUIDs.
     body["download_key"]
         .as_str()
         .unwrap()
@@ -941,14 +947,16 @@ async fn test_download_key_expired_returns_not_found() {
     let expire = Utc::now() + chrono::Duration::hours(1);
     let upload = insert_fake_upload(&state, b"pw", None, None, expire).await;
     let tok = transfer::models::insert_init_download(
-        &state.db, uuid::Uuid::new_v4(), "content", upload.id,
+        &state.db,
+        uuid::Uuid::new_v4(),
+        "content",
+        upload.id,
     )
     .await
     .unwrap();
 
     // Age the download token past the timeout.
-    let old_time =
-        Utc::now() - chrono::Duration::seconds(state.config.download_timeout_secs + 60);
+    let old_time = Utc::now() - chrono::Duration::seconds(state.config.download_timeout_secs + 60);
     sqlx::query("update init_download set date_created = $1 where id = $2")
         .bind(old_time)
         .bind(tok.id)
@@ -983,7 +991,10 @@ async fn test_download_wrong_access_password_returns_unauthorized() {
     let expire = Utc::now() + chrono::Duration::hours(1);
     let upload = insert_fake_upload(&state, b"correct", None, None, expire).await;
     let tok = transfer::models::insert_init_download(
-        &state.db, uuid::Uuid::new_v4(), "content", upload.id,
+        &state.db,
+        uuid::Uuid::new_v4(),
+        "content",
+        upload.id,
     )
     .await
     .unwrap();
@@ -1013,7 +1024,10 @@ async fn test_download_confirm_token_cannot_be_used_for_download() {
     let expire = Utc::now() + chrono::Duration::hours(1);
     let upload = insert_fake_upload(&state, b"pw", None, None, expire).await;
     let confirm_tok = transfer::models::insert_init_download(
-        &state.db, uuid::Uuid::new_v4(), "confirm", upload.id,
+        &state.db,
+        uuid::Uuid::new_v4(),
+        "confirm",
+        upload.id,
     )
     .await
     .unwrap();
@@ -1045,13 +1059,15 @@ async fn test_download_confirm_key_expired_returns_not_found() {
     let expire = Utc::now() + chrono::Duration::hours(1);
     let upload = insert_fake_upload(&state, b"pw", None, None, expire).await;
     let tok = transfer::models::insert_init_download(
-        &state.db, uuid::Uuid::new_v4(), "confirm", upload.id,
+        &state.db,
+        uuid::Uuid::new_v4(),
+        "confirm",
+        upload.id,
     )
     .await
     .unwrap();
 
-    let old_time =
-        Utc::now() - chrono::Duration::seconds(state.config.download_timeout_secs + 60);
+    let old_time = Utc::now() - chrono::Duration::seconds(state.config.download_timeout_secs + 60);
     sqlx::query("update init_download set date_created = $1 where id = $2")
         .bind(old_time)
         .bind(tok.id)
@@ -1088,7 +1104,10 @@ async fn test_download_content_token_cannot_be_used_for_confirm() {
     let expire = Utc::now() + chrono::Duration::hours(1);
     let upload = insert_fake_upload(&state, b"pw", None, None, expire).await;
     let content_tok = transfer::models::insert_init_download(
-        &state.db, uuid::Uuid::new_v4(), "content", upload.id,
+        &state.db,
+        uuid::Uuid::new_v4(),
+        "content",
+        upload.id,
     )
     .await
     .unwrap();
@@ -1119,7 +1138,10 @@ async fn test_download_confirm_is_single_use() {
     // insert_fake_upload uses content_hash = 0xEF×32.
     let upload = insert_fake_upload(&state, b"pw", None, None, expire).await;
     let tok = transfer::models::insert_init_download(
-        &state.db, uuid::Uuid::new_v4(), "confirm", upload.id,
+        &state.db,
+        uuid::Uuid::new_v4(),
+        "confirm",
+        upload.id,
     )
     .await
     .unwrap();
@@ -1140,10 +1162,7 @@ async fn test_download_confirm_is_single_use() {
         .assert_status_ok();
 
     // Second call with the same token → NOT_FOUND.
-    let resp2 = server
-        .post("/api/download/confirm")
-        .json(&payload)
-        .await;
+    let resp2 = server.post("/api/download/confirm").json(&payload).await;
     resp2.assert_status(StatusCode::NOT_FOUND);
 
     setup(&state).await;
@@ -1193,14 +1212,9 @@ async fn test_sweep_deletes_expired_init_downloads() {
 
     // Insert three init_download tokens.
     for usage in &["content", "confirm", "content"] {
-        transfer::models::insert_init_download(
-            &state.db,
-            uuid::Uuid::new_v4(),
-            usage,
-            upload.id,
-        )
-        .await
-        .unwrap();
+        transfer::models::insert_init_download(&state.db, uuid::Uuid::new_v4(), usage, upload.id)
+            .await
+            .unwrap();
     }
 
     let cutoff = Utc::now() + chrono::Duration::seconds(1);
@@ -1278,7 +1292,7 @@ async fn test_two_pw_upload_records_access_password_only() {
 
     // Two clearly distinct passwords — neither is a substring of the other.
     let access_pw_hex = hex::encode(b"Abc123DefGhi456JklMno789PqrStu0v"); // 32-char random
-    let enc_pw_hex    = hex::encode(b"completely-different-enc-key-here");
+    let enc_pw_hex = hex::encode(b"completely-different-enc-key-here");
 
     // Upload init records access_password (not enc_pw).
     let init_resp = server

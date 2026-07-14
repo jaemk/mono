@@ -65,9 +65,9 @@ pub fn start(state: State) {
                     info!("transfer sweeper: deleted {n} expired pending_registration rows")
                 }
                 Ok(_) => {}
-                Err(e) => error!(
-                    "transfer sweeper: error deleting expired pending_registrations: {e}"
-                ),
+                Err(e) => {
+                    error!("transfer sweeper: error deleting expired pending_registrations: {e}")
+                }
             }
 
             match models::delete_expired_sessions(&state.db, now).await {

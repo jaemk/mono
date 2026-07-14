@@ -35,11 +35,12 @@ async fn main() {
         .await
         .expect("failed to initialize paste state");
 
-    let transfer_state = transfer::service::init(transfer::Config::load())
-        .await
-        .expect("failed to initialize transfer state");
-
-    let app = app(spot_state, paste_state, transfer_state);
+    // transfer sub-site temporarily disabled; re-enable by restoring:
+    //   let transfer_state = transfer::service::init(transfer::Config::load())
+    //       .await
+    //       .expect("failed to initialize transfer state");
+    // and passing transfer_state to app(...).
+    let app = app(spot_state, paste_state);
     let addr = CONFIG.get_host_port();
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

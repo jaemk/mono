@@ -52,9 +52,7 @@
           </label>
           <input type="password" class="tx-input" id="deletion-pw"
                  placeholder="set when the file was uploaded"
-                 autocomplete="current-password"
-                 oninput="document.getElementById('delete-btn').disabled = !this.value.trim()"
-                 onkeydown="if(event.key==='Enter')doDelete()">
+                 autocomplete="current-password">
         </div>
 
         <div style="display:flex;gap:8px">
@@ -63,7 +61,7 @@
           </a>
           <button class="tx-btn is-danger" id="delete-btn"
                   style="flex:1;justify-content:center"
-                  disabled onclick="doDelete()">
+                  disabled>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
             Delete transfer
           </button>
@@ -99,44 +97,6 @@
 </div>
 
 <script src="/transfer/static/app.js"></script>
-<script>
-const T = window.Transfer;
-(async () => { const u = await window.Transfer.checkAuth(); window.Transfer.updateTopbar(u); })();
-
-const params = new URLSearchParams(location.search);
-const uploadKey = params.get('key');
-
-if (!uploadKey) {
-  document.getElementById('no-key-box').style.display = '';
-  document.getElementById('delete-form').style.display = 'none';
-}
-
-async function doDelete() {
-  const pw = document.getElementById('deletion-pw').value;
-  if (!pw.trim()) return;
-
-  const btn = document.getElementById('delete-btn');
-  btn.disabled = true;
-  btn.innerHTML = 'Deleting…';
-  document.getElementById('error-box').style.display = 'none';
-
-  try {
-    const enc = new TextEncoder();
-    await T.apiJson('/upload/delete', {
-      key:              uploadKey,
-      deletion_password: T.toHex(enc.encode(pw)),
-    });
-
-    document.getElementById('delete-form').style.display = 'none';
-    document.getElementById('success-box').style.display = 'flex';
-  } catch (e) {
-    btn.disabled = false;
-    btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg> Delete transfer`;
-    const err = document.getElementById('error-box');
-    err.textContent = e.message || String(e);
-    err.style.display = '';
-  }
-}
-</script>
+<script src="/transfer/static/delete.page.js"></script>
 </body>
 </html>

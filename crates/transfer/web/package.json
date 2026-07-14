@@ -1,5 +1,8 @@
 {
   "scripts": {
-    "test": "node --test static/app.test.mjs"
+    "test": "node --test \"static/*.test.mjs\""
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
   }
 }

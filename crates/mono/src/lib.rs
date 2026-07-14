@@ -21,7 +21,6 @@ lazy_static::lazy_static! {
 pub struct AppState {
     pub spot_state: spot::SpotState,
     pub paste_state: paste::State,
-    pub transfer_state: transfer::State,
 }
 
 impl FromRef<AppState> for spot::SpotState {
@@ -36,26 +35,17 @@ impl FromRef<AppState> for paste::State {
     }
 }
 
-impl FromRef<AppState> for transfer::State {
-    fn from_ref(state: &AppState) -> Self {
-        state.transfer_state.clone()
-    }
-}
-
-pub fn app(
-    spot_state: spot::SpotState,
-    paste_state: paste::State,
-    transfer_state: transfer::State,
-) -> Router {
+pub fn app(spot_state: spot::SpotState, paste_state: paste::State) -> Router {
     let state = AppState {
         spot_state,
         paste_state,
-        transfer_state,
     };
     Router::new()
         .nest("/spot", spot::service::router(state.clone()))
         .nest("/paste", paste::service::router(state.clone()))
-        .nest("/transfer", transfer::service::router(state.clone()))
+        // transfer sub-site temporarily disabled; re-enable by restoring
+        // transfer_state (AppState field, FromRef, main.rs init) and:
+        //   .nest("/transfer", transfer::service::router(state.clone()))
         .route("/", get(handlers::root_handler))
         .route("/status", get(handlers::status_handler))
         .route("/favicon.ico", get(handlers::favicon_handler))

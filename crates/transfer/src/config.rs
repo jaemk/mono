@@ -61,12 +61,9 @@ impl Config {
             google_client_id: std::env::var("TRANSFER_GOOGLE_CLIENT_ID").ok(),
             smtp_config: common::smtp::SmtpConfig::from_env().ok(),
             base_url: common::utils::env_or("TRANSFER_BASE_URL", "http://localhost:3000"),
-            registration_code_secs: common::utils::env_or(
-                "TRANSFER_REGISTRATION_CODE_SECS",
-                "600",
-            )
-            .parse()
-            .unwrap_or(600),
+            registration_code_secs: common::utils::env_or("TRANSFER_REGISTRATION_CODE_SECS", "600")
+                .parse()
+                .unwrap_or(600),
         }
     }
 

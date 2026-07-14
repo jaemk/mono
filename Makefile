@@ -15,7 +15,7 @@ test:
 	./bin/test-db.sh
 
 test-js:
-	node --test crates/transfer/web/static/app.test.mjs
+	node --test "crates/transfer/web/static/*.test.mjs"
 
 lint:
 	cargo clippy --workspace --tests -- -D warnings

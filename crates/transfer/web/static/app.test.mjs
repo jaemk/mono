@@ -348,3 +348,296 @@ test('downloadLimitLabel: >1 is plural', () => {
   assert.equal(T.downloadLimitLabel(3), '3 downloads');
   assert.equal(T.downloadLimitLabel(10), '10 downloads');
 });
+
+// ── Test doubles ──────────────────────────────────────────────────────────
+// app.js depends on a handful of browser globals (fetch, document, location,
+// Date). The helpers below install minimal stubs and always restore the
+// previous value, so tests stay isolated and order-independent.
+
+// Build a fake Response. `body` is returned from .json(); `ok`/`status` model
+// the HTTP result. `throwJson` makes .json() reject (malformed-body case).
+function fakeResponse({ ok = true, status = 200, statusText = '', body = {}, throwJson = false } = {}) {
+  return {
+    ok,
+    status,
+    statusText,
+    json: async () => { if (throwJson) throw new Error('invalid json'); return body; },
+  };
+}
+
+// Install a fetch stub that records every call and returns `responder(url, opts)`.
+// Returns { calls, restore }.
+function stubFetch(responder) {
+  const calls = [];
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return responder(url, opts);
+  };
+  return { calls, restore: () => { globalThis.fetch = prev; } };
+}
+
+// ── apiGet ────────────────────────────────────────────────────────────────
+
+test('apiGet: returns parsed json on 2xx and hits BASE + path', async () => {
+  const f = stubFetch(() => fakeResponse({ body: { hello: 'world' } }));
+  try {
+    const out = await T.apiGet('/status');
+    assert.deepEqual(out, { hello: 'world' });
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].url, T.BASE + '/status');
+  } finally { f.restore(); }
+});
+
+test('apiGet: throws json.error message on non-2xx', async () => {
+  const f = stubFetch(() => fakeResponse({ ok: false, status: 404, body: { error: 'not found' } }));
+  try {
+    await assert.rejects(() => T.apiGet('/missing'), /not found/);
+  } finally { f.restore(); }
+});
+
+test('apiGet: falls back to statusText when body has no error', async () => {
+  const f = stubFetch(() => fakeResponse({ ok: false, status: 500, statusText: 'Server Error', body: {} }));
+  try {
+    await assert.rejects(() => T.apiGet('/boom'), /Server Error/);
+  } finally { f.restore(); }
+});
+
+// ── apiJson ───────────────────────────────────────────────────────────────
+
+test('apiJson: POSTs JSON-encoded body with correct headers', async () => {
+  const f = stubFetch(() => fakeResponse({ body: { ok: true } }));
+  try {
+    const out = await T.apiJson('/download/init', { key: 'abc', n: 1 });
+    assert.deepEqual(out, { ok: true });
+    const { url, opts } = f.calls[0];
+    assert.equal(url, T.BASE + '/download/init');
+    assert.equal(opts.method, 'POST');
+    assert.equal(opts.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(opts.body), { key: 'abc', n: 1 });
+  } finally { f.restore(); }
+});
+
+test('apiJson: throws json.error on non-2xx', async () => {
+  const f = stubFetch(() => fakeResponse({ ok: false, status: 400, body: { error: 'bad password' } }));
+  try {
+    await assert.rejects(() => T.apiJson('/download/init', {}), /bad password/);
+  } finally { f.restore(); }
+});
+
+// ── apiUploadBytes ──────────────────────────────────────────────────────────
+
+test('apiUploadBytes: posts octet-stream body to /upload?key=', async () => {
+  const f = stubFetch(() => fakeResponse({ body: { stored: true } }));
+  try {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const out = await T.apiUploadBytes('KEY123', bytes);
+    assert.deepEqual(out, { stored: true });
+    const { url, opts } = f.calls[0];
+    assert.equal(url, T.BASE + '/upload?key=KEY123');
+    assert.equal(opts.method, 'POST');
+    assert.equal(opts.headers['Content-Type'], 'application/octet-stream');
+    assert.equal(opts.body, bytes);
+  } finally { f.restore(); }
+});
+
+test('apiUploadBytes: throws json.error on non-2xx', async () => {
+  const f = stubFetch(() => fakeResponse({ ok: false, status: 413, body: { error: 'too large' } }));
+  try {
+    await assert.rejects(() => T.apiUploadBytes('K', new Uint8Array(0)), /too large/);
+  } finally { f.restore(); }
+});
+
+test('apiUploadBytes: falls back to statusText when body lacks error', async () => {
+  const f = stubFetch(() => fakeResponse({ ok: false, status: 502, statusText: 'Bad Gateway', body: {} }));
+  try {
+    await assert.rejects(() => T.apiUploadBytes('K', new Uint8Array(0)), /Bad Gateway/);
+  } finally { f.restore(); }
+});
+
+// ── sleep ─────────────────────────────────────────────────────────────────
+
+test('sleep: resolves after at least the requested delay', async () => {
+  const start = process.hrtime.bigint();
+  await T.sleep(20);
+  const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+  assert.ok(elapsedMs >= 15, `expected ≥15ms, got ${elapsedMs.toFixed(1)}ms`);
+});
+
+test('sleep: returns a promise', () => {
+  const p = T.sleep(0);
+  assert.ok(p instanceof Promise);
+  return p;
+});
+
+// ── checkAuth ───────────────────────────────────────────────────────────────
+
+test('checkAuth: returns user json when /auth/me is ok', async () => {
+  const f = stubFetch(() => fakeResponse({ body: { email: 'a@b.com' } }));
+  try {
+    const user = await T.checkAuth();
+    assert.deepEqual(user, { email: 'a@b.com' });
+    assert.equal(f.calls[0].url, T.BASE + '/auth/me');
+  } finally { f.restore(); }
+});
+
+test('checkAuth: returns null on non-2xx (unauthenticated)', async () => {
+  const f = stubFetch(() => fakeResponse({ ok: false, status: 401 }));
+  try {
+    assert.equal(await T.checkAuth(), null);
+  } finally { f.restore(); }
+});
+
+test('checkAuth: returns null when fetch rejects (network error)', async () => {
+  const prev = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('network down'); };
+  try {
+    assert.equal(await T.checkAuth(), null);
+  } finally { globalThis.fetch = prev; }
+});
+
+// ── logout ──────────────────────────────────────────────────────────────────
+
+test('logout: POSTs /auth/logout then redirects to login', async () => {
+  const f = stubFetch(() => fakeResponse({ body: {} }));
+  const prevLoc = globalThis.location;
+  globalThis.location = { href: '' };
+  try {
+    await T.logout();
+    assert.equal(f.calls[0].url, T.BASE + '/auth/logout');
+    assert.equal(f.calls[0].opts.method, 'POST');
+    assert.equal(globalThis.location.href, '/transfer/login');
+  } finally { f.restore(); globalThis.location = prevLoc; }
+});
+
+test('logout: still redirects even if the logout request fails', async () => {
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('offline'); };
+  const prevLoc = globalThis.location;
+  globalThis.location = { href: '' };
+  try {
+    await T.logout();
+    assert.equal(globalThis.location.href, '/transfer/login');
+  } finally { globalThis.fetch = prevFetch; globalThis.location = prevLoc; }
+});
+
+// ── escapeHtml ──────────────────────────────────────────────────────────────
+
+test('escapeHtml: escapes the five HTML-sensitive characters', () => {
+  assert.equal(T.escapeHtml('<b>"x"&\'y\'</b>'), '&lt;b&gt;&quot;x&quot;&amp;\'y\'&lt;/b&gt;');
+});
+
+test('escapeHtml: ampersand is escaped first (no double-escaping)', () => {
+  assert.equal(T.escapeHtml('&lt;'), '&amp;lt;');
+});
+
+test('escapeHtml: leaves plain text untouched', () => {
+  assert.equal(T.escapeHtml('hello world 123'), 'hello world 123');
+});
+
+test('escapeHtml: neutralizes a script-tag injection attempt', () => {
+  assert.equal(
+    T.escapeHtml('<script>alert(1)</script>'),
+    '&lt;script&gt;alert(1)&lt;/script&gt;'
+  );
+});
+
+// ── updateTopbar ────────────────────────────────────────────────────────────
+// Minimal document stub: only getElementById is used, and only innerHTML is
+// written. We register a single fake element under id 'tx-auth-bar'.
+
+function stubBar(present = true) {
+  const bar = present ? { innerHTML: '' } : null;
+  const prev = globalThis.document;
+  globalThis.document = { getElementById: (id) => (id === 'tx-auth-bar' ? bar : null) };
+  return { bar, restore: () => { globalThis.document = prev; } };
+}
+
+test('updateTopbar: signed-in renders my-transfers, email, sign out', () => {
+  const d = stubBar();
+  try {
+    T.updateTopbar({ email: 'user@example.com' });
+    assert.match(d.bar.innerHTML, /my transfers/);
+    assert.match(d.bar.innerHTML, /user@example\.com/);
+    assert.match(d.bar.innerHTML, /sign out/);
+  } finally { d.restore(); }
+});
+
+test('updateTopbar: signed-in escapes the email to prevent injection', () => {
+  const d = stubBar();
+  try {
+    T.updateTopbar({ email: '<script>@x.com' });
+    assert.match(d.bar.innerHTML, /&lt;script&gt;@x\.com/);
+    assert.ok(!d.bar.innerHTML.includes('<script>@x.com'));
+  } finally { d.restore(); }
+});
+
+test('updateTopbar: signed-out renders a sign-in link', () => {
+  const d = stubBar();
+  try {
+    T.updateTopbar(null);
+    assert.match(d.bar.innerHTML, /sign in/);
+    assert.ok(!d.bar.innerHTML.includes('sign out'));
+  } finally { d.restore(); }
+});
+
+test('updateTopbar: no-op when the auth bar is absent', () => {
+  const d = stubBar(false);
+  try {
+    assert.doesNotThrow(() => T.updateTopbar({ email: 'x@y.com' }));
+  } finally { d.restore(); }
+});
+
+// ── relativeTime ────────────────────────────────────────────────────────────
+// Pin Date.now so the elapsed interval is deterministic.
+
+function withNow(fixedMs, fn) {
+  const prev = Date.now;
+  Date.now = () => fixedMs;
+  try { return fn(); } finally { Date.now = prev; }
+}
+
+const NOW = Date.parse('2026-06-04T12:00:00Z');
+const agoIso = (secs) => new Date(NOW - secs * 1000).toISOString();
+
+test('relativeTime: < 60s reads "just now"', () => {
+  withNow(NOW, () => assert.equal(T.relativeTime(agoIso(30)), 'just now'));
+});
+
+test('relativeTime: minutes granularity', () => {
+  withNow(NOW, () => {
+    assert.equal(T.relativeTime(agoIso(60)), '1 min ago');
+    assert.equal(T.relativeTime(agoIso(125)), '2 min ago');
+  });
+});
+
+test('relativeTime: hours granularity', () => {
+  withNow(NOW, () => {
+    assert.equal(T.relativeTime(agoIso(3600)), '1 hr ago');
+    assert.equal(T.relativeTime(agoIso(7200)), '2 hr ago');
+  });
+});
+
+test('relativeTime: a single day is singular', () => {
+  withNow(NOW, () => assert.equal(T.relativeTime(agoIso(86400)), '1 day ago'));
+});
+
+test('relativeTime: multiple days are plural', () => {
+  withNow(NOW, () => assert.equal(T.relativeTime(agoIso(86400 * 3)), '3 days ago'));
+});
+
+// ── randomBytes ─────────────────────────────────────────────────────────────
+
+test('randomBytes: returns a Uint8Array of the requested length', () => {
+  const out = T.randomBytes(16);
+  assert.ok(out instanceof Uint8Array);
+  assert.equal(out.length, 16);
+});
+
+test('randomBytes: successive calls differ (probabilistic)', () => {
+  assert.notEqual(T.toHex(T.randomBytes(16)), T.toHex(T.randomBytes(16)));
+});
+
+test('randomBytes: length 0 returns an empty array', () => {
+  assert.equal(T.randomBytes(0).length, 0);
+});

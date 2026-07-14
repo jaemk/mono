@@ -51,10 +51,9 @@
         </div>
         <div>
           <label class="tx-label" for="login-password">Password</label>
-          <input type="password" class="tx-input" id="login-password" placeholder="your password" autocomplete="current-password"
-                 onkeydown="if(event.key==='Enter')doLogin()">
+          <input type="password" class="tx-input" id="login-password" placeholder="your password" autocomplete="current-password">
         </div>
-        <button class="tx-btn is-primary" id="login-btn" style="width:100%;justify-content:center;height:38px" onclick="doLogin()">Sign in</button>
+        <button class="tx-btn is-primary" id="login-btn" style="width:100%;justify-content:center;height:38px">Sign in</button>
       </div>
 
       <div style="text-align:center;font-size:12px;color:var(--fg-mute)">
@@ -66,83 +65,6 @@
 </div>
 
 <script src="/transfer/static/app.js"></script>
-<script>
-const T = window.Transfer;
-let googleClientId = null;
-
-(async function init() {
-  const me = await T.checkAuth();
-  if (me) {
-    const redirect = new URLSearchParams(location.search).get('redirect') || '/transfer/my';
-    location.href = redirect;
-    return;
-  }
-  T.updateTopbar(null);
-
-  try {
-    const d = await T.apiGet('/upload/defaults');
-    if (d.google_enabled && d.google_client_id) {
-      googleClientId = d.google_client_id;
-      document.getElementById('google-section').style.display = '';
-      loadGSI(d.google_client_id);
-    }
-    if (d.email_enabled) {
-      document.getElementById('email-section').style.display = 'flex';
-    }
-    if (d.google_enabled && d.email_enabled) {
-      document.getElementById('or-divider').style.display = '';
-    }
-    if (!d.google_enabled && !d.email_enabled) {
-      showError('Authentication is not configured on this server.');
-    }
-  } catch (e) {
-    showError('Failed to load config: ' + (e.message || e));
-  }
-})();
-
-function loadGSI(clientId) {
-  const s = document.createElement('script');
-  s.src = 'https://accounts.google.com/gsi/client';
-  s.async = true;
-  s.onload = () => {
-    google.accounts.id.initialize({ client_id: clientId, callback: onGoogleCredential });
-    google.accounts.id.renderButton(document.getElementById('google-btn-container'), {
-      type: 'standard', size: 'large', width: 356,
-    });
-  };
-  document.head.appendChild(s);
-}
-
-async function onGoogleCredential(resp) {
-  hideError();
-  try {
-    await T.apiJson('/auth/google', { id_token: resp.credential });
-    const redirect = new URLSearchParams(location.search).get('redirect') || '/transfer/my';
-    location.href = redirect;
-  } catch (e) {
-    showError(e.message || 'Google sign-in failed');
-  }
-}
-
-async function doLogin() {
-  const email    = document.getElementById('login-email').value.trim();
-  const password = document.getElementById('login-password').value;
-  if (!email || !password) return showError('Enter your email and password.');
-  const btn = document.getElementById('login-btn');
-  btn.disabled = true; btn.textContent = 'Signing in…';
-  hideError();
-  try {
-    await T.apiJson('/auth/login', { email, password });
-    const redirect = new URLSearchParams(location.search).get('redirect') || '/transfer/my';
-    location.href = redirect;
-  } catch (e) {
-    showError(e.message || 'Sign in failed');
-    btn.disabled = false; btn.textContent = 'Sign in';
-  }
-}
-
-function showError(msg) { const e = document.getElementById('error-box'); e.textContent = msg; e.style.display = ''; }
-function hideError()    { document.getElementById('error-box').style.display = 'none'; }
-</script>
+<script src="/transfer/static/login.page.js"></script>
 </body>
 </html>

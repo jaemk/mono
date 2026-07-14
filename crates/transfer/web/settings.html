@@ -59,10 +59,9 @@
         </div>
         <div>
           <label class="tx-label" for="new-password">New password <span style="color:var(--danger)">*</span></label>
-          <input type="password" class="tx-input" id="new-password" placeholder="at least 8 characters" autocomplete="new-password"
-                 onkeydown="if(event.key==='Enter')doAddPassword()">
+          <input type="password" class="tx-input" id="new-password" placeholder="at least 8 characters" autocomplete="new-password">
         </div>
-        <button class="tx-btn is-primary" id="add-pw-btn" style="width:100%;justify-content:center;height:38px" onclick="doAddPassword()">Save password</button>
+        <button class="tx-btn is-primary" id="add-pw-btn" style="width:100%;justify-content:center;height:38px">Save password</button>
       </div>
     </div>
 
@@ -74,46 +73,6 @@
 </div>
 
 <script src="/transfer/static/app.js"></script>
-<script>
-const T = window.Transfer;
-let currentUser = null;
-
-(async function init() {
-  const me = await T.checkAuth();
-  if (!me) { location.href = '/transfer/login?redirect=/transfer/settings'; return; }
-  currentUser = me;
-  T.updateTopbar(me);
-
-  document.getElementById('account-email').textContent = me.email;
-  document.getElementById('account-pw-status').textContent = me.has_password ? 'set' : 'not set';
-  document.getElementById('account-google-status').textContent = me.google_linked ? 'linked' : 'not linked';
-
-  if (!me.has_password) {
-    document.getElementById('add-pw-section').style.display = '';
-  }
-})();
-
-async function doAddPassword() {
-  const password = document.getElementById('new-password').value;
-  if (password.length < 8) return showError('Password must be at least 8 characters.');
-  const btn = document.getElementById('add-pw-btn');
-  btn.disabled = true; btn.textContent = 'Saving…';
-  hideError(); hideSuccess();
-  try {
-    await T.apiJson('/settings/add-password', { password });
-    document.getElementById('account-pw-status').textContent = 'set';
-    document.getElementById('add-pw-section').style.display = 'none';
-    showSuccess('Password added. You can now sign in with email and password.');
-  } catch (e) {
-    showError(e.message || 'Failed to add password');
-    btn.disabled = false; btn.textContent = 'Save password';
-  }
-}
-
-function showError(msg)   { const e = document.getElementById('error-box');   e.textContent = msg; e.style.display = ''; }
-function showSuccess(msg) { const e = document.getElementById('success-box'); e.textContent = msg; e.style.display = ''; }
-function hideError()   { document.getElementById('error-box').style.display = 'none'; }
-function hideSuccess() { document.getElementById('success-box').style.display = 'none'; }
-</script>
+<script src="/transfer/static/settings.page.js"></script>
 </body>
 </html>

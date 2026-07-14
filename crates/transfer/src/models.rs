@@ -41,10 +41,10 @@ pub async fn get_auth(pool: &common::db::DbPool, id: i32) -> anyhow::Result<Opti
 
 #[derive(Debug, Clone, FromRow)]
 pub struct TransferUser {
-    pub id:           i32,
-    pub email:        String,
-    pub auth_id:      Option<i32>,
-    pub google_sub:   Option<String>,
+    pub id: i32,
+    pub email: String,
+    pub auth_id: Option<i32>,
+    pub google_sub: Option<String>,
     pub date_created: DateTime<Utc>,
 }
 
@@ -70,12 +70,10 @@ pub async fn get_user_by_email(
     pool: &common::db::DbPool,
     email: &str,
 ) -> anyhow::Result<Option<TransferUser>> {
-    let row = sqlx::query_as::<_, TransferUser>(
-        "select * from transfer_user where email = $1",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query_as::<_, TransferUser>("select * from transfer_user where email = $1")
+        .bind(email)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 
@@ -83,12 +81,10 @@ pub async fn get_user_by_id(
     pool: &common::db::DbPool,
     id: i32,
 ) -> anyhow::Result<Option<TransferUser>> {
-    let row = sqlx::query_as::<_, TransferUser>(
-        "select * from transfer_user where id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query_as::<_, TransferUser>("select * from transfer_user where id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 
@@ -124,14 +120,14 @@ pub async fn set_user_auth_id(
 
 #[derive(Debug, FromRow)]
 pub struct PendingRegistration {
-    pub id:           i32,
-    pub uuid_:        Uuid,
-    pub email:        String,
-    pub auth_id:      i32,
-    pub code_hash:    Vec<u8>,
-    pub attempts:     i32,
+    pub id: i32,
+    pub uuid_: Uuid,
+    pub email: String,
+    pub auth_id: i32,
+    pub code_hash: Vec<u8>,
+    pub attempts: i32,
     pub resend_after: DateTime<Utc>,
-    pub expire_date:  DateTime<Utc>,
+    pub expire_date: DateTime<Utc>,
     pub date_created: DateTime<Utc>,
 }
 
@@ -170,10 +166,7 @@ pub async fn get_pending_registration(
     Ok(row)
 }
 
-pub async fn increment_pending_attempts(
-    pool: &common::db::DbPool,
-    id: i32,
-) -> anyhow::Result<i32> {
+pub async fn increment_pending_attempts(pool: &common::db::DbPool, id: i32) -> anyhow::Result<i32> {
     use sqlx::Row;
     let row = sqlx::query(
         "update pending_registration set attempts = attempts + 1 where id = $1 returning attempts",
@@ -219,10 +212,7 @@ pub async fn update_pending_code(
     Ok(())
 }
 
-pub async fn delete_pending_registration(
-    pool: &common::db::DbPool,
-    id: i32,
-) -> anyhow::Result<()> {
+pub async fn delete_pending_registration(pool: &common::db::DbPool, id: i32) -> anyhow::Result<()> {
     // Delete the auth row; ON DELETE CASCADE removes the pending_registration row.
     sqlx::query(
         "delete from auth where id = (select auth_id from pending_registration where id = $1)",
@@ -233,10 +223,7 @@ pub async fn delete_pending_registration(
     Ok(())
 }
 
-pub async fn delete_pending_by_email(
-    pool: &common::db::DbPool,
-    email: &str,
-) -> anyhow::Result<()> {
+pub async fn delete_pending_by_email(pool: &common::db::DbPool, email: &str) -> anyhow::Result<()> {
     sqlx::query(
         "delete from auth where id = (select auth_id from pending_registration where email = $1)",
     )
@@ -267,10 +254,10 @@ pub async fn delete_expired_pending_registrations(
 
 #[derive(Debug, FromRow)]
 pub struct TransferSession {
-    pub id:           i32,
-    pub uuid_:        Uuid,
-    pub user_id:      i32,
-    pub expire_date:  DateTime<Utc>,
+    pub id: i32,
+    pub uuid_: Uuid,
+    pub user_id: i32,
+    pub expire_date: DateTime<Utc>,
     pub date_created: DateTime<Utc>,
 }
 
@@ -295,24 +282,21 @@ pub async fn get_session_with_user(
     pool: &common::db::DbPool,
     token_uuid: Uuid,
 ) -> anyhow::Result<Option<(TransferSession, TransferUser)>> {
-    let session = sqlx::query_as::<_, TransferSession>(
-        "select * from transfer_session where uuid_ = $1",
-    )
-    .bind(token_uuid)
-    .fetch_optional(pool)
-    .await?;
+    let session =
+        sqlx::query_as::<_, TransferSession>("select * from transfer_session where uuid_ = $1")
+            .bind(token_uuid)
+            .fetch_optional(pool)
+            .await?;
 
     let session = match session {
         Some(s) => s,
         None => return Ok(None),
     };
 
-    let user = sqlx::query_as::<_, TransferUser>(
-        "select * from transfer_user where id = $1",
-    )
-    .bind(session.user_id)
-    .fetch_optional(pool)
-    .await?;
+    let user = sqlx::query_as::<_, TransferUser>("select * from transfer_user where id = $1")
+        .bind(session.user_id)
+        .fetch_optional(pool)
+        .await?;
 
     Ok(user.map(|u| (session, u)))
 }
@@ -330,10 +314,7 @@ pub async fn renew_session(
     Ok(())
 }
 
-pub async fn delete_session(
-    pool: &common::db::DbPool,
-    token_uuid: Uuid,
-) -> anyhow::Result<()> {
+pub async fn delete_session(pool: &common::db::DbPool, token_uuid: Uuid) -> anyhow::Result<()> {
     sqlx::query("delete from transfer_session where uuid_ = $1")
         .bind(token_uuid)
         .execute(pool)
@@ -501,13 +482,11 @@ pub async fn get_upload_by_uuid_and_owner(
     uuid_: Uuid,
     user_id: i32,
 ) -> anyhow::Result<Option<Upload>> {
-    let row = sqlx::query_as::<_, Upload>(
-        "select * from upload where uuid_ = $1 and user_id = $2",
-    )
-    .bind(uuid_)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query_as::<_, Upload>("select * from upload where uuid_ = $1 and user_id = $2")
+        .bind(uuid_)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 
@@ -542,12 +521,12 @@ pub async fn count_downloads(pool: &common::db::DbPool, upload_id: i32) -> anyho
 
 #[derive(Debug, FromRow)]
 pub struct MyTransferRow {
-    pub uuid_:          Uuid,
-    pub size_:          i64,
-    pub expire_date:    DateTime<Utc>,
+    pub uuid_: Uuid,
+    pub size_: i64,
+    pub expire_date: DateTime<Utc>,
     pub download_limit: Option<i32>,
-    pub deleted:        bool,
-    pub date_created:   DateTime<Utc>,
+    pub deleted: bool,
+    pub date_created: DateTime<Utc>,
     pub download_count: i64,
 }
 

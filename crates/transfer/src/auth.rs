@@ -4,15 +4,15 @@ use uuid::Uuid;
 
 use crate::{models, Config};
 
-pub const SESSION_COOKIE:        &str = "tx_session";
+pub const SESSION_COOKIE: &str = "tx_session";
 pub const SESSION_DURATION_SECS: i64 = 30 * 24 * 60 * 60;
-pub const MAX_CODE_ATTEMPTS:     i32 = 5;
-pub const RESEND_COOLDOWN_SECS:  i64 = 60;
+pub const MAX_CODE_ATTEMPTS: i32 = 5;
+pub const RESEND_COOLDOWN_SECS: i64 = 60;
 
 #[derive(Debug)]
 pub struct GoogleClaims {
     pub email: String,
-    pub sub:   String,
+    pub sub: String,
 }
 
 /// Extract the current user from request cookies, extending the session on success (rolling window).
