@@ -26,7 +26,11 @@ async fn get_server() -> TestServer {
         .await
         .expect("failed to initialize paste state");
 
-    TestServer::new(app(spot_state, paste_state))
+    let mapour_state = mapour::service::init(mapour::Config::load())
+        .await
+        .expect("failed to initialize mapour state");
+
+    TestServer::new(app(spot_state, paste_state, mapour_state))
 }
 
 #[tokio::test]
@@ -90,6 +94,22 @@ async fn test_ip_host() {
         .await;
     response.assert_status_ok();
     assert_eq!(response.text(), "1.2.3.4\n");
+}
+
+#[tokio::test]
+async fn test_mapour_host_redirect() {
+    let server = get_server().await;
+    let response = server.get("/").add_header(header::HOST, "mapour.org").await;
+    response.assert_status(StatusCode::TEMPORARY_REDIRECT);
+    response.assert_header(header::LOCATION, "/mapour");
+}
+
+#[tokio::test]
+async fn test_mapour_app_serves() {
+    let server = get_server().await;
+    let response = server.get("/mapour").await;
+    response.assert_status_ok();
+    assert!(response.text().contains("mapour"));
 }
 
 #[tokio::test]

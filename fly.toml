@@ -21,6 +21,11 @@ primary_region = "ewr"
   PASTE_DB_NAME = "paste"
   PASTE_DB_HOST = "kom-db.flycast"
   PASTE_DB_PORT = "5432"
+  MAPOUR_DB_USER = "mapour"
+  MAPOUR_DB_NAME = "mapour"
+  MAPOUR_DB_HOST = "kom-db.flycast"
+  MAPOUR_DB_PORT = "5432"
+  MAPOUR_REAL_HOSTNAME = "https://mapour.org"
   AWS_ENDPOINT_URL_S3 = "https://t3.storage.dev"
   AWS_ENDPOINT_URL_IAM = "https://iam.storage.dev"
   AWS_REGION = "auto"
@@ -59,6 +64,9 @@ primary_region = "ewr"
 #  - PASTE_DATABASE_URL
 #  - PASTE_ENCRYPTION_KEY
 #  - PASTE_SIGNING_KEY
+#  - MAPOUR_DB_PASS
+#  - MAPOUR_DATABASE_URL
+#  - MAPOUR_SIGNING_KEY
 #  - AWS_ACCESS_KEY_ID
 #  - AWS_SECRET_ACCESS_KEY
 

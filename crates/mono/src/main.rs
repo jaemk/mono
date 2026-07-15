@@ -35,7 +35,11 @@ async fn main() {
         .await
         .expect("failed to initialize paste state");
 
-    let app = app(spot_state, paste_state);
+    let mapour_state = mapour::service::init(mapour::Config::load())
+        .await
+        .expect("failed to initialize mapour state");
+
+    let app = app(spot_state, paste_state, mapour_state);
     let addr = CONFIG.get_host_port();
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

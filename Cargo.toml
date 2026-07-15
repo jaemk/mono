@@ -4,6 +4,7 @@ members = [
     "crates/spot",
     "crates/mono",
     "crates/paste",
+    "crates/mapour",
 ]
 resolver = "2"
 
@@ -47,3 +48,4 @@ axum-test = "20"
 common = { path = "crates/common" }
 spot = { path = "crates/spot" }
 paste = { path = "crates/paste" }
+mapour = { path = "crates/mapour" }

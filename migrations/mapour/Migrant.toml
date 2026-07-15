@@ -1,0 +1,15 @@
+
+# Required, do not edit
+database_type = "postgres"
+
+# Required database info
+database_name = "env:MAPOUR_DB_NAME"
+database_user = "env:MAPOUR_DB_USER"
+database_password = "env:MAPOUR_DB_PASS"
+
+# Configurable database info
+database_host = "env:MAPOUR_DB_HOST"         # default "localhost"
+database_port = "env:MAPOUR_DB_PORT"          # default "5432"
+migration_location = "migrations"  # default "migrations"
+
+[database_params]

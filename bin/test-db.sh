@@ -31,6 +31,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_ID="$(openssl rand -hex 4)"
 SPOT_TEST_DB="spot_test_${TEST_ID}"
 PASTE_TEST_DB="paste_test_${TEST_ID}"
+MAPOUR_TEST_DB="mapour_test_${TEST_ID}"
 
 # ---------------------------------------------------------------------------
 # Load base credentials from .env (if it exists) so DB_HOST / ports etc. are
@@ -55,15 +56,23 @@ PASTE_DB_PASS="${PASTE_DB_PASS:-paste}"
 PASTE_DB_HOST="${PASTE_DB_HOST:-localhost}"
 PASTE_DB_PORT="${PASTE_DB_PORT:-5432}"
 
+MAPOUR_DB_USER="${MAPOUR_DB_USER:-mapour}"
+MAPOUR_DB_PASS="${MAPOUR_DB_PASS:-mapour}"
+MAPOUR_DB_HOST="${MAPOUR_DB_HOST:-localhost}"
+MAPOUR_DB_PORT="${MAPOUR_DB_PORT:-5432}"
+
 # Override database URLs to point at ephemeral DBs.
 export SPOT_DB_NAME="${SPOT_TEST_DB}"
 export PASTE_DB_NAME="${PASTE_TEST_DB}"
+export MAPOUR_DB_NAME="${MAPOUR_TEST_DB}"
 export SPOT_DATABASE_URL="postgres://${SPOT_DB_USER}:${SPOT_DB_PASS}@${SPOT_DB_HOST}:${SPOT_DB_PORT}/${SPOT_TEST_DB}"
 export PASTE_DATABASE_URL="postgres://${PASTE_DB_USER}:${PASTE_DB_PASS}@${PASTE_DB_HOST}:${PASTE_DB_PORT}/${PASTE_TEST_DB}"
+export MAPOUR_DATABASE_URL="postgres://${MAPOUR_DB_USER}:${MAPOUR_DB_PASS}@${MAPOUR_DB_HOST}:${MAPOUR_DB_PORT}/${MAPOUR_TEST_DB}"
 
 echo "==> Test run ID: ${TEST_ID}"
-echo "    SPOT_DATABASE_URL  = ${SPOT_DATABASE_URL}"
-echo "    PASTE_DATABASE_URL = ${PASTE_DATABASE_URL}"
+echo "    SPOT_DATABASE_URL   = ${SPOT_DATABASE_URL}"
+echo "    PASTE_DATABASE_URL  = ${PASTE_DATABASE_URL}"
+echo "    MAPOUR_DATABASE_URL = ${MAPOUR_DATABASE_URL}"
 
 # ---------------------------------------------------------------------------
 # Helper: run psql as the postgres superuser
@@ -85,6 +94,9 @@ cleanup() {
 
     pg_exec "${PASTE_DB_HOST}" "${PASTE_DB_PORT}" \
         "DROP DATABASE IF EXISTS ${PASTE_TEST_DB};" 2>/dev/null || true
+
+    pg_exec "${MAPOUR_DB_HOST}" "${MAPOUR_DB_PORT}" \
+        "DROP DATABASE IF EXISTS ${MAPOUR_TEST_DB};" 2>/dev/null || true
 
     echo "==> Done."
 }
@@ -122,6 +134,21 @@ pg_exec "${PASTE_DB_HOST}" "${PASTE_DB_PORT}" \
     "GRANT ALL PRIVILEGES ON DATABASE ${PASTE_TEST_DB} TO ${PASTE_DB_USER};"
 
 # ---------------------------------------------------------------------------
+# Create ephemeral mapour test database
+# ---------------------------------------------------------------------------
+echo "==> Creating ephemeral mapour database '${MAPOUR_TEST_DB}'..."
+pg_exec "${MAPOUR_DB_HOST}" "${MAPOUR_DB_PORT}" \
+    "DO \$\$ BEGIN
+       IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${MAPOUR_DB_USER}') THEN
+         CREATE ROLE ${MAPOUR_DB_USER} WITH LOGIN PASSWORD '${MAPOUR_DB_PASS}';
+       END IF;
+     END \$\$;"
+pg_exec "${MAPOUR_DB_HOST}" "${MAPOUR_DB_PORT}" \
+    "CREATE DATABASE ${MAPOUR_TEST_DB} OWNER ${MAPOUR_DB_USER};"
+pg_exec "${MAPOUR_DB_HOST}" "${MAPOUR_DB_PORT}" \
+    "GRANT ALL PRIVILEGES ON DATABASE ${MAPOUR_TEST_DB} TO ${MAPOUR_DB_USER};"
+
+# ---------------------------------------------------------------------------
 # Ensure migrant is installed
 # ---------------------------------------------------------------------------
 if ! which migrant > /dev/null 2>&1; then
@@ -138,6 +165,9 @@ echo "==> Running spot migrations on '${SPOT_TEST_DB}'..."
 
 echo "==> Running paste migrations on '${PASTE_TEST_DB}'..."
 (builtin cd "${ROOT}/migrations/paste" && migrant setup && (migrant apply -a || echo "ok"))
+
+echo "==> Running mapour migrations on '${MAPOUR_TEST_DB}'..."
+(builtin cd "${ROOT}/migrations/mapour" && migrant setup && (migrant apply -a || echo "ok"))
 
 # ---------------------------------------------------------------------------
 # Run the test suite

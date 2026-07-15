@@ -5,7 +5,8 @@ export
 
 .PHONY: fmt test lint run push \
 	db-setup db-setup-spot db-setup-spot-create db-setup-paste db-setup-paste-create \
-	db-migrate db-migrate-spot db-migrate-paste migrant db-shell f
+	db-setup-mapour db-setup-mapour-create \
+	db-migrate db-migrate-spot db-migrate-paste db-migrate-mapour migrant db-shell f
 
 fmt:
 	cargo fmt --all
@@ -45,8 +46,18 @@ db-setup-paste-create:
 
 db-setup-paste: db-setup-paste-create db-migrate-paste
 
-db-setup: db-setup-spot db-setup-paste
-db-migrate: db-migrate-spot db-migrate-paste
+db-migrate-mapour: migrant
+	cd migrations/mapour && \
+		migrant setup && \
+		(migrant apply -a || echo "ok")
+
+db-setup-mapour-create:
+	DB_NAME=mapour DB_USER=mapour DB_PASS=mapour DB_HOST=localhost DB_PORT=5432 ./bin/setup-dev-db.sh
+
+db-setup-mapour: db-setup-mapour-create db-migrate-mapour
+
+db-setup: db-setup-spot db-setup-paste db-setup-mapour
+db-migrate: db-migrate-spot db-migrate-paste db-migrate-mapour
 
 db-shell:
 	LOG_LEVEL=info fly pg connect -a kom-db

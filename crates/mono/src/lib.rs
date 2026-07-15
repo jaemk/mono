@@ -21,6 +21,7 @@ lazy_static::lazy_static! {
 pub struct AppState {
     pub spot_state: spot::SpotState,
     pub paste_state: paste::State,
+    pub mapour_state: mapour::State,
 }
 
 impl FromRef<AppState> for spot::SpotState {
@@ -35,14 +36,26 @@ impl FromRef<AppState> for paste::State {
     }
 }
 
-pub fn app(spot_state: spot::SpotState, paste_state: paste::State) -> Router {
+impl FromRef<AppState> for mapour::State {
+    fn from_ref(state: &AppState) -> Self {
+        state.mapour_state.clone()
+    }
+}
+
+pub fn app(
+    spot_state: spot::SpotState,
+    paste_state: paste::State,
+    mapour_state: mapour::State,
+) -> Router {
     let state = AppState {
         spot_state,
         paste_state,
+        mapour_state,
     };
     Router::new()
         .nest("/spot", spot::service::router(state.clone()))
         .nest("/paste", paste::service::router(state.clone()))
+        .nest("/mapour", mapour::service::router(state.clone()))
         .route("/", get(handlers::root_handler))
         .route("/status", get(handlers::status_handler))
         .route("/favicon.ico", get(handlers::favicon_handler))

@@ -1,0 +1,11 @@
+DROP TABLE photos;
+DROP TABLE pins;
+DROP TABLE categories;
+DROP TABLE join_requests;
+DROP TABLE invites;
+DROP TABLE members;
+DROP TABLE orgs;
+DROP TABLE anons;
+DROP TABLE email_verifications;
+DROP TABLE auth_tokens;
+DROP TABLE users;

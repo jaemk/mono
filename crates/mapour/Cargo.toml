@@ -1,31 +1,26 @@
 [package]
-name = "mono"
+name = "mapour"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 common.workspace = true
-spot.workspace = true
-paste.workspace = true
-mapour.workspace = true
 tokio.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
-tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 chrono.workspace = true
-bdays.workspace = true
-cached.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-lazy_static.workspace = true
-dotenv.workspace = true
-tera.workspace = true
 anyhow.workspace = true
-reqwest.workspace = true
+sqlx.workspace = true
+hex.workspace = true
+time.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
+tokio.workspace = true
