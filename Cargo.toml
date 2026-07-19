@@ -40,7 +40,14 @@ ring = "0.17"
 async-trait = "0.1"
 time = "0.3"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+# default features minus "rustls": that pulls the legacy hyper-0.14/rustls-0.21
+# stack (vulnerable rustls-webpki 0.101); default-https-client is the
+# rustls-0.23 client actually used
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "sigv4a",
+    "default-https-client",
+    "rt-tokio",
+] }
 rand = "0.10"
 rmp-serde = "1"
 axum-test = "20"
