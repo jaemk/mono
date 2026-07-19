@@ -21,6 +21,8 @@ primary_region = "ewr"
   PASTE_DB_NAME = "paste"
   PASTE_DB_HOST = "kom-db.flycast"
   PASTE_DB_PORT = "5432"
+  # flip to "true" once the mapour db, bucket, and secrets exist
+  MAPOUR_ENABLED = "false"
   MAPOUR_DB_USER = "mapour"
   MAPOUR_DB_NAME = "mapour"
   MAPOUR_DB_HOST = "kom-db.flycast"

@@ -4,6 +4,11 @@ use std::io::Read;
 pub struct Config {
     pub version: String,
 
+    // gate for the whole subsite: when false the mono binary skips mapour
+    // initialization entirely (no db pool, no routes). off by default until
+    // the production database/bucket/secrets exist.
+    pub enabled: bool,
+
     // key used to hmac auth/anon/invite/verification tokens before storage
     pub signing_key: String,
 
@@ -37,6 +42,7 @@ impl Config {
 
         Self {
             version,
+            enabled: common::utils::env_or("MAPOUR_ENABLED", "false") == "true",
             signing_key: common::utils::env_or(
                 "MAPOUR_SIGNING_KEY",
                 "01234567890123456789012345678901",

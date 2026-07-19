@@ -35,9 +35,17 @@ async fn main() {
         .await
         .expect("failed to initialize paste state");
 
-    let mapour_state = mapour::service::init(mapour::Config::load())
-        .await
-        .expect("failed to initialize mapour state");
+    let mapour_config = mapour::Config::load();
+    let mapour_state = if mapour_config.enabled {
+        Some(
+            mapour::service::init(mapour_config)
+                .await
+                .expect("failed to initialize mapour state"),
+        )
+    } else {
+        tracing::info!("mapour disabled (MAPOUR_ENABLED != true), skipping initialization");
+        None
+    };
 
     let app = app(spot_state, paste_state, mapour_state);
     let addr = CONFIG.get_host_port();

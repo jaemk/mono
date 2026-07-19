@@ -30,7 +30,7 @@ async fn get_server() -> TestServer {
         .await
         .expect("failed to initialize mapour state");
 
-    TestServer::new(app(spot_state, paste_state, mapour_state))
+    TestServer::new(app(spot_state, paste_state, Some(mapour_state)))
 }
 
 #[tokio::test]
@@ -110,6 +110,37 @@ async fn test_mapour_app_serves() {
     let response = server.get("/mapour").await;
     response.assert_status_ok();
     assert!(response.text().contains("mapour"));
+}
+
+/// With mapour disabled (state None) the router is not mounted and the rest
+/// of the app still works.
+#[tokio::test]
+async fn test_mapour_disabled() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    std::env::set_current_dir(workspace_root).unwrap();
+
+    let spot_config = spot::Config::load();
+    let spot_pool = common::db::init_pool(&spot_config.db_url)
+        .await
+        .expect("failed to initialize spot db pool");
+    let spot_state = Arc::new(spot::SpotResources {
+        pool: spot_pool,
+        config: spot_config,
+    });
+    let paste_state = paste::service::init(paste::Config::load())
+        .await
+        .expect("failed to initialize paste state");
+    let server = TestServer::new(app(spot_state, paste_state, None));
+
+    server
+        .get("/mapour")
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    server.get("/status").await.assert_status_ok();
 }
 
 #[tokio::test]

@@ -21,7 +21,9 @@ lazy_static::lazy_static! {
 pub struct AppState {
     pub spot_state: spot::SpotState,
     pub paste_state: paste::State,
-    pub mapour_state: mapour::State,
+    // None when mapour is disabled (MAPOUR_ENABLED != true); the mapour
+    // router is only mounted when this is Some
+    pub mapour_state: Option<mapour::State>,
 }
 
 impl FromRef<AppState> for spot::SpotState {
@@ -38,24 +40,30 @@ impl FromRef<AppState> for paste::State {
 
 impl FromRef<AppState> for mapour::State {
     fn from_ref(state: &AppState) -> Self {
-        state.mapour_state.clone()
+        state
+            .mapour_state
+            .clone()
+            .expect("mapour handlers are not mounted when mapour is disabled")
     }
 }
 
 pub fn app(
     spot_state: spot::SpotState,
     paste_state: paste::State,
-    mapour_state: mapour::State,
+    mapour_state: Option<mapour::State>,
 ) -> Router {
     let state = AppState {
         spot_state,
         paste_state,
         mapour_state,
     };
-    Router::new()
+    let mut router = Router::new()
         .nest("/spot", spot::service::router(state.clone()))
-        .nest("/paste", paste::service::router(state.clone()))
-        .nest("/mapour", mapour::service::router(state.clone()))
+        .nest("/paste", paste::service::router(state.clone()));
+    if state.mapour_state.is_some() {
+        router = router.nest("/mapour", mapour::service::router(state.clone()));
+    }
+    router
         .route("/", get(handlers::root_handler))
         .route("/status", get(handlers::status_handler))
         .route("/favicon.ico", get(handlers::favicon_handler))
