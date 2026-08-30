@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="shortcut icon" href="/favicon.ico?v=2" type="image/x-icon">
+    <title> flip </title>
+    <style>
+        :root {
+            --bg: #16181a;
+            --bg-lift: #202427;
+            --fg: #e8e6e3;
+            --muted: #8b9199;
+            --accent: #d9a441;
+            --coin: #e0b354;
+            --coin-deep: #b8862a;
+            --coin-edge: #8a6318;
+            --ink: #3a2b06;
+        }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            background: radial-gradient(ellipse at 50% 0%, #23282c 0%, var(--bg) 65%);
+            color: var(--fg);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+        .view {
+            min-height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1.75rem;
+            padding: 3rem 1.25rem;
+        }
+        .view[hidden] { display: none; }
+        h1 {
+            margin: 0;
+            font-size: 1.05rem;
+            font-weight: 500;
+            letter-spacing: 0.42em;
+            text-transform: lowercase;
+            color: var(--muted);
+        }
+
+        /* coin */
+        .stage { perspective: 900px; height: 190px; display: flex; align-items: center; }
+        .toss { will-change: transform; }
+        .toss.airborne { animation: toss 1.4s cubic-bezier(0.3, 0, 0.4, 1); }
+        @keyframes toss {
+            0% { transform: translateY(0) scale(1); }
+            12% { transform: translateY(14px) scale(1.04, 0.94); }
+            50% { transform: translateY(-92px) scale(1); }
+            88% { transform: translateY(0) scale(1); }
+            94% { transform: translateY(6px) scale(1.05, 0.93); }
+            100% { transform: translateY(0) scale(1); }
+        }
+        .coin {
+            width: 170px;
+            height: 170px;
+            position: relative;
+            transform-style: preserve-3d;
+            transform: rotateY(0deg);
+        }
+        .coin.spinning { transition: transform 1.4s cubic-bezier(0.28, 0.02, 0.24, 1); }
+        .face {
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            backface-visibility: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 34% 28%, #f2d089 0%, var(--coin) 45%, var(--coin-deep) 100%);
+            border: 7px solid var(--coin-edge);
+            box-shadow: 0 18px 34px rgba(0, 0, 0, 0.45), inset 0 0 22px rgba(255, 240, 200, 0.28);
+        }
+        .face.tails { transform: rotateY(180deg); }
+
+        /* flip view */
+        #result {
+            font-size: 1.35rem;
+            letter-spacing: 0.28em;
+            text-transform: uppercase;
+            min-height: 1.6rem;
+            color: var(--accent);
+        }
+        #result.pending { color: var(--muted); letter-spacing: 0.5em; }
+        button {
+            font: inherit;
+            cursor: pointer;
+            border-radius: 999px;
+            border: 1px solid transparent;
+        }
+        #flip-btn {
+            padding: 0.8rem 2.6rem;
+            font-size: 0.95rem;
+            letter-spacing: 0.22em;
+            text-transform: uppercase;
+            color: #14161a;
+            background: var(--fg);
+            transition: transform 0.12s ease, opacity 0.15s ease;
+        }
+        #flip-btn:hover:not(:disabled) { transform: translateY(-1px); }
+        #flip-btn:disabled { opacity: 0.4; cursor: default; }
+        #tally {
+            font-size: 0.78rem;
+            letter-spacing: 0.2em;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* odds view */
+        .panel {
+            width: min(440px, 100%);
+            background: var(--bg-lift);
+            border: 1px solid #2c3237;
+            border-radius: 14px;
+            padding: 1.9rem 1.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.4rem;
+        }
+        .split { display: flex; justify-content: space-between; align-items: baseline; }
+        .split .label {
+            font-size: 0.72rem;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+        .split .value {
+            font-size: 2rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+        .split .value.tails-value { color: var(--muted); }
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--accent) 0%, var(--accent) 50%, #343a40 50%, #343a40 100%);
+            outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: var(--fg);
+            border: none;
+            cursor: pointer;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: var(--fg);
+            border: none;
+            cursor: pointer;
+        }
+        .ticks {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.68rem;
+            color: #5d646b;
+            font-variant-numeric: tabular-nums;
+        }
+        #odds-status {
+            font-size: 0.75rem;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            min-height: 1.1rem;
+        }
+        #odds-status.error { color: #e07a5f; }
+        .row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+        .ghost {
+            padding: 0.5rem 1.1rem;
+            font-size: 0.75rem;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--muted);
+            background: transparent;
+            border-color: #343a40;
+        }
+        .ghost:hover { color: var(--fg); border-color: #4b535a; }
+        .note { font-size: 0.72rem; line-height: 1.6; color: #5d646b; }
+        a { color: var(--muted); }
+
+        @media (prefers-reduced-motion: reduce) {
+            .toss.airborne { animation: none; }
+            .coin.spinning { transition: none; }
+            #flip-btn { transition: none; }
+        }
+    </style>
+</head>
+<body>
+    <main id="view-flip" class="view" hidden>
+        <h1>coin flip</h1>
+        <div class="stage">
+            <div id="toss" class="toss">
+                <div id="coin" class="coin">
+                    <div class="face heads">heads</div>
+                    <div class="face tails">tails</div>
+                </div>
+            </div>
+        </div>
+        <div id="result"></div>
+        <button id="flip-btn" type="button">flip</button>
+        <div id="tally">heads 0 &#124; tails 0</div>
+    </main>
+
+    <main id="view-odds" class="view" hidden>
+        <h1>odds</h1>
+        <div class="panel">
+            <div class="split">
+                <div>
+                    <div class="label">heads</div>
+                    <div class="value" id="odds-heads">50%</div>
+                </div>
+                <div style="text-align: right;">
+                    <div class="label">tails</div>
+                    <div class="value tails-value" id="odds-tails">50%</div>
+                </div>
+            </div>
+            <div>
+                <input id="odds-range" type="range" min="0" max="100" step="10" value="50"
+                       aria-label="percent of flips that come up heads">
+                <div class="ticks">
+                    <span>0</span><span>50</span><span>100</span>
+                </div>
+            </div>
+            <div id="odds-status"></div>
+            <div class="row">
+                <button class="ghost" type="button" id="odds-fair">make it fair</button>
+                <button class="ghost" type="button" id="odds-back" data-href="/flip">back to the coin</button>
+            </div>
+            <div class="note">
+                Kept in a cookie, so the odds belong to this browser and last
+                until its cookies are cleared. The coin on
+                <a href="/flip" data-link>/flip</a> never sees these numbers.
+            </div>
+        </div>
+    </main>
+
+    <script>
+        (function () {
+            "use strict";
+
+            var ANIMATION_MS = 1400;
+            var MIN_WINDUP_MS = 180;
+            var REQUEST_TIMEOUT_MS = 4000;
+
+            var views = {
+                flip: document.getElementById("view-flip"),
+                odds: document.getElementById("view-odds")
+            };
+
+            var coin = document.getElementById("coin");
+            var toss = document.getElementById("toss");
+            var flipBtn = document.getElementById("flip-btn");
+            var resultEl = document.getElementById("result");
+            var tallyEl = document.getElementById("tally");
+
+            var range = document.getElementById("odds-range");
+            var headsEl = document.getElementById("odds-heads");
+            var tailsEl = document.getElementById("odds-tails");
+            var statusEl = document.getElementById("odds-status");
+
+            var turns = 0;
+            var busy = false;
+            var tally = { heads: 0, tails: 0 };
+            var reducedMotion = window.matchMedia
+                && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+            // ---- fetch helpers -------------------------------------------------
+
+            function request(path, options) {
+                var opts = options || {};
+                // the odds cookie rides on these; explicit because older
+                // browsers defaulted to omitting it
+                opts.credentials = "same-origin";
+                if (window.AbortController) {
+                    var controller = new AbortController();
+                    opts.signal = controller.signal;
+                    window.setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS);
+                }
+                return window.fetch(path, opts).then(function (res) {
+                    if (!res.ok) {
+                        return res.json().catch(function () { return {}; }).then(function (body) {
+                            throw new Error(body.message || "request failed");
+                        });
+                    }
+                    return res.json();
+                });
+            }
+
+            // ---- flip view -----------------------------------------------------
+
+            // crypto.getRandomValues rather than Math.random, and a single bit
+            // so there is no modulo bias. Only used if the server is
+            // unreachable, in which case the coin is fair.
+            function localFlip() {
+                var buf = new Uint8Array(1);
+                window.crypto.getRandomValues(buf);
+                return (buf[0] & 1) === 0 ? "heads" : "tails";
+            }
+
+            function settle(side) {
+                tally[side] += 1;
+                resultEl.classList.remove("pending");
+                resultEl.textContent = side;
+                tallyEl.textContent = "heads " + tally.heads + " | tails " + tally.tails;
+                flipBtn.disabled = false;
+                busy = false;
+            }
+
+            function land(side) {
+                if (reducedMotion) {
+                    coin.classList.remove("spinning");
+                    coin.style.transform = "rotateY(" + (side === "heads" ? 0 : 180) + "deg)";
+                    settle(side);
+                    return;
+                }
+                // always spin forward a whole number of turns, stopping on the
+                // half turn that shows the drawn face
+                turns += 4;
+                coin.classList.add("spinning");
+                coin.style.transform =
+                    "rotateY(" + (turns * 360 + (side === "heads" ? 0 : 180)) + "deg)";
+                toss.classList.add("airborne");
+                window.setTimeout(function () {
+                    toss.classList.remove("airborne");
+                    settle(side);
+                }, ANIMATION_MS);
+            }
+
+            function doFlip() {
+                if (busy) { return; }
+                busy = true;
+                flipBtn.disabled = true;
+                resultEl.classList.add("pending");
+                resultEl.textContent = "...";
+
+                var drawn = request("/flip/api/flip", { method: "POST" })
+                    .then(function (body) {
+                        return body.result === "heads" || body.result === "tails"
+                            ? body.result
+                            : localFlip();
+                    })
+                    .catch(function () { return localFlip(); });
+
+                // hold the wind-up briefly so a fast response doesn't cut the
+                // toss off before it reads as one
+                var windup = new Promise(function (resolve) {
+                    window.setTimeout(resolve, MIN_WINDUP_MS);
+                });
+
+                Promise.all([drawn, windup]).then(function (values) { land(values[0]); });
+            }
+
+            flipBtn.addEventListener("click", doFlip);
+
+            // ---- odds view -----------------------------------------------------
+
+            function paintOdds(pct) {
+                range.value = String(pct);
+                headsEl.textContent = pct + "%";
+                tailsEl.textContent = (100 - pct) + "%";
+                range.style.background =
+                    "linear-gradient(90deg, var(--accent) 0%, var(--accent) " + pct
+                    + "%, #343a40 " + pct + "%, #343a40 100%)";
+            }
+
+            function setStatus(text, isError) {
+                statusEl.textContent = text;
+                statusEl.classList.toggle("error", !!isError);
+            }
+
+            function loadOdds() {
+                setStatus("loading...");
+                request("/flip/api/odds")
+                    .then(function (body) {
+                        paintOdds(body.heads_pct);
+                        setStatus("this browser is on " + body.heads_pct + "% heads");
+                    })
+                    .catch(function (e) { setStatus(e.message, true); });
+            }
+
+            function saveOdds(pct) {
+                setStatus("saving...");
+                request("/flip/api/odds", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ heads_pct: pct })
+                })
+                    .then(function (body) {
+                        paintOdds(body.heads_pct);
+                        setStatus("saved to this browser");
+                    })
+                    .catch(function (e) { setStatus(e.message, true); });
+            }
+
+            range.addEventListener("input", function () {
+                paintOdds(Number(range.value));
+            });
+            range.addEventListener("change", function () {
+                saveOdds(Number(range.value));
+            });
+            document.getElementById("odds-fair").addEventListener("click", function () {
+                paintOdds(50);
+                saveOdds(50);
+            });
+
+            // ---- routing -------------------------------------------------------
+
+            function routeOf(pathname) {
+                return pathname.replace(/\/+$/, "") === "/flip/odds" ? "odds" : "flip";
+            }
+
+            function render() {
+                var route = routeOf(window.location.pathname);
+                views.flip.hidden = route !== "flip";
+                views.odds.hidden = route !== "odds";
+                document.title = route === "odds" ? "flip odds" : "flip";
+                if (route === "odds") {
+                    loadOdds();
+                }
+            }
+
+            function navigate(href) {
+                window.history.pushState({}, "", href);
+                render();
+            }
+
+            document.addEventListener("click", function (e) {
+                var el = e.target.closest ? e.target.closest("[data-link], [data-href]") : null;
+                if (!el) { return; }
+                var href = el.getAttribute("data-href") || el.getAttribute("href");
+                if (!href || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) { return; }
+                e.preventDefault();
+                navigate(href);
+            });
+
+            window.addEventListener("popstate", render);
+            render();
+        })();
+    </script>
+</body>
+</html>

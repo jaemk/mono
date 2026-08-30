@@ -1,5 +1,6 @@
 pub mod config;
 pub mod dev;
+pub mod flip;
 pub mod handlers;
 pub mod homepage;
 pub mod middleware;
@@ -15,6 +16,20 @@ pub use config::CONFIG;
 
 lazy_static::lazy_static! {
     pub static ref TERA: Tera = Tera::new("templates/**/*.html").expect("unable to compile tera templates");
+}
+
+/// Compile the workspace templates from an absolute path so tests do not
+/// depend on the process working directory (the shared `TERA` glob is
+/// relative to the workspace root).
+#[cfg(test)]
+pub(crate) fn workspace_tera() -> Tera {
+    let glob = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent() // crates/
+        .unwrap()
+        .parent() // workspace root
+        .unwrap()
+        .join("templates/**/*.html");
+    Tera::new(glob.to_str().unwrap()).expect("unable to compile tera templates")
 }
 
 #[derive(Clone)]
@@ -59,7 +74,8 @@ pub fn app(
     };
     let mut router = Router::new()
         .nest("/spot", spot::service::router(state.clone()))
-        .nest("/paste", paste::service::router(state.clone()));
+        .nest("/paste", paste::service::router(state.clone()))
+        .merge(flip::router());
     if state.mapour_state.is_some() {
         router = router.nest("/mapour", mapour::service::router(state.clone()));
     }

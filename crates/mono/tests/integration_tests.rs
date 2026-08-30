@@ -1,4 +1,5 @@
 use axum::http::{header, StatusCode};
+use axum_extra::extract::cookie::Cookie;
 use axum_test::TestServer;
 use mono::{app, CONFIG};
 use std::sync::Arc;
@@ -49,6 +50,152 @@ async fn test_robots_txt() {
     let server = get_server().await;
     let response = server.get("/robots.txt").await;
     response.assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_flip_spa_serves_on_both_routes() {
+    let server = get_server().await;
+    for path in ["/flip", "/flip/", "/flip/odds", "/flip/odds/"] {
+        let response = server.get(path).await;
+        response.assert_status_ok();
+        response.assert_header(header::CONTENT_TYPE, "text/html");
+        let body = response.text();
+        assert!(body.contains("view-flip"), "{path} should serve the spa");
+        assert!(body.contains("view-odds"), "{path} should serve the spa");
+    }
+}
+
+#[tokio::test]
+async fn test_flip_odds_default_is_fair() {
+    let server = get_server().await;
+    let response = server.get("/flip/api/odds").await;
+    response.assert_status_ok();
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["heads_pct"], 50);
+    assert_eq!(body["step"], 10);
+}
+
+#[tokio::test]
+async fn test_flip_returns_a_side() {
+    let server = get_server().await;
+    let response = server.post("/flip/api/flip").await;
+    response.assert_status_ok();
+    let result = response.json::<serde_json::Value>()["result"]
+        .as_str()
+        .expect("result should be a string")
+        .to_string();
+    assert!(result == "heads" || result == "tails", "got {result}");
+}
+
+/// Saving the odds hands back a persistent, unreadable cookie scoped to the
+/// flip pages.
+#[tokio::test]
+async fn test_flip_odds_sets_a_persistent_cookie() {
+    let server = get_server().await;
+    let response = server
+        .post("/flip/api/odds")
+        .json(&serde_json::json!({"heads_pct": 70}))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<serde_json::Value>()["heads_pct"], 70);
+
+    let cookie = response.cookie("flip_odds");
+    assert_eq!(cookie.value(), "70");
+    assert_eq!(cookie.http_only(), Some(true));
+    assert_eq!(cookie.path(), Some("/flip"));
+    assert!(cookie.max_age().is_some(), "should outlive the session");
+}
+
+/// A browser holding the cookie gets its odds back and has its flips steered;
+/// the same server flips fair for a browser without one.
+#[tokio::test]
+async fn test_flip_odds_follow_the_browser() {
+    let mut server = get_server().await;
+    server.save_cookies();
+
+    server
+        .post("/flip/api/odds")
+        .json(&serde_json::json!({"heads_pct": 100}))
+        .await
+        .assert_status_ok();
+
+    let response = server.get("/flip/api/odds").await;
+    assert_eq!(response.json::<serde_json::Value>()["heads_pct"], 100);
+    for _ in 0..20 {
+        let response = server.post("/flip/api/flip").await;
+        assert_eq!(response.json::<serde_json::Value>()["result"], "heads");
+    }
+
+    server
+        .post("/flip/api/odds")
+        .json(&serde_json::json!({"heads_pct": 0}))
+        .await
+        .assert_status_ok();
+    for _ in 0..20 {
+        let response = server.post("/flip/api/flip").await;
+        assert_eq!(response.json::<serde_json::Value>()["result"], "tails");
+    }
+
+    // nothing was stored server side, so a fresh browser is still fair
+    let fresh = get_server().await;
+    assert_eq!(
+        fresh
+            .get("/flip/api/odds")
+            .await
+            .json::<serde_json::Value>()["heads_pct"],
+        50
+    );
+}
+
+/// The odds come out of the request's own cookie, so two browsers hitting the
+/// same server don't see each other's.
+#[tokio::test]
+async fn test_flip_odds_are_per_browser() {
+    let server = get_server().await;
+
+    let rigged = server
+        .get("/flip/api/odds")
+        .add_cookie(Cookie::new("flip_odds", "100"))
+        .await;
+    assert_eq!(rigged.json::<serde_json::Value>()["heads_pct"], 100);
+
+    let untouched = server.get("/flip/api/odds").await;
+    assert_eq!(untouched.json::<serde_json::Value>()["heads_pct"], 50);
+}
+
+/// A hand edited cookie can't push the draw off the steps or out of range.
+#[tokio::test]
+async fn test_flip_tampered_cookie_falls_back_to_fair() {
+    let server = get_server().await;
+    for bad in ["abc", "55", "-10", "110"] {
+        let response = server
+            .get("/flip/api/odds")
+            .add_cookie(Cookie::new("flip_odds", bad))
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.json::<serde_json::Value>()["heads_pct"], 50);
+
+        let response = server
+            .post("/flip/api/flip")
+            .add_cookie(Cookie::new("flip_odds", bad))
+            .await;
+        response.assert_status_ok();
+    }
+}
+
+#[tokio::test]
+async fn test_flip_odds_rejects_off_step_values() {
+    let server = get_server().await;
+    for bad in [55, 101, -10] {
+        let response = server
+            .post("/flip/api/odds")
+            .json(&serde_json::json!({"heads_pct": bad}))
+            .await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(response.json::<serde_json::Value>()["code"], 400);
+        // a rejected update must not touch the browser's cookie
+        assert!(response.maybe_cookie("flip_odds").is_none());
+    }
 }
 
 #[tokio::test]

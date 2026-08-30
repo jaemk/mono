@@ -26,6 +26,8 @@ dotenv.workspace = true
 tera.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true
+rand.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
