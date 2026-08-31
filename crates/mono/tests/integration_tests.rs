@@ -183,6 +183,147 @@ async fn test_flip_tampered_cookie_falls_back_to_fair() {
     }
 }
 
+/// Naming and coloring the coin hands back a cookie alongside the normalized
+/// values.
+#[tokio::test]
+async fn test_coin_customization_round_trips() {
+    let mut server = get_server().await;
+    server.save_cookies();
+
+    let response = server
+        .post("/flip/api/coin")
+        .json(&serde_json::json!({
+            "heads_name": "  yes  ",
+            "tails_name": "no",
+            "heads_color": "#112233",
+            "tails_color": "#FFEE00",
+        }))
+        .await;
+    response.assert_status_ok();
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["heads"]["name"], "yes");
+    assert_eq!(body["heads"]["color"], "#112233");
+    assert_eq!(body["tails"]["color"], "#ffee00");
+    // a dark face takes light text and a bright one takes dark text
+    assert_eq!(body["heads"]["ink"], "#f4f2ef");
+    assert_eq!(body["tails"]["ink"], "#241a04");
+
+    let cookie = response.cookie("flip_coin");
+    assert_eq!(cookie.http_only(), Some(true));
+    assert_eq!(cookie.path(), Some("/flip"));
+    assert!(cookie.max_age().is_some(), "should outlive the session");
+
+    // the page comes back already wearing it, on both routes
+    for path in ["/flip", "/flip/odds"] {
+        let page = server.get(path).await;
+        page.assert_status_ok();
+        let html = page.text();
+        assert!(
+            html.contains("--heads-bg: #112233;"),
+            "{path} misses the color"
+        );
+        assert!(html.contains("yes"), "{path} misses the heads name");
+        assert!(html.contains("no"), "{path} misses the tails name");
+    }
+}
+
+/// The names reach the odds page's own labels, not just the coin.
+#[tokio::test]
+async fn test_coin_names_label_the_odds_page() {
+    let server = get_server().await;
+    let coin = server
+        .post("/flip/api/coin")
+        .json(&serde_json::json!({
+            "heads_name": "sun",
+            "tails_name": "moon",
+            "heads_color": "#112233",
+            "tails_color": "#ffee00",
+        }))
+        .await
+        .cookie("flip_coin");
+
+    let page = server.get("/flip/odds").add_cookie(coin).await;
+    page.assert_status_ok();
+    let html = page.text();
+    assert!(html.contains("id=\"odds-heads-label\">sun<"));
+    assert!(html.contains("id=\"odds-tails-label\">moon<"));
+}
+
+#[tokio::test]
+async fn test_coin_rejects_bad_names_and_colors() {
+    let server = get_server().await;
+    let cases = [
+        serde_json::json!({"heads_name": "", "tails_name": "no", "heads_color": "#112233", "tails_color": "#ffee00"}),
+        serde_json::json!({"heads_name": "seventeen chars!!", "tails_name": "no", "heads_color": "#112233", "tails_color": "#ffee00"}),
+        serde_json::json!({"heads_name": "yes", "tails_name": "no", "heads_color": "red", "tails_color": "#ffee00"}),
+        serde_json::json!({"heads_name": "yes", "tails_name": "no", "heads_color": "#112233", "tails_color": "#aabbcc; } body { display: none"}),
+    ];
+    for body in cases {
+        let response = server.post("/flip/api/coin").json(&body).await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(response.json::<serde_json::Value>()["code"], 400);
+        // a rejected edit must not touch the browser's coin
+        assert!(response.maybe_cookie("flip_coin").is_none());
+    }
+}
+
+/// A hand edited coin cookie still renders a usable page.
+#[tokio::test]
+async fn test_tampered_coin_cookie_renders_defaults() {
+    let server = get_server().await;
+    let page = server
+        .get("/flip")
+        .add_cookie(Cookie::new("flip_coin", "not-base64!!"))
+        .await;
+    page.assert_status_ok();
+    let html = page.text();
+    assert!(html.contains("--heads-bg: #e0b354;"));
+    assert!(html.contains("id=\"face-heads\">heads<"));
+}
+
+/// The two cookies are independent: rigging the odds leaves the coin's look
+/// alone, and naming the coin leaves the odds alone.
+#[tokio::test]
+async fn test_coin_and_odds_cookies_coexist() {
+    let mut server = get_server().await;
+    server.save_cookies();
+
+    server
+        .post("/flip/api/odds")
+        .json(&serde_json::json!({"heads_pct": 100}))
+        .await
+        .assert_status_ok();
+    server
+        .post("/flip/api/coin")
+        .json(&serde_json::json!({
+            "heads_name": "sun",
+            "tails_name": "moon",
+            "heads_color": "#112233",
+            "tails_color": "#ffee00",
+        }))
+        .await
+        .assert_status_ok();
+
+    // odds survived the coin edit, and still steer the draw
+    assert_eq!(
+        server
+            .get("/flip/api/odds")
+            .await
+            .json::<serde_json::Value>()["heads_pct"],
+        100
+    );
+    for _ in 0..10 {
+        let response = server.post("/flip/api/flip").await;
+        assert_eq!(response.json::<serde_json::Value>()["result"], "heads");
+    }
+    // and the coin survived alongside it
+    assert!(server
+        .get("/flip")
+        .await
+        .text()
+        .contains("id=\"face-heads\">sun<"));
+}
+
 #[tokio::test]
 async fn test_flip_odds_rejects_off_step_values() {
     let server = get_server().await;

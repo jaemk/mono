@@ -12,10 +12,11 @@
             --fg: #e8e6e3;
             --muted: #8b9199;
             --accent: #d9a441;
-            --coin: #e0b354;
-            --coin-deep: #b8862a;
-            --coin-edge: #8a6318;
-            --ink: #3a2b06;
+            /* the coin's own look, saved per browser in the flip_coin cookie */
+            --heads-bg: {{ coin.heads.color }};
+            --heads-ink: {{ coin.heads.ink }};
+            --tails-bg: {{ coin.tails.color }};
+            --tails-ink: {{ coin.tails.ink }};
         }
         * { box-sizing: border-box; }
         html, body { height: 100%; }
@@ -73,17 +74,28 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.35rem;
+            font-size: 1.05rem;
             font-weight: 700;
-            letter-spacing: 0.14em;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: var(--ink);
-            background:
-                radial-gradient(circle at 34% 28%, #f2d089 0%, var(--coin) 45%, var(--coin-deep) 100%);
-            border: 7px solid var(--coin-edge);
-            box-shadow: 0 18px 34px rgba(0, 0, 0, 0.45), inset 0 0 22px rgba(255, 240, 200, 0.28);
+            text-align: center;
+            line-height: 1.2;
+            padding: 0 1.5rem;
+            overflow-wrap: anywhere;
+            /* highlight and shading are overlays on top of background-color,
+               so any color the picker returns still reads as a coin */
+            background-image:
+                radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 55%),
+                linear-gradient(160deg, rgba(255, 255, 255, 0.1) 0%, rgba(0, 0, 0, 0.3) 100%);
+            border: 7px solid rgba(0, 0, 0, 0.3);
+            box-shadow: 0 18px 34px rgba(0, 0, 0, 0.45), inset 0 0 22px rgba(255, 255, 255, 0.16);
         }
-        .face.tails { transform: rotateY(180deg); }
+        .face.heads { background-color: var(--heads-bg); color: var(--heads-ink); }
+        .face.tails {
+            background-color: var(--tails-bg);
+            color: var(--tails-ink);
+            transform: rotateY(180deg);
+        }
 
         /* flip view */
         #result {
@@ -117,6 +129,51 @@
             color: var(--muted);
             font-variant-numeric: tabular-nums;
         }
+
+        /* customize panel */
+        #customize[hidden] { display: none; }
+        .field { display: flex; align-items: center; gap: 0.7rem; }
+        .field .side {
+            font-size: 0.7rem;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: var(--muted);
+            width: 3.4rem;
+            flex: none;
+        }
+        input[type="text"] {
+            font: inherit;
+            font-size: 0.9rem;
+            flex: 1;
+            min-width: 0;
+            padding: 0.45rem 0.7rem;
+            color: var(--fg);
+            background: #171b1e;
+            border: 1px solid #343a40;
+            border-radius: 8px;
+            outline: none;
+        }
+        input[type="text"]:focus { border-color: #4b535a; }
+        input[type="color"] {
+            flex: none;
+            width: 42px;
+            height: 34px;
+            padding: 0;
+            background: none;
+            border: 1px solid #343a40;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 3px; }
+        input[type="color"]::-webkit-color-swatch { border: none; border-radius: 5px; }
+        input[type="color"]::-moz-color-swatch { border: none; border-radius: 5px; }
+        #coin-status {
+            font-size: 0.72rem;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+            min-height: 1rem;
+        }
+        #coin-status.error { color: #e07a5f; }
 
         /* odds view */
         .panel {
@@ -210,14 +267,37 @@
         <div class="stage">
             <div id="toss" class="toss">
                 <div id="coin" class="coin">
-                    <div class="face heads">heads</div>
-                    <div class="face tails">tails</div>
+                    <div class="face heads" id="face-heads">{{ coin.heads.name }}</div>
+                    <div class="face tails" id="face-tails">{{ coin.tails.name }}</div>
                 </div>
             </div>
         </div>
         <div id="result"></div>
         <button id="flip-btn" type="button">flip</button>
-        <div id="tally">heads 0 &#124; tails 0</div>
+        <div id="tally">{{ coin.heads.name }} 0 &#124; {{ coin.tails.name }} 0</div>
+        <button class="ghost" type="button" id="customize-toggle" aria-expanded="false"
+                aria-controls="customize">customize</button>
+        <div class="panel" id="customize" hidden>
+            <div class="field">
+                <span class="side">heads</span>
+                <input id="heads-name" type="text" value="{{ coin.heads.name }}" maxlength="16"
+                       aria-label="name of the heads side">
+                <input id="heads-color" type="color" value="{{ coin.heads.color }}"
+                       aria-label="color of the heads side">
+            </div>
+            <div class="field">
+                <span class="side">tails</span>
+                <input id="tails-name" type="text" value="{{ coin.tails.name }}" maxlength="16"
+                       aria-label="name of the tails side">
+                <input id="tails-color" type="color" value="{{ coin.tails.color }}"
+                       aria-label="color of the tails side">
+            </div>
+            <div id="coin-status"></div>
+            <div class="note">
+                Saved to this browser in a cookie, same as the odds. These names
+                show up on the odds page too.
+            </div>
+        </div>
     </main>
 
     <main id="view-odds" class="view" hidden>
@@ -225,11 +305,11 @@
         <div class="panel">
             <div class="split">
                 <div>
-                    <div class="label">heads</div>
+                    <div class="label" id="odds-heads-label">{{ coin.heads.name }}</div>
                     <div class="value" id="odds-heads">50%</div>
                 </div>
                 <div style="text-align: right;">
-                    <div class="label">tails</div>
+                    <div class="label" id="odds-tails-label">{{ coin.tails.name }}</div>
                     <div class="value tails-value" id="odds-tails">50%</div>
                 </div>
             </div>
@@ -277,6 +357,26 @@
             var tailsEl = document.getElementById("odds-tails");
             var statusEl = document.getElementById("odds-status");
 
+            var customizeToggle = document.getElementById("customize-toggle");
+            var customizePanel = document.getElementById("customize");
+            var coinStatusEl = document.getElementById("coin-status");
+            var faces = {
+                heads: document.getElementById("face-heads"),
+                tails: document.getElementById("face-tails")
+            };
+            var oddsLabels = {
+                heads: document.getElementById("odds-heads-label"),
+                tails: document.getElementById("odds-tails-label")
+            };
+            var nameInputs = {
+                heads: document.getElementById("heads-name"),
+                tails: document.getElementById("tails-name")
+            };
+            var colorInputs = {
+                heads: document.getElementById("heads-color"),
+                tails: document.getElementById("tails-color")
+            };
+
             var turns = 0;
             var busy = false;
             var tally = { heads: 0, tails: 0 };
@@ -305,6 +405,96 @@
                 });
             }
 
+            // ---- the coin's look -----------------------------------------------
+
+            // the server rendered the current coin into the page, so the
+            // inputs are the source of truth on load
+            function nameOf(side) {
+                return nameInputs[side].value.trim() || side;
+            }
+
+            // mirrors ink_for in flip.rs so a color picked here reads right
+            // before the save comes back
+            function inkFor(hex) {
+                var channel = function (offset) {
+                    var c = parseInt(hex.substr(offset, 2), 16) / 255;
+                    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+                };
+                var luminance =
+                    0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+                return luminance > 0.4 ? "#241a04" : "#f4f2ef";
+            }
+
+            function paintTally() {
+                tallyEl.textContent =
+                    nameOf("heads") + " " + tally.heads + " | "
+                    + nameOf("tails") + " " + tally.tails;
+            }
+
+            function paintSide(side, name, color) {
+                faces[side].textContent = name;
+                oddsLabels[side].textContent = name;
+                document.documentElement.style.setProperty("--" + side + "-bg", color);
+                document.documentElement.style.setProperty("--" + side + "-ink", inkFor(color));
+            }
+
+            function paintCoin() {
+                paintSide("heads", nameOf("heads"), colorInputs.heads.value);
+                paintSide("tails", nameOf("tails"), colorInputs.tails.value);
+                paintTally();
+            }
+
+            function saveCoin() {
+                paintCoin();
+                coinStatusEl.textContent = "saving...";
+                coinStatusEl.classList.remove("error");
+                request("/flip/api/coin", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({
+                        heads_name: nameInputs.heads.value,
+                        tails_name: nameInputs.tails.value,
+                        heads_color: colorInputs.heads.value,
+                        tails_color: colorInputs.tails.value
+                    })
+                })
+                    .then(function (body) {
+                        // take the server's normalized values back
+                        nameInputs.heads.value = body.heads.name;
+                        nameInputs.tails.value = body.tails.name;
+                        colorInputs.heads.value = body.heads.color;
+                        colorInputs.tails.value = body.tails.color;
+                        paintCoin();
+                        coinStatusEl.textContent = "saved to this browser";
+                    })
+                    .catch(function (e) {
+                        coinStatusEl.textContent = e.message;
+                        coinStatusEl.classList.add("error");
+                    });
+            }
+
+            var saveTimer = null;
+            function saveCoinSoon() {
+                paintCoin();
+                window.clearTimeout(saveTimer);
+                saveTimer = window.setTimeout(saveCoin, 500);
+            }
+
+            customizeToggle.addEventListener("click", function () {
+                var opening = customizePanel.hidden;
+                customizePanel.hidden = !opening;
+                customizeToggle.setAttribute("aria-expanded", opening ? "true" : "false");
+            });
+
+            nameInputs.heads.addEventListener("input", saveCoinSoon);
+            nameInputs.tails.addEventListener("input", saveCoinSoon);
+            // color pickers fire input continuously while dragging, so paint
+            // live and only save once the picker settles
+            colorInputs.heads.addEventListener("input", paintCoin);
+            colorInputs.tails.addEventListener("input", paintCoin);
+            colorInputs.heads.addEventListener("change", saveCoin);
+            colorInputs.tails.addEventListener("change", saveCoin);
+
             // ---- flip view -----------------------------------------------------
 
             // crypto.getRandomValues rather than Math.random, and a single bit
@@ -319,8 +509,8 @@
             function settle(side) {
                 tally[side] += 1;
                 resultEl.classList.remove("pending");
-                resultEl.textContent = side;
-                tallyEl.textContent = "heads " + tally.heads + " | tails " + tally.tails;
+                resultEl.textContent = nameOf(side);
+                paintTally();
                 flipBtn.disabled = false;
                 busy = false;
             }
@@ -392,7 +582,8 @@
                 request("/flip/api/odds")
                     .then(function (body) {
                         paintOdds(body.heads_pct);
-                        setStatus("this browser is on " + body.heads_pct + "% heads");
+                        setStatus("this browser is on " + body.heads_pct + "% "
+                            + nameOf("heads"));
                     })
                     .catch(function (e) { setStatus(e.message, true); });
             }
