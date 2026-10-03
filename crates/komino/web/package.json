@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "coverage": "node --test --experimental-test-coverage --test-coverage-include=../assets/static/app.js"
+    "coverage": "node --test --experimental-test-coverage --test-coverage-include=../assets/static/app.js --test-coverage-lines=98 --test-coverage-branches=94 --test-coverage-functions=98"
   },
   "devDependencies": {
     "jsdom": "29.1.1"

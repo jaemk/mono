@@ -31,6 +31,12 @@ make test
 After touching `crates/komino/assets`, also run `make test-js` (node tests under
 `crates/komino/web`).
 
+## CI
+`.github/workflows/ci.yml` runs on every PR and push to main: fmt and clippy, `cargo audit
+--deny warnings` (ignores in `.cargo/audit.toml`), the full `bin/test-db.sh` suite against
+postgres plus a RustFS S3 store (so S3-backed tests run), the komino client tests with
+coverage thresholds, and a Docker image build. Deploys are still manual.
+
 ## Docker
 - `bin/stub_workspace.sh` generates stub source files from the workspace manifest for dependency-caching Docker builds
 - When adding a new crate, add a `COPY crates/<name>/Cargo.toml` line to the Dockerfile builder stage
