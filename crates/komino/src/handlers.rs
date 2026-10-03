@@ -321,11 +321,21 @@ enum Who {
     },
 }
 
+/// The message for a failed access check: a refusal ends the socket as
+/// `removed`, while a server error is reported and the socket stays open.
+fn access_error(e: &ApiError) -> Value {
+    if e.status.is_server_error() {
+        json!({ "type": "error", "code": e.code, "message": e.message })
+    } else {
+        json!({ "type": "removed", "code": e.code })
+    }
+}
+
 /// Send the socket's current view. False when the socket should close.
 async fn send_view(state: &State, room: &Room, who: &Who, socket: &mut WebSocket) -> bool {
     let msg = match who {
         Who::Member(player) => match models::require_member(&state.db, room.id, player).await {
-            Err(e) => json!({ "type": "removed", "code": e.code }),
+            Err(e) => access_error(&e),
             Ok(()) => match room_view(state, room, player).await {
                 Ok(view) => json!({ "type": "view", "view": view }),
                 Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
@@ -333,7 +343,7 @@ async fn send_view(state: &State, room: &Room, who: &Who, socket: &mut WebSocket
         },
         Who::Observer { player, .. } => {
             match models::require_not_removed(&state.db, room.id, player).await {
-                Err(e) => json!({ "type": "removed", "code": e.code }),
+                Err(e) => access_error(&e),
                 Ok(()) => match observer_view(state, room).await {
                     Ok(view) => json!({ "type": "view", "view": view }),
                     Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
@@ -446,6 +456,18 @@ mod tests {
         let forged = signed.replacen("abc", "abd", 1);
         assert_eq!(verify_player(&forged, "key"), None);
         assert_eq!(verify_player("abc", "key"), None);
+    }
+
+    #[test]
+    fn only_refusals_close_a_socket_as_removed() {
+        let removed = access_error(&ApiError::removed());
+        assert_eq!(removed, json!({ "type": "removed", "code": "removed" }));
+        let left = access_error(&ApiError::forbidden("join the room first"));
+        assert_eq!(left["type"], "removed");
+        // a database failure is retryable, not a removal
+        let db = access_error(&ApiError::from(sqlx::Error::PoolTimedOut));
+        assert_eq!(db["type"], "error");
+        assert_eq!(db["code"], "error");
     }
 
     #[test]

@@ -347,6 +347,18 @@ test("peek deadlines are read against the server clock, not when the view arrive
   assert.equal(page.slot(0, 3).classList.contains("peeked"), false);
 });
 
+test("countdowns use the server clock", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 7_000_000 });
+  // this browser runs 10s fast; the server says 20s remain
+  const page = await boot({
+    view: makeView(makeGame({ turn: 1, away_deadline: 6_990_000 + 20_000 }), { server_now: 6_990_000 }),
+  });
+  t.after(page.stop);
+  assert.equal(page.$("status").textContent, "bob's turn (away, skipping in 20s)");
+  page.push(makeView(makeGame({ status: "scoring", score_at: 6_990_000 + 2_000 }), { server_now: 6_990_000 }));
+  assert.equal(page.$("status").textContent, "scoring in 2s, last chance to match");
+});
+
 test("an away player's countdown shows", async (t) => {
   const page = await boot({ view: makeView(makeGame({ turn: 1, away_deadline: Date.now() + 29_200 })) });
   t.after(page.stop);

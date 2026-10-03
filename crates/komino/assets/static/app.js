@@ -467,8 +467,9 @@
       });
     }
 
+    // deadlines are server times, read against the corrected clock
     function secondsLeft(deadline) {
-      return deadline ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : null;
+      return deadline ? Math.max(0, Math.ceil((deadline - Date.now() - skew) / 1000)) : null;
     }
 
     function renderStatus(g) {

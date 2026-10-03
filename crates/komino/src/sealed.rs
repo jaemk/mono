@@ -64,6 +64,10 @@ fn aes_key(secret: &SecretKey, peer: &PublicKey, salt: &[u8]) -> Result<LessSafe
 impl ServerKey {
     pub fn from_hex(hex_scalar: &str) -> anyhow::Result<Self> {
         let bytes = hex::decode(hex_scalar.trim())?;
+        // the parser would left-pad a short scalar; require the full width
+        if bytes.len() != 32 {
+            anyhow::bail!("expected 32 bytes, got {}", bytes.len());
+        }
         let secret = SecretKey::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("not a valid P-256 scalar"))?;
         let point = public_point(&secret.public_key());

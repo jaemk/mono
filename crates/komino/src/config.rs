@@ -41,10 +41,13 @@ impl Config {
         if self.signing_key == DEV_SIGNING_KEY || self.signing_key.len() < 32 {
             anyhow::bail!("KOMINO_SIGNING_KEY must be set to a random value of at least 32 chars");
         }
-        if self.ecdh_key == DEV_ECDH_KEY {
+        // compare the parsed scalar, so case or padding can't disguise the dev key
+        let key = crate::sealed::ServerKey::from_hex(&self.ecdh_key).map_err(|e| {
+            anyhow::anyhow!("KOMINO_ECDH_KEY must be a P-256 scalar of 64 hex chars: {e}")
+        })?;
+        if key.public_key == crate::sealed::ServerKey::from_hex(DEV_ECDH_KEY)?.public_key {
             anyhow::bail!("KOMINO_ECDH_KEY must be set to a random P-256 scalar (64 hex chars)");
         }
-        crate::sealed::ServerKey::from_hex(&self.ecdh_key)?;
         Ok(())
     }
 }
@@ -86,5 +89,16 @@ mod tests {
         assert!(config(&signing, &"00".repeat(32))
             .validate_for_deploy()
             .is_err());
+        // the dev key in disguise is still the dev key
+        for disguised in [DEV_ECDH_KEY.to_uppercase(), format!("  {DEV_ECDH_KEY}\n")] {
+            assert!(config(&signing, &disguised).validate_for_deploy().is_err());
+        }
+        // exactly 32 bytes, not a shorter scalar left-padded by the parser
+        assert!(config(&signing, &"a1".repeat(31))
+            .validate_for_deploy()
+            .is_err());
+        assert!(config(&signing, &"a1".repeat(32))
+            .validate_for_deploy()
+            .is_ok());
     }
 }
