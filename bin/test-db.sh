@@ -32,6 +32,7 @@ TEST_ID="$(openssl rand -hex 4)"
 SPOT_TEST_DB="spot_test_${TEST_ID}"
 PASTE_TEST_DB="paste_test_${TEST_ID}"
 MAPOUR_TEST_DB="mapour_test_${TEST_ID}"
+KOMINO_TEST_DB="komino_test_${TEST_ID}"
 
 # ---------------------------------------------------------------------------
 # Load base credentials from .env (if it exists) so DB_HOST / ports etc. are
@@ -61,6 +62,11 @@ MAPOUR_DB_PASS="${MAPOUR_DB_PASS:-mapour}"
 MAPOUR_DB_HOST="${MAPOUR_DB_HOST:-localhost}"
 MAPOUR_DB_PORT="${MAPOUR_DB_PORT:-5432}"
 
+KOMINO_DB_USER="${KOMINO_DB_USER:-komino}"
+KOMINO_DB_PASS="${KOMINO_DB_PASS:-komino}"
+KOMINO_DB_HOST="${KOMINO_DB_HOST:-localhost}"
+KOMINO_DB_PORT="${KOMINO_DB_PORT:-5432}"
+
 # Override database URLs to point at ephemeral DBs.
 export SPOT_DB_NAME="${SPOT_TEST_DB}"
 export PASTE_DB_NAME="${PASTE_TEST_DB}"
@@ -68,11 +74,14 @@ export MAPOUR_DB_NAME="${MAPOUR_TEST_DB}"
 export SPOT_DATABASE_URL="postgres://${SPOT_DB_USER}:${SPOT_DB_PASS}@${SPOT_DB_HOST}:${SPOT_DB_PORT}/${SPOT_TEST_DB}"
 export PASTE_DATABASE_URL="postgres://${PASTE_DB_USER}:${PASTE_DB_PASS}@${PASTE_DB_HOST}:${PASTE_DB_PORT}/${PASTE_TEST_DB}"
 export MAPOUR_DATABASE_URL="postgres://${MAPOUR_DB_USER}:${MAPOUR_DB_PASS}@${MAPOUR_DB_HOST}:${MAPOUR_DB_PORT}/${MAPOUR_TEST_DB}"
+export KOMINO_DB_NAME="${KOMINO_TEST_DB}"
+export KOMINO_DATABASE_URL="postgres://${KOMINO_DB_USER}:${KOMINO_DB_PASS}@${KOMINO_DB_HOST}:${KOMINO_DB_PORT}/${KOMINO_TEST_DB}"
 
 echo "==> Test run ID: ${TEST_ID}"
 echo "    SPOT_DATABASE_URL   = ${SPOT_DATABASE_URL}"
 echo "    PASTE_DATABASE_URL  = ${PASTE_DATABASE_URL}"
 echo "    MAPOUR_DATABASE_URL = ${MAPOUR_DATABASE_URL}"
+echo "    KOMINO_DATABASE_URL = ${KOMINO_DATABASE_URL}"
 
 # ---------------------------------------------------------------------------
 # Helper: run psql as the postgres superuser
@@ -97,6 +106,9 @@ cleanup() {
 
     pg_exec "${MAPOUR_DB_HOST}" "${MAPOUR_DB_PORT}" \
         "DROP DATABASE IF EXISTS ${MAPOUR_TEST_DB};" 2>/dev/null || true
+
+    pg_exec "${KOMINO_DB_HOST}" "${KOMINO_DB_PORT}" \
+        "DROP DATABASE IF EXISTS ${KOMINO_TEST_DB};" 2>/dev/null || true
 
     echo "==> Done."
 }
@@ -149,6 +161,21 @@ pg_exec "${MAPOUR_DB_HOST}" "${MAPOUR_DB_PORT}" \
     "GRANT ALL PRIVILEGES ON DATABASE ${MAPOUR_TEST_DB} TO ${MAPOUR_DB_USER};"
 
 # ---------------------------------------------------------------------------
+# Create ephemeral komino test database
+# ---------------------------------------------------------------------------
+echo "==> Creating ephemeral komino database '${KOMINO_TEST_DB}'..."
+pg_exec "${KOMINO_DB_HOST}" "${KOMINO_DB_PORT}" \
+    "DO \$\$ BEGIN
+       IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${KOMINO_DB_USER}') THEN
+         CREATE ROLE ${KOMINO_DB_USER} WITH LOGIN PASSWORD '${KOMINO_DB_PASS}';
+       END IF;
+     END \$\$;"
+pg_exec "${KOMINO_DB_HOST}" "${KOMINO_DB_PORT}" \
+    "CREATE DATABASE ${KOMINO_TEST_DB} OWNER ${KOMINO_DB_USER};"
+pg_exec "${KOMINO_DB_HOST}" "${KOMINO_DB_PORT}" \
+    "GRANT ALL PRIVILEGES ON DATABASE ${KOMINO_TEST_DB} TO ${KOMINO_DB_USER};"
+
+# ---------------------------------------------------------------------------
 # Ensure migrant is installed
 # ---------------------------------------------------------------------------
 if ! which migrant > /dev/null 2>&1; then
@@ -168,6 +195,9 @@ echo "==> Running paste migrations on '${PASTE_TEST_DB}'..."
 
 echo "==> Running mapour migrations on '${MAPOUR_TEST_DB}'..."
 (builtin cd "${ROOT}/migrations/mapour" && migrant setup && (migrant apply -a || echo "ok"))
+
+echo "==> Running komino migrations on '${KOMINO_TEST_DB}'..."
+(builtin cd "${ROOT}/migrations/komino" && migrant setup && (migrant apply -a || echo "ok"))
 
 # ---------------------------------------------------------------------------
 # Run the test suite

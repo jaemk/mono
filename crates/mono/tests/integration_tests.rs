@@ -31,7 +31,16 @@ async fn get_server() -> TestServer {
         .await
         .expect("failed to initialize mapour state");
 
-    TestServer::new(app(spot_state, paste_state, Some(mapour_state)))
+    let komino_state = komino::service::init(komino::Config::load())
+        .await
+        .expect("failed to initialize komino state");
+
+    TestServer::new(app(
+        spot_state,
+        paste_state,
+        Some(mapour_state),
+        Some(komino_state),
+    ))
 }
 
 #[tokio::test]
@@ -400,6 +409,14 @@ async fn test_mapour_app_serves() {
     assert!(response.text().contains("mapour"));
 }
 
+#[tokio::test]
+async fn test_komino_app_serves() {
+    let server = get_server().await;
+    let response = server.get("/komino").await;
+    response.assert_status_ok();
+    assert!(response.text().contains("komino"));
+}
+
 /// With mapour disabled (state None) the router is not mounted and the rest
 /// of the app still works.
 #[tokio::test]
@@ -422,10 +439,14 @@ async fn test_mapour_disabled() {
     let paste_state = paste::service::init(paste::Config::load())
         .await
         .expect("failed to initialize paste state");
-    let server = TestServer::new(app(spot_state, paste_state, None));
+    let server = TestServer::new(app(spot_state, paste_state, None, None));
 
     server
         .get("/mapour")
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    server
+        .get("/komino")
         .await
         .assert_status(StatusCode::NOT_FOUND);
     server.get("/status").await.assert_status_ok();

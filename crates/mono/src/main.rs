@@ -47,7 +47,22 @@ async fn main() {
         None
     };
 
-    let app = app(spot_state, paste_state, mapour_state);
+    let komino_config = komino::Config::load();
+    let komino_state = if komino_config.enabled {
+        komino_config
+            .validate_for_deploy()
+            .expect("invalid komino config");
+        Some(
+            komino::service::init(komino_config)
+                .await
+                .expect("failed to initialize komino state"),
+        )
+    } else {
+        tracing::info!("komino disabled (KOMINO_ENABLED != true), skipping initialization");
+        None
+    };
+
+    let app = app(spot_state, paste_state, mapour_state, komino_state);
     let addr = CONFIG.get_host_port();
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

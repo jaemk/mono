@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>komino</title>
+  <link rel="stylesheet" href="/komino/static/app.css">
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="/komino">komino</a>
+    <label class="name">
+      <span>name</span>
+      <input id="name" maxlength="24" autocomplete="off">
+    </label>
+  </header>
+
+  <main id="lobby" hidden>
+    <section class="panel">
+      <h1>komino</h1>
+      <p>A card game of memory and quick hands. Lowest total wins.</p>
+      <button id="create" class="primary">create a room</button>
+      <form id="join-form" class="join">
+        <input id="join-code" placeholder="room code" maxlength="6" autocomplete="off" aria-label="room code">
+        <button>join</button>
+      </form>
+    </section>
+  </main>
+
+  <main id="room" hidden>
+    <section class="roombar">
+      <div>
+        room <strong id="code"></strong>
+        <button id="copy" class="small">copy link</button>
+      </div>
+      <div class="actions">
+        <button id="start" class="primary small" hidden>start game</button>
+        <button id="leave" class="small">leave</button>
+      </div>
+    </section>
+    <div id="status" class="status" aria-live="polite"></div>
+    <section id="table" class="table"></section>
+    <section id="controls" class="controls"></section>
+    <div id="confirm" class="confirm" hidden>
+      <span id="confirm-text"></span>
+      <span class="confirm-buttons">
+        <button id="confirm-cancel">cancel</button>
+        <button id="confirm-ok" class="primary">confirm</button>
+      </span>
+    </div>
+    <div class="columns">
+      <section class="panel">
+        <h2>players</h2>
+        <ul id="members" class="members"></ul>
+      </section>
+      <section class="panel">
+        <h2>log</h2>
+        <ol id="log" class="log"></ol>
+      </section>
+    </div>
+    <section class="panel">
+      <h2>stats</h2>
+      <div class="scroll"><table id="stats" class="stats"></table></div>
+    </section>
+  </main>
+
+  <main id="gone" hidden>
+    <section class="panel">
+      <h1 id="gone-title"></h1>
+      <p id="gone-text"></p>
+      <a href="/komino">back to komino</a>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/komino/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+# Komino Interface
+
+Card faces, special-move symbols, confirmation flow, and the komino button.
+
+## Card faces
+
+### UI-1
+Card faces are drawn as inline svg, not image files. Every face shows its value in two
+opposite corners and large in the center.
+
+### UI-2
+Plain cards (-1 through 6) have a neutral face. Value tints distinguish low from high: -1 and 0
+on a green tint, 1-6 on white.
+
+### UI-3
+Special cards replace the center value with a symbol made of simple shapes and a color unique
+to the move, keeping the corner values:
+
+| Move | Values | Color | Symbol |
+|------|--------|-------|--------|
+| peek own | 7, 8 | blue | an eye over a single card outline |
+| peek other | 9, 10 | orange | an eye with an arrow pointing away |
+| blind swap | 11, 12 | purple | two crossing curved arrows between two card outlines, both outlines filled solid |
+| look and swap | 13 | red | an eye above two crossing curved arrows |
+
+### UI-4
+Symbol and color both identify the move, so neither alone is required to tell moves apart.
+Every special face has an accessible label naming the move (e.g. `9, peek other`).
+
+### UI-5
+Card backs are a single shared design. Locked slots (RULE-23) show a lock badge.
+
+## Table layout
+
+### UI-6
+The viewing player's hand is at the bottom; other seated players are arranged around the
+table with their names, presence (ROOM-12), and card counts. The draw pile and discard pile
+are in the center.
+
+### UI-7
+Whose turn it is, the current phase (dealing, peeking, playing, final turns, scoring), and the
+remaining grace or ready time are always visible.
+
+### UI-8
+A log lists recent public events (draws, discards, swaps, peeks, matches with outcome, calls,
+forfeits) with player names.
+
+### UI-9
+The layout works on a phone in portrait at 360px wide without horizontal scrolling.
+
+## Confirmation
+
+### UI-10
+Every card action is two steps: select, then confirm. Selecting highlights the card(s)
+involved and shows a confirm bar describing the action (e.g. `swap drawn 4 into slot 2?`) with
+confirm and cancel buttons. Nothing is sent to the server until confirm.
+
+### UI-11
+UI-10 applies to: drawing, taking the discard, swapping, discarding, each special move (and
+skipping one), matching, and pressing ready. Matching another player's card selects the target,
+then the card to give (RULE-19), then confirms both as one action.
+
+### UI-12
+Confirmation is client-side only. The server treats each received action as final.
+
+### UI-13
+A match is selected by tapping any face-down card while a matchable discard is up. The confirm
+bar for a match is shown immediately and stays reachable with one more tap, so a match takes
+two taps total.
+
+### UI-14
+If the action becomes invalid while its confirm bar is open (e.g. the discard was already
+matched, or the turn changed), the bar closes and shows why.
+
+## Komino button
+
+### UI-15
+A dedicated komino button is always visible on the table. It is enabled only when calling is
+allowed (RULE-22) and disabled with a tooltip explaining why otherwise.
+
+### UI-16
+Pressing it opens a confirmation (UI-10). On confirm, all players see a prominent komino
+banner naming the caller, and the final-turn countdown of remaining players.
+
+## Peeks and reveals
+
+### UI-17
+A peeked card (RULE-7, RULE-12, RULE-13, RULE-15) stays face up for the peeking player until
+they dismiss it or 5 seconds pass, then flips back. Other players see the slot highlighted.
+
+### UI-18
+At scoring, all hands flip face up, each player's total is shown, and the winner(s) are
+highlighted. The host sees a `next game` button.

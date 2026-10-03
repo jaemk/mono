@@ -9,6 +9,7 @@ common.workspace = true
 spot.workspace = true
 paste.workspace = true
 mapour.workspace = true
+komino.workspace = true
 tokio.workspace = true
 axum.workspace = true
 axum-extra.workspace = true

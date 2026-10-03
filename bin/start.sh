@@ -24,4 +24,13 @@ if [ "${MAPOUR_ENABLED:-false}" = "true" ]; then
     popd
 fi
 
+# komino migrations only run once the site is enabled and its db exists
+if [ "${KOMINO_ENABLED:-false}" = "true" ]; then
+    pushd migrations/komino
+    migrant setup
+    migrant list
+    migrant apply -a || true
+    popd
+fi
+
 exec "$@"

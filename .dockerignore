@@ -1,6 +1,7 @@
 # flyctl launch added from .gitignore
 target
 **/target/
+local
 **/.env
 **/.env.docker
 **/.idea

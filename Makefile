@@ -5,8 +5,9 @@ export
 
 .PHONY: fmt test lint run push \
 	db-setup db-setup-spot db-setup-spot-create db-setup-paste db-setup-paste-create \
-	db-setup-mapour db-setup-mapour-create \
-	db-migrate db-migrate-spot db-migrate-paste db-migrate-mapour migrant db-shell f
+	db-setup-mapour db-setup-mapour-create db-setup-komino db-setup-komino-create \
+	db-migrate db-migrate-spot db-migrate-paste db-migrate-mapour db-migrate-komino \
+	migrant db-shell f
 
 fmt:
 	cargo fmt --all
@@ -56,8 +57,18 @@ db-setup-mapour-create:
 
 db-setup-mapour: db-setup-mapour-create db-migrate-mapour
 
-db-setup: db-setup-spot db-setup-paste db-setup-mapour
-db-migrate: db-migrate-spot db-migrate-paste db-migrate-mapour
+db-migrate-komino: migrant
+	cd migrations/komino && \
+		migrant setup && \
+		(migrant apply -a || echo "ok")
+
+db-setup-komino-create:
+	DB_NAME=komino DB_USER=komino DB_PASS=komino DB_HOST=localhost DB_PORT=5432 ./bin/setup-dev-db.sh
+
+db-setup-komino: db-setup-komino-create db-migrate-komino
+
+db-setup: db-setup-spot db-setup-paste db-setup-mapour db-setup-komino
+db-migrate: db-migrate-spot db-migrate-paste db-migrate-mapour db-migrate-komino
 
 db-shell:
 	LOG_LEVEL=info fly pg connect -a kom-db

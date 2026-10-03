@@ -39,6 +39,8 @@ pub struct AppState {
     // None when mapour is disabled (MAPOUR_ENABLED != true); the mapour
     // router is only mounted when this is Some
     pub mapour_state: Option<mapour::State>,
+    // None when komino is disabled (KOMINO_ENABLED != true)
+    pub komino_state: Option<komino::State>,
 }
 
 impl FromRef<AppState> for spot::SpotState {
@@ -62,15 +64,26 @@ impl FromRef<AppState> for mapour::State {
     }
 }
 
+impl FromRef<AppState> for komino::State {
+    fn from_ref(state: &AppState) -> Self {
+        state
+            .komino_state
+            .clone()
+            .expect("komino handlers are not mounted when komino is disabled")
+    }
+}
+
 pub fn app(
     spot_state: spot::SpotState,
     paste_state: paste::State,
     mapour_state: Option<mapour::State>,
+    komino_state: Option<komino::State>,
 ) -> Router {
     let state = AppState {
         spot_state,
         paste_state,
         mapour_state,
+        komino_state,
     };
     let mut router = Router::new()
         .nest("/spot", spot::service::router(state.clone()))
@@ -78,6 +91,9 @@ pub fn app(
         .merge(flip::router());
     if state.mapour_state.is_some() {
         router = router.nest("/mapour", mapour::service::router(state.clone()));
+    }
+    if state.komino_state.is_some() {
+        router = router.nest("/komino", komino::service::router(state.clone()));
     }
     router
         .route("/", get(handlers::root_handler))

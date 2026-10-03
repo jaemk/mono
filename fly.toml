@@ -28,6 +28,13 @@ primary_region = "ewr"
   MAPOUR_DB_HOST = "kom-db.flycast"
   MAPOUR_DB_PORT = "5432"
   MAPOUR_REAL_HOSTNAME = "https://mapour.org"
+  # flip to "true" once the komino db and secrets exist
+  KOMINO_ENABLED = "false"
+  KOMINO_DB_USER = "komino"
+  KOMINO_DB_NAME = "komino"
+  KOMINO_DB_HOST = "kom-db.flycast"
+  KOMINO_DB_PORT = "5432"
+  KOMINO_REAL_HOSTNAME = "https://kominick.com"
   AWS_ENDPOINT_URL_S3 = "https://t3.storage.dev"
   AWS_ENDPOINT_URL_IAM = "https://iam.storage.dev"
   AWS_REGION = "auto"
@@ -69,6 +76,9 @@ primary_region = "ewr"
 #  - MAPOUR_DB_PASS
 #  - MAPOUR_DATABASE_URL
 #  - MAPOUR_SIGNING_KEY
+#  - KOMINO_DB_PASS
+#  - KOMINO_DATABASE_URL
+#  - KOMINO_SIGNING_KEY
 #  - AWS_ACCESS_KEY_ID
 #  - AWS_SECRET_ACCESS_KEY
 
