@@ -68,6 +68,18 @@ test("the opening peek is revealed sealed and dropped at ready", async (t) => {
   assert.equal(page.label(0, 3), "your card 4, face down");
 });
 
+test("a lower-case room link still opens reveals sealed to the canonical code", async (t) => {
+  const g = makeGame({ status: "peeking", ready_deadline: Date.now() + 20_000 });
+  const page = await boot({
+    path: "/komino/r/abcdef",
+    view: makeView(g),
+    secrets: { opening: { cards: [{ seat: 0, slot: 2, v: 5 }, { seat: 0, slot: 3, v: -1 }] } },
+  });
+  t.after(page.stop);
+  await page.settle(() => page.label(0, 3) === "your card 4: -1");
+  assert.equal(page.label(0, 2), "your card 3: 5");
+});
+
 test("the server key is fetched once and the client key reused for 5 minutes", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 10_000_000 });
   const secrets = {

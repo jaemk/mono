@@ -126,7 +126,9 @@
     const $ = (id) => doc.getElementById(id);
 
     const path = win.location.pathname.match(/^\/komino\/r\/([A-Za-z0-9]{6})(\/watch)?\/?$/) || [];
-    const code = path[1];
+    // codes are case-insensitive, but the server seals reveals to the
+    // canonical upper-case code, so it must match the decrypt aad
+    const code = path[1] && path[1].toUpperCase();
     const watching = Boolean(path[2]);
     let view = null;
     let me = null;
