@@ -1385,10 +1385,7 @@ async fn test_reveals_serialize_with_actions() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    pending
-        .await
-        .unwrap()
-        .assert_status(StatusCode::FORBIDDEN);
+    pending.await.unwrap().assert_status(StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
