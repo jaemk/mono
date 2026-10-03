@@ -6,9 +6,11 @@ Crate layout, config gate, postgres schema, and migrations.
 
 ### STORE-1
 Komino is a new workspace crate `crates/komino` following the `mapour` layout: `config.rs`,
-`handlers.rs`, `models.rs`, `service.rs` (router and init), `storage.rs`, `test_utils.rs`, and
-`assets/` holding `index.html` and `static/app.{js,css}`. The rules engine lives in its own
-module (`game.rs`) with no database or io dependency.
+`handlers.rs`, `models.rs` (rooms, members, observers, actions, views), `service.rs` (router,
+notify listener, timer sweeper, init), `test_utils.rs`, and `assets/` holding `index.html` and
+`static/app.{js,css}`. There is no object storage, so no `storage.rs`. The rules engine lives
+in its own module (`game.rs`) with no database or io dependency. `web/` holds the client test
+suite (UI-21) and is not served.
 
 ### STORE-2
 The mono binary mounts it at `/komino`, adds `Option<komino::State>` to `AppState`, and adds
@@ -27,7 +29,7 @@ Environment variables:
 |-----|---------|
 | `KOMINO_ENABLED` | `false` |
 | `KOMINO_DATABASE_URL` | `postgres://localhost/komino` |
-| `KOMINO_SIGNING_KEY` | a dev-only placeholder |
+| `KOMINO_SIGNING_KEY` | a dev-only placeholder; startup fails when enabled with it or a key under 32 chars |
 | `KOMINO_REAL_HOSTNAME` | `http://localhost:3000` |
 | `KOMINO_DB_USER/NAME/HOST/PORT/PASS` | used by migrant |
 
@@ -50,6 +52,7 @@ Tables:
 - `room_stats`: room_id, player_id, one integer column per STAT-2 counter.
 - `game_events`: game_id, version, player_id, kind, public payload (jsonb), created. Used for
   the event log (UI-8).
+- `room_observers`: id, room_id, until (observer lease, OBS-9).
 
 ### STORE-7
 At most one non-scored game exists per room (partial unique index on `games(room_id)` where
@@ -66,5 +69,9 @@ deck.
 
 ### STORE-10
 Integration tests in `crates/komino/tests/` run against the hermetic test database
-(`make test`) and cover room flows, redaction (no hidden values in any other member's view),
-and concurrent match attempts where exactly one wins (RT-10).
+(`make test`) and cover every http and websocket route, room flows, redaction (no hidden
+values in any other member's or observer's view), the observer limit, and concurrent match
+attempts where exactly one wins (RT-10).
+
+### STORE-11
+Client tests are described in UI-21 and run with `make test-js`, separately from `make test`.

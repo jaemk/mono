@@ -896,11 +896,15 @@ impl Game {
             .collect()
     }
 
-    /// Whether `viewer` may see the value in a slot right now.
-    fn visible(&self, viewer: &str, seat: usize, slot: usize, now: i64) -> bool {
+    /// Whether `viewer` may see the value in a slot right now. An observer
+    /// (`None`) sees only what scoring makes public.
+    fn visible(&self, viewer: Option<&str>, seat: usize, slot: usize, now: i64) -> bool {
         if self.status == Status::Scored {
             return true;
         }
+        let Some(viewer) = viewer else {
+            return false;
+        };
         let s = &self.seats[seat];
         if self.status == Status::Peeking
             && s.player == viewer
@@ -916,7 +920,16 @@ impl Game {
 
     /// The game as `viewer` may see it: hidden values are left out entirely.
     pub fn view(&self, viewer: &str, now: i64) -> Value {
-        let me = self.seat_of(viewer);
+        self.view_for(Some(viewer), now)
+    }
+
+    /// The game as an observer sees it: no seat, so no private values.
+    pub fn observer_view(&self, now: i64) -> Value {
+        self.view_for(None, now)
+    }
+
+    fn view_for(&self, viewer: Option<&str>, now: i64) -> Value {
+        let me = viewer.and_then(|v| self.seat_of(v));
         let seats: Vec<Value> = self
             .seats
             .iter()
@@ -955,7 +968,14 @@ impl Game {
         let reveals: Vec<Value> = self
             .reveals
             .iter()
-            .filter(|r| r.player == viewer && r.until > now)
+            .filter(|r| Some(r.player.as_str()) == viewer && r.until > now)
+            .map(|r| json!({ "seat": r.seat, "slot": r.slot, "until": r.until }))
+            .collect();
+        // which slots someone is looking at is public; the values are not
+        let peeked: Vec<Value> = self
+            .reveals
+            .iter()
+            .filter(|r| r.until > now)
             .map(|r| json!({ "seat": r.seat, "slot": r.slot, "until": r.until }))
             .collect();
         json!({
@@ -973,6 +993,7 @@ impl Game {
             "matchable": self.matchable,
             "deck_count": self.deck.len(),
             "reveals": reveals,
+            "peeked": peeked,
             "can_call": is_turn
                 && self.status == Status::Playing
                 && self.stage == Stage::Start
@@ -1524,5 +1545,55 @@ mod tests {
         let text = g.view("p1", 0).to_string();
         assert!(!text.contains("\"v\""), "p1 saw a value: {text}");
         assert!(!text.contains("deck\":["));
+    }
+
+    #[test]
+    fn observers_see_no_opening_peek_drawn_card_or_reveal() {
+        let mut g = Game::new(
+            players(2),
+            stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[7]),
+            0,
+            0,
+        );
+        // during the opening peek each player sees their near row, observers nothing
+        assert!(g.view("p0", 0)["seats"][0]["slots"][2].get("v").is_some());
+        let text = g.observer_view(0).to_string();
+        assert!(!text.contains("\"v\""), "observer saw a value: {text}");
+        assert_eq!(g.observer_view(0)["me"], Value::Null);
+
+        g.apply("p0", Action::Ready, None, 0, &mut rng()).unwrap();
+        g.apply("p1", Action::Ready, None, 0, &mut rng()).unwrap();
+        act(&mut g, "p0", Action::Draw);
+        assert_eq!(g.view("p0", 0)["stage"]["card"], 7);
+        let obs = g.observer_view(0);
+        assert_eq!(obs["stage"]["kind"], "drawn");
+        assert_eq!(obs["stage"]["card"], Value::Null);
+        assert_eq!(obs["can_call"], false);
+
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Peek { seat: 0, slot: 1 });
+        // the peeker sees the value; observers and the other player see only the slot
+        assert_eq!(g.view("p0", 1)["seats"][0]["slots"][1]["v"], 2);
+        for view in [g.observer_view(1), g.view("p1", 1)] {
+            assert!(view["seats"][0]["slots"][1].get("v").is_none());
+            assert_eq!(view["reveals"], json!([]));
+            assert_eq!(
+                view["peeked"],
+                json!([{ "seat": 0, "slot": 1, "until": PEEK_MS }])
+            );
+        }
+        // the highlight ends with the reveal
+        assert_eq!(g.observer_view(PEEK_MS)["peeked"], json!([]));
+    }
+
+    #[test]
+    fn observers_see_every_hand_once_scored() {
+        let mut g = playing(&[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[9, 9]);
+        g.status = Status::Scored;
+        for seat in g.observer_view(0)["seats"].as_array().unwrap() {
+            for slot in seat["slots"].as_array().unwrap() {
+                assert!(slot.get("v").is_some());
+            }
+        }
     }
 }

@@ -28,6 +28,8 @@ make fmt
 make lint
 make test
 ```
+After touching `crates/komino/assets`, also run `make test-js` (node tests under
+`crates/komino/web`).
 
 ## Docker
 - `bin/stub_workspace.sh` generates stub source files from the workspace manifest for dependency-caching Docker builds

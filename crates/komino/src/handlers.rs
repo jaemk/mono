@@ -62,7 +62,11 @@ async fn identify(state: &State, jar: CookieJar) -> Result<(Player, CookieJar)> 
 }
 
 async fn room_view(state: &State, room: &Room, player: &str) -> Result<Value> {
-    models::view(&state.db, room, player, &state.config.real_hostname).await
+    models::view(&state.db, room, Some(player), &state.config.real_hostname).await
+}
+
+async fn observer_view(state: &State, room: &Room) -> Result<Value> {
+    models::view(&state.db, room, None, &state.config.real_hostname).await
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +187,20 @@ pub async fn unban_member(
     Ok((jar, Json(view)).into_response())
 }
 
+/// The public view of a room, for the watch page's first render. Watching
+/// does not join the room.
+pub async fn watch_room(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    models::require_not_removed(&state.db, room.id, &player.id).await?;
+    let view = observer_view(&state, &room).await?;
+    Ok((jar, Json(view)).into_response())
+}
+
 /// The same actions the websocket takes, over plain http.
 pub async fn action(
     AxumState(state): AxumState<State>,
@@ -211,14 +229,64 @@ pub async fn ws(
         cookie_id(&state, &jar).ok_or_else(|| ApiError::forbidden("load the room page first"))?;
     let room = models::room_by_code(&state.db, &code).await?;
     models::require_member(&state.db, room.id, &player).await?;
-    Ok(upgrade.on_upgrade(move |socket| socket_loop(state, room, player, socket)))
+    Ok(upgrade.on_upgrade(move |socket| socket_loop(state, room, Who::Member(player), socket)))
 }
 
-/// Send this member's current view. False when the socket should close.
-async fn send_view(state: &State, room: &Room, player: &str, socket: &mut WebSocket) -> bool {
-    let msg = match models::require_member(&state.db, room.id, player).await {
-        Err(e) => json!({ "type": "removed", "code": e.code }),
-        Ok(()) => match room_view(state, room, player).await {
+/// The watch socket. The observer slot is claimed after the upgrade so a
+/// full room can say so in a message the page can read.
+pub async fn watch_ws(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response> {
+    let player =
+        cookie_id(&state, &jar).ok_or_else(|| ApiError::forbidden("load the watch page first"))?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    models::require_not_removed(&state.db, room.id, &player).await?;
+    Ok(upgrade.on_upgrade(move |socket| watch_loop(state, room, socket)))
+}
+
+async fn watch_loop(state: State, room: Room, mut socket: WebSocket) {
+    match models::claim_observer(&state.db, room.id).await {
+        Ok(lease) => {
+            socket_loop(
+                state.clone(),
+                room.clone(),
+                Who::Observer(lease.clone()),
+                socket,
+            )
+            .await;
+            if let Err(e) = models::release_observer(&state.db, room.id, &lease).await {
+                tracing::warn!("komino observer release error: {e:?}");
+            }
+        }
+        Err(e) => {
+            let msg = json!({ "type": e.code, "message": e.message });
+            let _ = socket.send(Message::Text(msg.to_string().into())).await;
+            let _ = socket.send(Message::Close(None)).await;
+        }
+    }
+}
+
+/// Who is on the other end of a room socket.
+enum Who {
+    Member(String),
+    /// An observer, by lease id.
+    Observer(String),
+}
+
+/// Send the socket's current view. False when the socket should close.
+async fn send_view(state: &State, room: &Room, who: &Who, socket: &mut WebSocket) -> bool {
+    let msg = match who {
+        Who::Member(player) => match models::require_member(&state.db, room.id, player).await {
+            Err(e) => json!({ "type": "removed", "code": e.code }),
+            Ok(()) => match room_view(state, room, player).await {
+                Ok(view) => json!({ "type": "view", "view": view }),
+                Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
+            },
+        },
+        Who::Observer(_) => match observer_view(state, room).await {
             Ok(view) => json!({ "type": "view", "view": view }),
             Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
         },
@@ -231,14 +299,17 @@ async fn send_view(state: &State, room: &Room, player: &str, socket: &mut WebSoc
         && !closing
 }
 
-async fn handle_text(state: &State, room: &Room, player: &str, text: &str) -> Value {
+async fn handle_text(state: &State, room: &Room, who: &Who, text: &str) -> Value {
     let parsed: std::result::Result<Value, _> = serde_json::from_str(text);
     let (reference, result) = match parsed {
         Ok(mut body) => {
             let reference = body.get_mut("ref").map(Value::take);
-            let result = match ClientAction::parse(body) {
-                Ok(action) => models::act(&state.db, room, player, action).await,
-                Err(e) => Err(e),
+            let result = match (who, ClientAction::parse(body)) {
+                (Who::Observer(_), _) => Err(ApiError::forbidden("observers cannot act")),
+                (Who::Member(player), Ok(action)) => {
+                    models::act(&state.db, room, player, action).await
+                }
+                (Who::Member(_), Err(e)) => Err(e),
             };
             (reference, result)
         }
@@ -252,19 +323,29 @@ async fn handle_text(state: &State, room: &Room, player: &str, text: &str) -> Va
     }
 }
 
-async fn socket_loop(state: State, room: Room, player: String, mut socket: WebSocket) {
+/// Refresh a member's presence or an observer's lease.
+async fn heartbeat(state: &State, room: &Room, who: &Who) -> Result<()> {
+    match who {
+        Who::Member(player) => models::set_presence(&state.db, room.id, player, true).await,
+        Who::Observer(lease) => models::refresh_observer(&state.db, lease).await,
+    }
+}
+
+async fn socket_loop(state: State, room: Room, who: Who, mut socket: WebSocket) {
     let mut pings = state.hub.subscribe(room.id);
-    state.hub.connect(room.id, &player);
-    if let Err(e) = models::set_presence(&state.db, room.id, &player, true).await {
+    if let Who::Member(player) = &who {
+        state.hub.connect(room.id, player);
+    }
+    if let Err(e) = heartbeat(&state, &room, &who).await {
         tracing::warn!("komino presence error: {e:?}");
     }
     let mut beat = tokio::time::interval(HEARTBEAT);
-    if send_view(&state, &room, &player, &mut socket).await {
+    if send_view(&state, &room, &who, &mut socket).await {
         loop {
             tokio::select! {
                 msg = socket.recv() => match msg {
                     Some(Ok(Message::Text(text))) => {
-                        let reply = handle_text(&state, &room, &player, text.as_str()).await;
+                        let reply = handle_text(&state, &room, &who, text.as_str()).await;
                         if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
                             break;
                         }
@@ -274,20 +355,22 @@ async fn socket_loop(state: State, room: Room, player: String, mut socket: WebSo
                 },
                 ping = pings.recv() => match ping {
                     Ok(()) | Err(RecvError::Lagged(_)) => {
-                        if !send_view(&state, &room, &player, &mut socket).await {
+                        if !send_view(&state, &room, &who, &mut socket).await {
                             break;
                         }
                     }
                     Err(RecvError::Closed) => break,
                 },
                 _ = beat.tick() => {
-                    let _ = models::set_presence(&state.db, room.id, &player, true).await;
+                    let _ = heartbeat(&state, &room, &who).await;
                 }
             }
         }
     }
-    if state.hub.disconnect(room.id, &player) == 0 {
-        let _ = models::set_presence(&state.db, room.id, &player, false).await;
+    if let Who::Member(player) = &who {
+        if state.hub.disconnect(room.id, player) == 0 {
+            let _ = models::set_presence(&state.db, room.id, player, false).await;
+        }
     }
 }
 

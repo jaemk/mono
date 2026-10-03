@@ -1,0 +1,12 @@
+{
+  "name": "komino-web-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-include=../assets/static/app.js"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1"
+  }
+}

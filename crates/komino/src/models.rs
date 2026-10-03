@@ -21,8 +21,12 @@ const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 6;
 pub const MAX_NAME_CHARS: usize = 24;
 
-/// How long a page load or socket heartbeat counts a member as present.
+/// How long a page load or socket heartbeat counts a member as present, and
+/// how long an observer lease lasts between heartbeats.
 pub const PRESENCE_SECS: i64 = 25;
+
+/// Observer sockets allowed per room, across every machine.
+pub const MAX_OBSERVERS: i64 = 4;
 
 pub type Tx<'a> = Transaction<'a, Postgres>;
 
@@ -55,6 +59,13 @@ impl ApiError {
             StatusCode::FORBIDDEN,
             "removed",
             "you were removed from this room",
+        )
+    }
+    pub fn full() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "full",
+            format!("this room already has {MAX_OBSERVERS} observers"),
         )
     }
 }
@@ -299,6 +310,79 @@ pub async fn require_member(db: &DbPool, room_id: i64, player: &str) -> Result<(
         Some(r) if !r.get::<bool, _>("gone") => Ok(()),
         _ => Err(ApiError::forbidden("join the room first")),
     }
+}
+
+/// Anyone but a player the host removed may watch a room.
+pub async fn require_not_removed(db: &DbPool, room_id: i64, player: &str) -> Result<()> {
+    let removed: Option<bool> = sqlx::query_scalar(
+        "SELECT removed FROM room_members WHERE room_id = $1 AND player_id = $2",
+    )
+    .bind(room_id)
+    .bind(player)
+    .fetch_optional(db)
+    .await?;
+    match removed {
+        Some(true) => Err(ApiError::removed()),
+        _ => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Observers
+// ---------------------------------------------------------------------------
+
+/// Take one of the room's observer slots, returning the lease id. The room
+/// row lock serializes claims from every machine.
+pub async fn claim_observer(db: &DbPool, room_id: i64) -> Result<String> {
+    let mut tx = db.begin().await?;
+    lock_room(&mut tx, room_id).await?;
+    sqlx::query("DELETE FROM room_observers WHERE room_id = $1 AND until <= now()")
+        .bind(room_id)
+        .execute(&mut *tx)
+        .await?;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM room_observers WHERE room_id = $1")
+        .bind(room_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if n >= MAX_OBSERVERS {
+        return Err(ApiError::full());
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    sqlx::query(
+        "INSERT INTO room_observers (id, room_id, until)
+         VALUES ($1, $2, now() + make_interval(secs => $3))",
+    )
+    .bind(&id)
+    .bind(room_id)
+    .bind(PRESENCE_SECS as f64)
+    .execute(&mut *tx)
+    .await?;
+    notify(&mut tx, room_id).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Extend an observer lease by another [`PRESENCE_SECS`].
+pub async fn refresh_observer(db: &DbPool, id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE room_observers SET until = now() + make_interval(secs => $2) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(PRESENCE_SECS as f64)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn release_observer(db: &DbPool, room_id: i64, id: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM room_observers WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    notify(&mut tx, room_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Add a member, or bring a returning one back. Removed players stay out.
@@ -660,6 +744,10 @@ pub async fn tick_all(db: &DbPool) -> Result<()> {
 }
 
 pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
+    // leases left behind by a machine that died mid-socket
+    sqlx::query("DELETE FROM room_observers WHERE until <= now()")
+        .execute(db)
+        .await?;
     Ok(
         sqlx::query("DELETE FROM rooms WHERE last_active < now() - interval '30 days'")
             .execute(db)
@@ -672,9 +760,16 @@ pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
 // Views
 // ---------------------------------------------------------------------------
 
-/// Everything a member's page shows, redacted for that member.
-pub async fn view(db: &DbPool, room: &Room, viewer: &str, base_url: &str) -> Result<Value> {
+/// Everything a member's page shows, redacted for that member. A `None`
+/// viewer is an observer, who sees only public state.
+pub async fn view(db: &DbPool, room: &Room, viewer: Option<&str>, base_url: &str) -> Result<Value> {
     let room = room_by_code(db, &room.code).await?;
+    let observers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM room_observers WHERE room_id = $1 AND until > now()",
+    )
+    .bind(room.id)
+    .fetch_one(db)
+    .await?;
     let members: Vec<Value> = sqlx::query(
         "SELECT m.player_id, p.name, m.removed, m.left_at IS NOT NULL AS gone,
                 coalesce(m.present_until > now(), false) AS present
@@ -706,7 +801,10 @@ pub async fn view(db: &DbPool, room: &Room, viewer: &str, base_url: &str) -> Res
         Some(row) => {
             let game_id: i64 = row.get("id");
             let state: Game = serde_json::from_value(row.get::<Value, _>("state"))?;
-            let mut view = state.view(viewer, now_ms());
+            let mut view = match viewer {
+                Some(viewer) => state.view(viewer, now_ms()),
+                None => state.observer_view(now_ms()),
+            };
             view["id"] = json!(game_id);
             view["version"] = json!(row.get::<i64, _>("version"));
             let events: Vec<Value> = sqlx::query(
@@ -755,8 +853,11 @@ pub async fn view(db: &DbPool, room: &Room, viewer: &str, base_url: &str) -> Res
             "code": room.code,
             "host": room.host,
             "url": format!("{base_url}/komino/r/{}", room.code),
+            "watch_url": format!("{base_url}/komino/r/{}/watch", room.code),
         },
         "me": viewer,
+        "observer": viewer.is_none(),
+        "observers": observers,
         "members": members,
         "game": game,
         "events": events,

@@ -1,7 +1,7 @@
 /// Wipe all komino tables.
 pub async fn clean_komino_db(pool: &common::db::DbPool) {
     sqlx::query(
-        "TRUNCATE players, rooms, room_members, games, room_stats, game_events
+        "TRUNCATE players, rooms, room_members, games, room_stats, game_events, room_observers
          RESTART IDENTITY CASCADE",
     )
     .execute(pool)

@@ -29,24 +29,30 @@
 
   <main id="room" hidden>
     <section class="roombar">
-      <div>
+      <div class="roomid">
         room <strong id="code"></strong>
-        <button id="copy" class="small">copy link</button>
+        <span id="watch-tag" class="watch-tag">watching</span>
+        <span id="observers" class="observers" hidden></span>
       </div>
       <div class="actions">
+        <button id="copy" class="small player-only">copy link</button>
+        <button id="copy-watch" class="small">copy watch link</button>
         <button id="start" class="primary small" hidden>start game</button>
-        <button id="leave" class="small">leave</button>
+        <button id="leave" class="small player-only">leave</button>
+        <a id="join-link" class="watch-only" href="/komino">join as player</a>
       </div>
     </section>
     <div id="status" class="status" aria-live="polite"></div>
     <section id="table" class="table"></section>
     <section id="controls" class="controls"></section>
-    <div id="confirm" class="confirm" hidden>
-      <span id="confirm-text"></span>
-      <span class="confirm-buttons">
-        <button id="confirm-cancel">cancel</button>
-        <button id="confirm-ok" class="primary">confirm</button>
-      </span>
+    <div id="confirm" class="confirm-backdrop" hidden>
+      <div class="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
+        <p id="confirm-text"></p>
+        <div class="confirm-buttons">
+          <button id="confirm-cancel">cancel</button>
+          <button id="confirm-ok" class="primary">confirm</button>
+        </div>
+      </div>
     </div>
     <div class="columns">
       <section class="panel">

@@ -62,6 +62,44 @@ async fn room_of_two(state: &State) -> (TestServer, TestServer, String) {
     (host, guest, code)
 }
 
+/// A cookie-holding browser over a real socket, for websocket routes.
+fn ws_client(state: &State) -> TestServer {
+    let router = service::router(state.clone()).with_state(state.clone());
+    TestServer::builder()
+        .http_transport()
+        .save_cookies()
+        .build(router)
+}
+
+/// The next json message on a socket, failing if none arrives in 5s.
+async fn next(socket: &mut axum_test::TestWebSocket) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), socket.receive_json())
+        .await
+        .expect("socket went quiet")
+}
+
+/// Read socket messages until one matches.
+async fn next_matching(socket: &mut axum_test::TestWebSocket, f: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..20 {
+        let msg = next(socket).await;
+        if f(&msg) {
+            return msg;
+        }
+    }
+    panic!("no matching socket message");
+}
+
+async fn observer_count(state: &State, code: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM room_observers o JOIN rooms r ON r.id = o.room_id
+         WHERE r.code = $1 AND o.until > now()",
+    )
+    .bind(code)
+    .fetch_one(&state.db)
+    .await
+    .unwrap()
+}
+
 /// Replace the running game's state wholesale.
 async fn set_game(state: &State, code: &str, f: impl FnOnce(&mut Game)) {
     let row: Value = sqlx::query_scalar(
@@ -521,4 +559,425 @@ async fn test_tick_fires_scoring_after_the_delay() {
             assert!(slot.get("v").is_some());
         }
     }
+}
+
+#[tokio::test]
+async fn test_pages_and_static_assets_are_served() {
+    let state = get_state().await;
+    let server = client(&state);
+    for path in ["/r/ABCDEF", "/r/ABCDEF/watch"] {
+        let resp = server.get(path).await;
+        resp.assert_status_ok();
+        assert!(resp.text().contains("/komino/static/app.js"));
+    }
+    let js = server.get("/static/app.js").await;
+    js.assert_status_ok();
+    assert!(js.text().contains("createKomino"));
+    server.get("/static/app.css").await.assert_status_ok();
+    server
+        .get("/static/nope.js")
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_unknown_and_malformed_codes_are_not_found() {
+    let state = get_state().await;
+    let server = client(&state);
+    for path in [
+        "/api/rooms/ZZZZZZ",
+        "/api/rooms/bad!!!",
+        "/api/rooms/ABC",
+        "/api/rooms/ZZZZZZ/watch",
+    ] {
+        let resp = server.get(path).await;
+        resp.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(resp.json::<Value>()["code"], "not_found");
+    }
+    server
+        .post("/api/rooms/ZZZZZZ/leave")
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_member_routes_require_membership() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    let host_id = me(&host).await;
+    let stranger = client(&state);
+    stranger
+        .post(&format!("/api/rooms/{code}/leave"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    stranger
+        .post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": host_id }))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    let resp = act(&stranger, &code, json!({ "type": "start" })).await;
+    resp.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(resp.json::<Value>()["code"], "forbidden");
+
+    // sockets need the cookie the page issues, and membership
+    let router = service::router(state.clone()).with_state(state.clone());
+    let cookieless = TestServer::builder().http_transport().build(router);
+    cookieless
+        .get_websocket(&format!("/r/{code}/ws"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    cookieless
+        .get_websocket(&format!("/r/{code}/watch/ws"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    let outsider = ws_client(&state);
+    me(&outsider).await;
+    outsider
+        .get_websocket(&format!("/r/{code}/ws"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_host_controls_reject_bad_targets() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    let host_id = me(&host).await;
+    let guest_id = me(&guest).await;
+    host.post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": host_id }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    host.post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": "nobody" }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    guest
+        .post(&format!("/api/rooms/{code}/unban"))
+        .json(&json!({ "player": host_id }))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    // removed players show in the host's member list, marked removed
+    let view: Value = host
+        .post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": guest_id }))
+        .await
+        .json();
+    let row = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == guest_id)
+        .unwrap()
+        .clone();
+    assert_eq!(row["removed"], true);
+}
+
+#[tokio::test]
+async fn test_actions_reject_malformed_bodies() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    let resp = act(&host, &code, json!({ "type": "ready" })).await;
+    resp.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(resp.json::<Value>()["message"], "no game is in progress");
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    for body in [
+        json!({ "type": "nope" }),
+        json!({ "type": "draw", "turn_seq": "x" }),
+        json!({ "type": "swap", "turn_seq": 1 }),
+        json!([1, 2]),
+    ] {
+        let resp = act(&host, &code, body).await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(resp.json::<Value>()["code"], "invalid");
+    }
+}
+
+#[tokio::test]
+async fn test_rename_reaches_the_room() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    host.post("/api/me")
+        .json(&json!({ "name": "ada" }))
+        .await
+        .assert_status_ok();
+    host.post("/api/me")
+        .json(&json!({ "name": "a\u{7}b" }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    let host_id = me(&host).await;
+    let row = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == host_id)
+        .unwrap()
+        .clone();
+    assert_eq!(row["name"], "ada");
+}
+
+#[tokio::test]
+async fn test_watch_view_is_public_and_does_not_join() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let watcher = client(&state);
+    let resp = watcher.get(&format!("/api/rooms/{code}/watch")).await;
+    resp.assert_status_ok();
+    // the first visit gets an identity cookie like any page
+    assert!(resp.maybe_cookie("komino_player").is_some());
+    let view: Value = resp.json();
+    assert_eq!(view["observer"], true);
+    assert_eq!(view["me"], Value::Null);
+    assert_eq!(view["game"]["me"], Value::Null);
+    assert_eq!(view["game"]["status"], "peeking");
+    assert!(view["room"]["watch_url"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("/komino/r/{code}/watch")));
+    // nobody's opening peek reaches an observer
+    assert!(
+        !view["game"].to_string().contains("\"v\""),
+        "observer saw a value: {view}"
+    );
+    assert_eq!(view["members"].as_array().unwrap().len(), 2);
+    // watching did not make them a member
+    watcher
+        .get(&format!("/api/rooms/{code}"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    act(&watcher, &code, json!({ "type": "ready" }))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    // members see themselves, not an observer view
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["observer"], false);
+    assert_eq!(view["observers"], 0);
+}
+
+#[tokio::test]
+async fn test_removed_player_cannot_watch() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    let banned = ws_client(&state);
+    banned
+        .post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    host.post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": me(&banned).await }))
+        .await
+        .assert_status_ok();
+    let resp = banned.get(&format!("/api/rooms/{code}/watch")).await;
+    resp.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(resp.json::<Value>()["code"], "removed");
+    banned
+        .get_websocket(&format!("/r/{code}/watch/ws"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_observer_socket_gets_views_and_cannot_act() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let watcher = ws_client(&state);
+    watcher
+        .get(&format!("/api/rooms/{code}/watch"))
+        .await
+        .assert_status_ok();
+    let mut socket = watcher
+        .get_websocket(&format!("/r/{code}/watch/ws"))
+        .await
+        .into_websocket()
+        .await;
+    let first = next(&mut socket).await;
+    assert_eq!(first["type"], "view");
+    assert_eq!(first["view"]["observer"], true);
+    assert_eq!(observer_count(&state, &code).await, 1);
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["observers"], 1);
+
+    socket
+        .send_json(&json!({ "type": "ready", "ref": 7 }))
+        .await;
+    let result = next_matching(&mut socket, |m| m["type"] == "result").await;
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["ref"], 7);
+    assert_eq!(result["code"], "forbidden");
+
+    // a player's action reaches the observer, still without values
+    act(&guest, &code, json!({ "type": "ready" }))
+        .await
+        .assert_status_ok();
+    let guest_id = me(&guest).await;
+    let msg = next_matching(&mut socket, |m| {
+        m["view"]["game"]["seats"].as_array().is_some_and(|s| {
+            s.iter()
+                .any(|s| s["player"] == guest_id && s["ready"] == true)
+        })
+    })
+    .await;
+    assert!(!msg["view"]["game"].to_string().contains("\"v\""));
+
+    socket.close().await;
+    for _ in 0..50 {
+        if observer_count(&state, &code).await == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the observer lease was not released on disconnect");
+}
+
+#[tokio::test]
+async fn test_at_most_four_observers() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    let watcher = ws_client(&state);
+    me(&watcher).await;
+    let mut sockets = Vec::new();
+    for _ in 0..4 {
+        let mut socket = watcher
+            .get_websocket(&format!("/r/{code}/watch/ws"))
+            .await
+            .into_websocket()
+            .await;
+        assert_eq!(next(&mut socket).await["type"], "view");
+        sockets.push(socket);
+    }
+    assert_eq!(observer_count(&state, &code).await, 4);
+    let mut fifth = watcher
+        .get_websocket(&format!("/r/{code}/watch/ws"))
+        .await
+        .into_websocket()
+        .await;
+    let msg = next(&mut fifth).await;
+    assert_eq!(msg["type"], "full");
+    assert_eq!(observer_count(&state, &code).await, 4);
+
+    // an expired lease frees its slot even if its socket never said goodbye
+    sqlx::query("UPDATE room_observers SET until = now() - interval '1 second' WHERE id IN (SELECT id FROM room_observers LIMIT 1)")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let mut late = watcher
+        .get_websocket(&format!("/r/{code}/watch/ws"))
+        .await
+        .into_websocket()
+        .await;
+    assert_eq!(next(&mut late).await["type"], "view");
+}
+
+#[tokio::test]
+async fn test_member_socket_rejects_non_json_and_closes_on_removal() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    let guest = ws_client(&state);
+    guest
+        .post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    let mut socket = guest
+        .get_websocket(&format!("/r/{code}/ws"))
+        .await
+        .into_websocket()
+        .await;
+    let first = next(&mut socket).await;
+    let guest_id = me(&guest).await;
+    let present = first["view"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == guest_id && m["present"] == true);
+    assert!(present);
+
+    socket.send_text("not json").await;
+    let result = next_matching(&mut socket, |m| m["type"] == "result").await;
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["code"], "invalid");
+    assert_eq!(result["ref"], Value::Null);
+
+    host.post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": guest_id }))
+        .await
+        .assert_status_ok();
+    let msg = next_matching(&mut socket, |m| m["type"] == "removed").await;
+    assert_eq!(msg["code"], "removed");
+}
+
+#[tokio::test]
+async fn test_presence_ends_when_the_last_socket_closes() {
+    let state = get_state().await;
+    let host = ws_client(&state);
+    let code = create_room(&host).await;
+    let host_id = me(&host).await;
+    let mut socket = host
+        .get_websocket(&format!("/r/{code}/ws"))
+        .await
+        .into_websocket()
+        .await;
+    next(&mut socket).await;
+    socket.close().await;
+    for _ in 0..50 {
+        let view: Value = client(&state)
+            .get(&format!("/api/rooms/{code}/watch"))
+            .await
+            .json();
+        let away = view["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == host_id && m["present"] == false);
+        if away {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the host stayed present after closing their only socket");
+}
+
+#[tokio::test]
+async fn test_idle_rooms_and_dead_observer_leases_are_cleaned() {
+    let state = get_state().await;
+    let host = client(&state);
+    let idle = create_room(&host).await;
+    let fresh = create_room(&host).await;
+    sqlx::query("UPDATE rooms SET last_active = now() - interval '31 days' WHERE code = $1")
+        .bind(&idle)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO room_observers (id, room_id, until)
+         SELECT 'dead', id, now() - interval '1 minute' FROM rooms WHERE code = $1",
+    )
+    .bind(&fresh)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let deleted = komino::models::delete_stale_rooms(&state.db).await.unwrap();
+    assert_eq!(deleted, 1);
+    host.get(&format!("/api/rooms/{idle}"))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    host.get(&format!("/api/rooms/{fresh}"))
+        .await
+        .assert_status_ok();
+    let leases: i64 = sqlx::query_scalar("SELECT count(*) FROM room_observers")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(leases, 0);
 }

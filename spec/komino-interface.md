@@ -30,6 +30,10 @@ Every special face has an accessible label naming the move (e.g. `9, peek other`
 ### UI-5
 Card backs are a single shared design. Locked slots (RULE-23) show a lock badge.
 
+### UI-20
+Both corner values sit fully inside the card at every rendered size. The bottom corner is the
+top corner rotated 180 degrees about the card's center.
+
 ## Table layout
 
 ### UI-6
@@ -52,8 +56,9 @@ The layout works on a phone in portrait at 360px wide without horizontal scrolli
 
 ### UI-10
 Every card action is two steps: select, then confirm. Selecting highlights the card(s)
-involved and shows a confirm bar describing the action (e.g. `swap drawn 4 into slot 2?`) with
-confirm and cancel buttons. Nothing is sent to the server until confirm.
+involved and opens a confirm dialog describing the action (e.g. `swap drawn 4 into slot 2?`)
+with confirm and cancel buttons. Nothing is sent to the server until confirm. The confirm
+dialog is the "confirm bar" referred to below.
 
 ### UI-11
 UI-10 applies to: drawing, taking the discard, swapping, discarding, each special move (and
@@ -72,6 +77,11 @@ two taps total.
 If the action becomes invalid while its confirm bar is open (e.g. the discard was already
 matched, or the turn changed), the bar closes and shows why.
 
+### UI-19
+The confirm dialog is centered on the screen over a dimmed backdrop, with full-width confirm
+and cancel buttons at least 48px tall. Confirm takes focus when the dialog opens, so Enter
+confirms; Escape or tapping the backdrop cancels.
+
 ## Komino button
 
 ### UI-15
@@ -85,9 +95,19 @@ banner naming the caller, and the final-turn countdown of remaining players.
 ## Peeks and reveals
 
 ### UI-17
-A peeked card (RULE-7, RULE-12, RULE-13, RULE-15) stays face up for the peeking player until
-they dismiss it or 5 seconds pass, then flips back. Other players see the slot highlighted.
+A peeked card (RULE-12, RULE-13, RULE-15) stays face up for the peeking player until they
+dismiss it with a `hide card` button or 5 seconds pass, then flips back. Other players and
+observers see the slot highlighted for the same 5 seconds; the view carries the peeked slots
+without their values. The opening peek (RULE-7) is not a reveal: it lasts until `ready`.
 
 ### UI-18
 At scoring, all hands flip face up, each player's total is shown, and the winner(s) are
 highlighted. The host sees a `next game` button.
+
+## Testing
+
+### UI-21
+The client script exports a factory over an injected window (`document`, `location`, `fetch`,
+`WebSocket`, timers) and only starts itself in a browser. Node tests in `crates/komino/web`
+drive it under jsdom with a fake socket and fetch, covering rendering, every confirm flow,
+socket messages, reconnects, and the watch page. Run them with `make test-js`.
