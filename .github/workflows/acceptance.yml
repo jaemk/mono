@@ -1,0 +1,23 @@
+name: acceptance
+
+# post-deploy checks against the live site; run by hand after `fly deploy`
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 7-char commit /status must report (blank skips the check)
+        required: false
+        default: ""
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test acceptance/live.test.mjs
+        env:
+          ACCEPTANCE_VERSION: ${{ inputs.version }}

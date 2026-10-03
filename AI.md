@@ -37,6 +37,10 @@ After touching `crates/komino/assets`, also run `make test-js` (node tests under
 postgres plus a RustFS S3 store (so S3-backed tests run), the komino client tests with
 coverage thresholds, and a Docker image build. Deploys are still manual.
 
+After a deploy, `make acceptance` (or the manual `acceptance` workflow) runs
+`acceptance/live.test.mjs` against the live site: every mounted app, a paste round trip,
+and a full komino round with sealed reveals and an observer. Writes are short-lived.
+
 ## Docker
 - `bin/stub_workspace.sh` generates stub source files from the workspace manifest for dependency-caching Docker builds
 - When adding a new crate, add a `COPY crates/<name>/Cargo.toml` line to the Dockerfile builder stage
