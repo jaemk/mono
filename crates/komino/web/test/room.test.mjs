@@ -194,6 +194,7 @@ test("the log describes every event kind", async (t) => {
   const kinds = [
     [{ kind: "start", player: "p0" }, "you started a game"],
     [{ kind: "ready", player: "p1" }, "bob is ready"],
+    [{ kind: "ready", player: "p0" }, "you are ready"],
     [{ kind: "play" }, "play begins"],
     [{ kind: "draw", player: "p1" }, "bob drew a card"],
     [{ kind: "take", player: "p1", payload: { value: 5 } }, "bob took the 5"],
@@ -208,6 +209,7 @@ test("the log describes every event kind", async (t) => {
     [{ kind: "komino", player: "p1" }, "bob called KOMINO"],
     [{ kind: "forfeit", player: "p9" }, "someone left the game"],
     [{ kind: "away_skip", player: "p1" }, "bob was away; turn skipped"],
+    [{ kind: "away_skip", player: "p0" }, "you were away; turn skipped"],
     [{ kind: "scored", payload: { winners: ["p0", "p1"] } }, "game over: you, bob"],
     [{ kind: "scored", payload: {} }, "game over: no winner"],
     [{ kind: "mystery" }, "mystery"],

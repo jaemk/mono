@@ -606,7 +606,7 @@
       const owner = (seat) => (g && g.seats[seat] ? (g.seats[seat].player === me ? "your" : `${nameOf(g.seats[seat].player)}'s`) : "a");
       switch (e.kind) {
         case "start": return `${who} started a game`;
-        case "ready": return `${who} is ready`;
+        case "ready": return `${who} ${e.player === me ? "are" : "is"} ready`;
         case "play": return "play begins";
         case "draw": return `${who} drew a card`;
         case "take": return `${who} took the ${p.value}`;
@@ -619,7 +619,7 @@
         case "match": return p.ok ? `${who} matched ${owner(p.seat)} ${p.value}` : `${who} missed a match on ${owner(p.seat)} card ${p.slot + 1} and took a penalty`;
         case "komino": return `${who} called KOMINO`;
         case "forfeit": return `${who} left the game`;
-        case "away_skip": return `${who} was away; turn skipped`;
+        case "away_skip": return `${who} ${e.player === me ? "were" : "was"} away; turn skipped`;
         case "scored": return `game over: ${(p.winners || []).map((w) => (w === me ? "you" : nameOf(w))).join(", ") || "no winner"}`;
       }
       return e.kind;
