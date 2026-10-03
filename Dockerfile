@@ -9,6 +9,8 @@ WORKDIR /app
 COPY bin/stub_workspace.sh bin/stub_workspace.sh
 # Copy each crate's Cargo.toml – add a line here when a new crate is introduced
 COPY ./Cargo.toml ./Cargo.toml
+# the lock file too, or the cached build resolves different versions and is wasted
+COPY ./Cargo.lock ./Cargo.lock
 COPY crates/common/Cargo.toml crates/common/Cargo.toml
 COPY crates/spot/Cargo.toml crates/spot/Cargo.toml
 COPY crates/mono/Cargo.toml crates/mono/Cargo.toml
