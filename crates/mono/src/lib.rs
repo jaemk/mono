@@ -93,7 +93,12 @@ pub fn app(
         router = router.nest("/mapour", mapour::service::router(state.clone()));
     }
     if state.komino_state.is_some() {
-        router = router.nest("/komino", komino::service::router(state.clone()));
+        router = router
+            .nest("/komino", komino::service::router(state.clone()))
+            .route(
+                "/komino/",
+                get(|| async { axum::response::Redirect::permanent("/komino") }),
+            );
     }
     router
         .route("/", get(handlers::root_handler))

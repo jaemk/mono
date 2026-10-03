@@ -415,6 +415,10 @@ async fn test_komino_app_serves() {
     let response = server.get("/komino").await;
     response.assert_status_ok();
     assert!(response.text().contains("komino"));
+
+    let response = server.get("/komino/").await;
+    response.assert_status(StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(response.header("location"), "/komino");
 }
 
 /// With mapour disabled (state None) the router is not mounted and the rest
