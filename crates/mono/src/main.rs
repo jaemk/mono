@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     if env_or("SKIP_DOT_ENV", "false") == "false" {
-        dotenv::dotenv().ok();
+        dotenvy::dotenv().ok();
     }
     let filter = tracing_subscriber::filter::EnvFilter::new(&CONFIG.log_level);
     if CONFIG.log_json {

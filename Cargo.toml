@@ -29,7 +29,7 @@ cached = { version = "0.59", features = ["tokio", "async"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 lazy_static = "1"
-dotenv = "0.15"
+dotenvy = "0.15"
 tera = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
 anyhow = "1"
