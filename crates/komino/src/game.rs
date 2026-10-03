@@ -99,6 +99,10 @@ pub struct Seat {
 /// A card value shown to one player until `until`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reveal {
+    /// Names the peek in a sealed reveal request; empty on states saved
+    /// before ids existed, which can't be revealed.
+    #[serde(default)]
+    pub id: String,
     pub player: String,
     pub seat: usize,
     pub slot: usize,
@@ -161,6 +165,14 @@ pub enum Action {
         slot: usize,
         give_slot: Option<usize>,
     },
+}
+
+/// What a sealed reveal asks for (SEAL-6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Secret {
+    Opening,
+    Drawn,
+    Peek(String),
 }
 
 impl Action {
@@ -578,6 +590,7 @@ impl Game {
                     _ => return Err(Reject::invalid("you cannot peek at that card now")),
                 };
                 self.reveals.push(Reveal {
+                    id: uuid::Uuid::new_v4().simple().to_string(),
                     player: player.to_string(),
                     seat,
                     slot,
@@ -896,27 +909,57 @@ impl Game {
             .collect()
     }
 
-    /// Whether `viewer` may see the value in a slot right now.
-    fn visible(&self, viewer: &str, seat: usize, slot: usize, now: i64) -> bool {
-        if self.status == Status::Scored {
-            return true;
+    /// A private value `player` may see right now, for a sealed reveal
+    /// (SEAL-6). Views never carry these.
+    pub fn secret(&self, player: &str, what: &Secret, now: i64) -> Result<Value, Reject> {
+        let denied = || Reject::new("forbidden", "that card is not yours to see now");
+        let seat = self.seat_of(player).ok_or_else(denied)?;
+        match what {
+            Secret::Opening => {
+                if self.status != Status::Peeking || self.seats[seat].ready {
+                    return Err(denied());
+                }
+                let cards: Vec<Value> = OPENING_PEEK
+                    .iter()
+                    .filter_map(|&slot| {
+                        let v = self.card_at(seat, slot)?;
+                        Some(json!({ "seat": seat, "slot": slot, "v": v }))
+                    })
+                    .collect();
+                Ok(json!({ "cards": cards }))
+            }
+            Secret::Drawn => match self.stage {
+                Stage::Drawn { card } if self.status.in_play() && self.turn == seat => {
+                    Ok(json!({ "card": card }))
+                }
+                _ => Err(denied()),
+            },
+            Secret::Peek(id) => {
+                let r = self
+                    .reveals
+                    .iter()
+                    .find(|r| !r.id.is_empty() && &r.id == id && r.player == player)
+                    .ok_or_else(denied)?;
+                if r.until <= now {
+                    return Err(Reject::new("too_late", "that peek is over"));
+                }
+                Ok(json!({ "cards": [{ "seat": r.seat, "slot": r.slot, "v": r.value }] }))
+            }
         }
-        let s = &self.seats[seat];
-        if self.status == Status::Peeking
-            && s.player == viewer
-            && !s.ready
-            && OPENING_PEEK.contains(&slot)
-        {
-            return true;
-        }
-        self.reveals
-            .iter()
-            .any(|r| r.player == viewer && r.seat == seat && r.slot == slot && r.until > now)
     }
 
-    /// The game as `viewer` may see it: hidden values are left out entirely.
+    /// The game as `viewer` may see it: only public values are included.
     pub fn view(&self, viewer: &str, now: i64) -> Value {
-        let me = self.seat_of(viewer);
+        self.view_for(Some(viewer), now)
+    }
+
+    /// The game as an observer sees it: no seat, so no private values.
+    pub fn observer_view(&self, now: i64) -> Value {
+        self.view_for(None, now)
+    }
+
+    fn view_for(&self, viewer: Option<&str>, now: i64) -> Value {
+        let me = viewer.and_then(|v| self.seat_of(v));
         let seats: Vec<Value> = self
             .seats
             .iter()
@@ -925,10 +968,10 @@ impl Game {
                 let slots: Vec<Value> = s
                     .slots
                     .iter()
-                    .enumerate()
-                    .map(|(j, card)| match card {
+                    .map(|card| match card {
                         None => Value::Null,
-                        Some(v) if self.visible(viewer, i, j, now) => json!({ "v": v }),
+                        // private values only ever travel sealed (SEAL-1)
+                        Some(v) if self.status == Status::Scored => json!({ "v": v }),
                         Some(_) => json!({}),
                     })
                     .collect();
@@ -946,16 +989,22 @@ impl Game {
             .collect();
         let is_turn = me == Some(self.turn) && self.status.in_play();
         let stage = match &self.stage {
-            // the drawn card is the drawer's alone
-            Stage::Drawn { card } => {
-                json!({ "kind": "drawn", "card": if is_turn { Some(*card) } else { None } })
-            }
+            // the drawer reveals the drawn card sealed
+            Stage::Drawn { .. } => json!({ "kind": "drawn", "card": null }),
             other => serde_json::to_value(other).unwrap_or(Value::Null),
         };
+        // the viewer's own live peeks, by id and without the value
         let reveals: Vec<Value> = self
             .reveals
             .iter()
-            .filter(|r| r.player == viewer && r.until > now)
+            .filter(|r| Some(r.player.as_str()) == viewer && r.until > now)
+            .map(|r| json!({ "id": r.id, "seat": r.seat, "slot": r.slot, "until": r.until }))
+            .collect();
+        // which slots someone is looking at is public; the values are not
+        let peeked: Vec<Value> = self
+            .reveals
+            .iter()
+            .filter(|r| r.until > now)
             .map(|r| json!({ "seat": r.seat, "slot": r.slot, "until": r.until }))
             .collect();
         json!({
@@ -973,6 +1022,7 @@ impl Game {
             "matchable": self.matchable,
             "deck_count": self.deck.len(),
             "reveals": reveals,
+            "peeked": peeked,
             "can_call": is_turn
                 && self.status == Status::Playing
                 && self.stage == Stage::Start
@@ -1139,16 +1189,26 @@ mod tests {
             0,
             0,
         );
-        let v = g.view("p0", 0);
-        let slots = &v["seats"][0]["slots"];
-        assert!(slots[0].get("v").is_none());
-        assert!(slots[1].get("v").is_none());
-        assert_eq!(slots[2]["v"], 3);
-        assert_eq!(slots[3]["v"], 4);
-        // never another player's cards
-        assert!(v["seats"][1]["slots"][2].get("v").is_none());
+        // the view carries no values; the near row is revealed sealed
+        assert!(!g.view("p0", 0).to_string().contains("\"v\""));
+        assert_eq!(
+            g.secret("p0", &Secret::Opening, 0).unwrap(),
+            json!({ "cards": [{ "seat": 0, "slot": 2, "v": 3 }, { "seat": 0, "slot": 3, "v": 4 }] })
+        );
+        // each player only ever gets their own
+        assert_eq!(
+            g.secret("p1", &Secret::Opening, 0).unwrap()["cards"][0],
+            json!({ "seat": 1, "slot": 2, "v": 0 })
+        );
+        assert_eq!(
+            g.secret("p9", &Secret::Opening, 0).unwrap_err().code,
+            "forbidden"
+        );
         act(&mut g, "p0", Action::Ready);
-        assert!(g.view("p0", 0)["seats"][0]["slots"][2].get("v").is_none());
+        assert_eq!(
+            g.secret("p0", &Secret::Opening, 0).unwrap_err().code,
+            "forbidden"
+        );
     }
 
     #[test]
@@ -1163,10 +1223,24 @@ mod tests {
     fn draw_then_swap_discards_the_replaced_card() {
         let mut g = playing(&[[1, 2, 3, 4], [5, 5, 5, 5]], 9, &[6]);
         assert_eq!(reject(&mut g, "p1", Action::Draw), "not_your_turn");
+        assert_eq!(
+            g.secret("p0", &Secret::Drawn, 0).unwrap_err().code,
+            "forbidden"
+        );
         act(&mut g, "p0", Action::Draw);
-        assert_eq!(g.view("p0", 0)["stage"]["card"], 6);
+        // nobody's view carries the drawn card, the drawer's included
+        assert!(g.view("p0", 0)["stage"]["card"].is_null());
         assert!(g.view("p1", 0)["stage"]["card"].is_null());
+        assert_eq!(
+            g.secret("p0", &Secret::Drawn, 0).unwrap(),
+            json!({ "card": 6 })
+        );
+        assert_eq!(
+            g.secret("p1", &Secret::Drawn, 0).unwrap_err().code,
+            "forbidden"
+        );
         act(&mut g, "p0", Action::Swap { slot: 1 });
+        assert!(g.secret("p0", &Secret::Drawn, 0).is_err());
         assert_eq!(g.seats[0].slots[1], Some(6));
         assert_eq!(g.discard.last(), Some(&2));
         assert!(g.matchable);
@@ -1196,12 +1270,51 @@ mod tests {
         );
         let out = act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
         assert!(out.stats.contains(&("p0".into(), Stat::SpecialMoves, 1)));
-        assert_eq!(g.view("p0", 1)["seats"][0]["slots"][0]["v"], 1);
-        assert!(g.view("p1", 1)["seats"][0]["slots"][0].get("v").is_none());
-        assert!(g.view("p0", PEEK_MS + 1)["seats"][0]["slots"][0]
-            .get("v")
-            .is_none());
+        let view = g.view("p0", 1);
+        assert!(!view.to_string().contains("\"v\""));
+        let id = view["reveals"][0]["id"].as_str().unwrap().to_string();
+        assert_eq!(id.len(), 32);
+        assert_eq!(view["reveals"][0]["slot"], 0);
+        let peek = Secret::Peek(id);
+        assert_eq!(
+            g.secret("p0", &peek, 1).unwrap(),
+            json!({ "cards": [{ "seat": 0, "slot": 0, "v": 1 }] })
+        );
+        // the other player can't use the id, and nobody can after the deadline
+        assert_eq!(g.secret("p1", &peek, 1).unwrap_err().code, "forbidden");
+        assert!(g.view("p1", 1)["reveals"].as_array().unwrap().is_empty());
+        assert_eq!(
+            g.secret("p0", &peek, PEEK_MS + 1).unwrap_err().code,
+            "too_late"
+        );
+        assert_eq!(
+            g.secret("p0", &Secret::Peek("nope".into()), 1)
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
         assert_eq!(g.turn, 1);
+    }
+
+    #[test]
+    fn peeks_saved_without_an_id_cannot_be_revealed() {
+        let mut g = playing(&[[1, 2, 3, 4], [5; 4]], 0, &[]);
+        g.reveals.push(Reveal {
+            id: String::new(),
+            player: "p0".into(),
+            seat: 0,
+            slot: 0,
+            value: 1,
+            until: 10,
+        });
+        let stored = serde_json::to_value(&g).unwrap();
+        let mut old = stored.clone();
+        old["reveals"][0].as_object_mut().unwrap().remove("id");
+        let loaded: Game = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.reveals[0].id, "");
+        assert!(loaded
+            .secret("p0", &Secret::Peek(String::new()), 1)
+            .is_err());
     }
 
     #[test]
@@ -1214,7 +1327,11 @@ mod tests {
             "invalid"
         );
         act(&mut g, "p0", Action::Peek { seat: 1, slot: 1 });
-        assert_eq!(g.view("p0", 1)["seats"][1]["slots"][1]["v"], 6);
+        let id = g.reveals[0].id.clone();
+        assert_eq!(
+            g.secret("p0", &Secret::Peek(id), 1).unwrap()["cards"][0],
+            json!({ "seat": 1, "slot": 1, "v": 6 })
+        );
     }
 
     #[test]
@@ -1524,5 +1641,59 @@ mod tests {
         let text = g.view("p1", 0).to_string();
         assert!(!text.contains("\"v\""), "p1 saw a value: {text}");
         assert!(!text.contains("deck\":["));
+    }
+
+    #[test]
+    fn observers_see_no_opening_peek_drawn_card_or_reveal() {
+        let mut g = Game::new(
+            players(2),
+            stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[7]),
+            0,
+            0,
+        );
+        // during the opening peek each player may reveal their near row, observers nothing
+        assert!(g.secret("p0", &Secret::Opening, 0).is_ok());
+        let text = g.observer_view(0).to_string();
+        assert!(!text.contains("\"v\""), "observer saw a value: {text}");
+        assert_eq!(g.observer_view(0)["me"], Value::Null);
+
+        g.apply("p0", Action::Ready, None, 0, &mut rng()).unwrap();
+        g.apply("p1", Action::Ready, None, 0, &mut rng()).unwrap();
+        act(&mut g, "p0", Action::Draw);
+        assert_eq!(g.secret("p0", &Secret::Drawn, 0).unwrap()["card"], 7);
+        let obs = g.observer_view(0);
+        assert_eq!(obs["stage"]["kind"], "drawn");
+        assert_eq!(obs["stage"]["card"], Value::Null);
+        assert_eq!(obs["can_call"], false);
+
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Peek { seat: 0, slot: 1 });
+        // the peeker may reveal the value; observers and the other player see only the slot
+        let id = g.reveals[0].id.clone();
+        assert_eq!(
+            g.secret("p0", &Secret::Peek(id), 1).unwrap()["cards"][0]["v"],
+            2
+        );
+        for view in [g.observer_view(1), g.view("p1", 1)] {
+            assert!(view["seats"][0]["slots"][1].get("v").is_none());
+            assert_eq!(view["reveals"], json!([]));
+            assert_eq!(
+                view["peeked"],
+                json!([{ "seat": 0, "slot": 1, "until": PEEK_MS }])
+            );
+        }
+        // the highlight ends with the reveal
+        assert_eq!(g.observer_view(PEEK_MS)["peeked"], json!([]));
+    }
+
+    #[test]
+    fn observers_see_every_hand_once_scored() {
+        let mut g = playing(&[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[9, 9]);
+        g.status = Status::Scored;
+        for seat in g.observer_view(0)["seats"].as_array().unwrap() {
+            for slot in seat["slots"].as_array().unwrap() {
+                assert!(slot.get("v").is_some());
+            }
+        }
     }
 }

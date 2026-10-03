@@ -1,5 +1,6 @@
+use crate::game::Secret;
 use crate::models::{self, ApiError, ClientAction, Player, Result, Room};
-use crate::State;
+use crate::{sealed, State};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -62,7 +63,11 @@ async fn identify(state: &State, jar: CookieJar) -> Result<(Player, CookieJar)> 
 }
 
 async fn room_view(state: &State, room: &Room, player: &str) -> Result<Value> {
-    models::view(&state.db, room, player, &state.config.real_hostname).await
+    models::view(&state.db, room, Some(player), &state.config.real_hostname).await
+}
+
+async fn observer_view(state: &State, room: &Room) -> Result<Value> {
+    models::view(&state.db, room, None, &state.config.real_hostname).await
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +188,62 @@ pub async fn unban_member(
     Ok((jar, Json(view)).into_response())
 }
 
+/// The public view of a room, for the watch page's first render. Watching
+/// does not join the room.
+pub async fn watch_room(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    models::require_not_removed(&state.db, room.id, &player.id).await?;
+    let view = observer_view(&state, &room).await?;
+    Ok((jar, Json(view)).into_response())
+}
+
+/// The server's static ECDH public key (SEAL-3).
+pub async fn server_key(AxumState(state): AxumState<State>) -> Json<Value> {
+    Json(json!({ "kid": state.server_key.kid, "public_key": state.server_key.public_key }))
+}
+
+#[derive(Deserialize)]
+pub struct RevealRequest {
+    pub client_key: String,
+    pub what: String,
+    pub id: Option<String>,
+}
+
+/// A private card value, sealed to the client's key (SEAL-6, SEAL-7).
+pub async fn reveal(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+    Json(req): Json<RevealRequest>,
+) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    let client = sealed::parse_public(&req.client_key)
+        .ok_or_else(|| ApiError::invalid("client_key must be a P-256 public key"))?;
+    let what = match (req.what.as_str(), req.id) {
+        ("opening", _) => Secret::Opening,
+        ("drawn", _) => Secret::Drawn,
+        ("peek", Some(id)) => Secret::Peek(id),
+        ("peek", None) => return Err(ApiError::invalid("a peek reveal needs its id")),
+        _ => return Err(ApiError::invalid("what must be opening, drawn, or peek")),
+    };
+    let key_hash = hex::encode(common::crypto::sha256(&sealed::public_point(&client)));
+    let secret = models::reveal(&state.db, &room, &player.id, &what, &key_hash).await?;
+    let body = state
+        .server_key
+        .seal(&client, room.code.as_bytes(), secret.to_string().as_bytes())
+        .map_err(|e| {
+            tracing::error!("komino seal error: {e}");
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "error", "could not seal")
+        })?;
+    Ok((jar, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response())
+}
+
 /// The same actions the websocket takes, over plain http.
 pub async fn action(
     AxumState(state): AxumState<State>,
@@ -211,17 +272,84 @@ pub async fn ws(
         cookie_id(&state, &jar).ok_or_else(|| ApiError::forbidden("load the room page first"))?;
     let room = models::room_by_code(&state.db, &code).await?;
     models::require_member(&state.db, room.id, &player).await?;
-    Ok(upgrade.on_upgrade(move |socket| socket_loop(state, room, player, socket)))
+    Ok(upgrade.on_upgrade(move |socket| socket_loop(state, room, Who::Member(player), socket)))
 }
 
-/// Send this member's current view. False when the socket should close.
-async fn send_view(state: &State, room: &Room, player: &str, socket: &mut WebSocket) -> bool {
-    let msg = match models::require_member(&state.db, room.id, player).await {
-        Err(e) => json!({ "type": "removed", "code": e.code }),
-        Ok(()) => match room_view(state, room, player).await {
-            Ok(view) => json!({ "type": "view", "view": view }),
-            Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
+/// The watch socket. The observer slot is claimed after the upgrade so a
+/// full room can say so in a message the page can read.
+pub async fn watch_ws(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response> {
+    let player =
+        cookie_id(&state, &jar).ok_or_else(|| ApiError::forbidden("load the watch page first"))?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    models::require_not_removed(&state.db, room.id, &player).await?;
+    Ok(upgrade.on_upgrade(move |socket| watch_loop(state, room, player, socket)))
+}
+
+async fn watch_loop(state: State, room: Room, player: String, mut socket: WebSocket) {
+    match models::claim_observer(&state.db, room.id).await {
+        Ok(lease) => {
+            let who = Who::Observer {
+                lease: lease.clone(),
+                player,
+            };
+            socket_loop(state.clone(), room.clone(), who, socket).await;
+            if let Err(e) = models::release_observer(&state.db, room.id, &lease).await {
+                tracing::warn!("komino observer release error: {e:?}");
+            }
+        }
+        Err(e) => {
+            let msg = json!({ "type": e.code, "message": e.message });
+            let _ = socket.send(Message::Text(msg.to_string().into())).await;
+            let _ = socket.send(Message::Close(None)).await;
+        }
+    }
+}
+
+/// Who is on the other end of a room socket.
+enum Who {
+    Member(String),
+    /// An observer's lease id, and the cookie player behind it, so a removal
+    /// while watching still closes the socket.
+    Observer {
+        lease: String,
+        player: String,
+    },
+}
+
+/// The message for a failed access check: a refusal ends the socket as
+/// `removed`, while a server error is reported and the socket stays open.
+fn access_error(e: &ApiError) -> Value {
+    if e.status.is_server_error() {
+        json!({ "type": "error", "code": e.code, "message": e.message })
+    } else {
+        json!({ "type": "removed", "code": e.code })
+    }
+}
+
+/// Send the socket's current view. False when the socket should close.
+async fn send_view(state: &State, room: &Room, who: &Who, socket: &mut WebSocket) -> bool {
+    let msg = match who {
+        Who::Member(player) => match models::require_member(&state.db, room.id, player).await {
+            Err(e) => access_error(&e),
+            Ok(()) => match room_view(state, room, player).await {
+                Ok(view) => json!({ "type": "view", "view": view }),
+                Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
+            },
         },
+        Who::Observer { player, .. } => {
+            match models::require_not_removed(&state.db, room.id, player).await {
+                Err(e) => access_error(&e),
+                Ok(()) => match observer_view(state, room).await {
+                    Ok(view) => json!({ "type": "view", "view": view }),
+                    Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
+                },
+            }
+        }
     };
     let closing = msg["type"] == "removed";
     socket
@@ -231,14 +359,17 @@ async fn send_view(state: &State, room: &Room, player: &str, socket: &mut WebSoc
         && !closing
 }
 
-async fn handle_text(state: &State, room: &Room, player: &str, text: &str) -> Value {
+async fn handle_text(state: &State, room: &Room, who: &Who, text: &str) -> Value {
     let parsed: std::result::Result<Value, _> = serde_json::from_str(text);
     let (reference, result) = match parsed {
         Ok(mut body) => {
             let reference = body.get_mut("ref").map(Value::take);
-            let result = match ClientAction::parse(body) {
-                Ok(action) => models::act(&state.db, room, player, action).await,
-                Err(e) => Err(e),
+            let result = match (who, ClientAction::parse(body)) {
+                (Who::Observer { .. }, _) => Err(ApiError::forbidden("observers cannot act")),
+                (Who::Member(player), Ok(action)) => {
+                    models::act(&state.db, room, player, action).await
+                }
+                (Who::Member(_), Err(e)) => Err(e),
             };
             (reference, result)
         }
@@ -252,19 +383,33 @@ async fn handle_text(state: &State, room: &Room, player: &str, text: &str) -> Va
     }
 }
 
-async fn socket_loop(state: State, room: Room, player: String, mut socket: WebSocket) {
+/// Refresh a member's presence or an observer's lease. False when an
+/// observer's lease is gone (expired and reclaimed), so its slot may already
+/// belong to someone else and the socket has to close.
+async fn heartbeat(state: &State, room: &Room, who: &Who) -> Result<bool> {
+    match who {
+        Who::Member(player) => models::set_presence(&state.db, room.id, player, true)
+            .await
+            .map(|()| true),
+        Who::Observer { lease, .. } => models::refresh_observer(&state.db, lease).await,
+    }
+}
+
+async fn socket_loop(state: State, room: Room, who: Who, mut socket: WebSocket) {
     let mut pings = state.hub.subscribe(room.id);
-    state.hub.connect(room.id, &player);
-    if let Err(e) = models::set_presence(&state.db, room.id, &player, true).await {
+    if let Who::Member(player) = &who {
+        state.hub.connect(room.id, player);
+    }
+    if let Err(e) = heartbeat(&state, &room, &who).await {
         tracing::warn!("komino presence error: {e:?}");
     }
     let mut beat = tokio::time::interval(HEARTBEAT);
-    if send_view(&state, &room, &player, &mut socket).await {
+    if send_view(&state, &room, &who, &mut socket).await {
         loop {
             tokio::select! {
                 msg = socket.recv() => match msg {
                     Some(Ok(Message::Text(text))) => {
-                        let reply = handle_text(&state, &room, &player, text.as_str()).await;
+                        let reply = handle_text(&state, &room, &who, text.as_str()).await;
                         if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
                             break;
                         }
@@ -274,20 +419,28 @@ async fn socket_loop(state: State, room: Room, player: String, mut socket: WebSo
                 },
                 ping = pings.recv() => match ping {
                     Ok(()) | Err(RecvError::Lagged(_)) => {
-                        if !send_view(&state, &room, &player, &mut socket).await {
+                        if !send_view(&state, &room, &who, &mut socket).await {
                             break;
                         }
                     }
                     Err(RecvError::Closed) => break,
                 },
-                _ = beat.tick() => {
-                    let _ = models::set_presence(&state.db, room.id, &player, true).await;
-                }
+                _ = beat.tick() => match heartbeat(&state, &room, &who).await {
+                    Ok(true) => {}
+                    // the page reconnects and claims a slot again, or hears the room is full
+                    Ok(false) => break,
+                    // a transient db error; the lease outlives a missed beat
+                    Err(e) => tracing::warn!("komino heartbeat error: {e:?}"),
+                },
             }
         }
     }
-    if state.hub.disconnect(room.id, &player) == 0 {
-        let _ = models::set_presence(&state.db, room.id, &player, false).await;
+    // a clean close, whichever side ended it; ignored if the peer is gone
+    let _ = socket.send(Message::Close(None)).await;
+    if let Who::Member(player) = &who {
+        if state.hub.disconnect(room.id, player) == 0 {
+            let _ = models::set_presence(&state.db, room.id, player, false).await;
+        }
     }
 }
 
@@ -303,6 +456,18 @@ mod tests {
         let forged = signed.replacen("abc", "abd", 1);
         assert_eq!(verify_player(&forged, "key"), None);
         assert_eq!(verify_player("abc", "key"), None);
+    }
+
+    #[test]
+    fn only_refusals_close_a_socket_as_removed() {
+        let removed = access_error(&ApiError::removed());
+        assert_eq!(removed, json!({ "type": "removed", "code": "removed" }));
+        let left = access_error(&ApiError::forbidden("join the room first"));
+        assert_eq!(left["type"], "removed");
+        // a database failure is retryable, not a removal
+        let db = access_error(&ApiError::from(sqlx::Error::PoolTimedOut));
+        assert_eq!(db["type"], "error");
+        assert_eq!(db["code"], "error");
     }
 
     #[test]

@@ -25,7 +25,8 @@ The deck has 60 cards with numeric values only, no suits or face cards:
 
 ### RULE-3
 The server shuffles with the os rng. The client never receives the order of the deck or the
-value of any card the viewing player is not entitled to see.
+value of any card the viewing player is not entitled to see. Values a player is entitled to
+see privately are only sent sealed (SEAL-1).
 
 ### RULE-4
 When the draw pile is empty, every discard but the top card is shuffled into a new draw pile.

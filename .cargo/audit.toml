@@ -1,0 +1,4 @@
+[advisories]
+# rsa is only reachable through sqlx-mysql, which is in Cargo.lock but never
+# compiled (`cargo tree -i rsa --target all` is empty); no fixed rsa exists
+ignore = ["RUSTSEC-2023-0071"]

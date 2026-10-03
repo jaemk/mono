@@ -77,9 +77,17 @@ main { max-width: 980px; margin: 0 auto; padding: 12px 16px 120px; }
 .join input { text-transform: uppercase; width: 140px; }
 .roombar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .roombar strong { font-family: ui-monospace, monospace; letter-spacing: .12em; font-size: 18px; }
-.actions { display: flex; gap: 8px; }
+.roomid { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.watch-tag, .observers {
+  font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px;
+}
+.watch-tag, .watch-only { display: none; }
+.watching .watch-tag, .watching .watch-only { display: inline-block; }
+.watching .player-only { display: none; }
 .status { margin: 10px 0 6px; min-height: 22px; font-weight: 600; }
 .status .komino { color: var(--accent); }
+.status.offline { color: var(--muted); }
 
 .table {
   background: var(--felt); color: var(--felt-ink); border-radius: 16px;
@@ -117,14 +125,20 @@ button.card:disabled { opacity: 1; cursor: default; }
   font-weight: 800; letter-spacing: .08em; background: var(--accent); color: #fff; border-color: var(--accent);
   padding: 10px 22px;
 }
-.confirm {
-  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
-  width: min(560px, calc(100% - 32px));
-  background: var(--panel); border: 2px solid var(--select); border-radius: 12px;
-  padding: 10px 12px; display: flex; gap: 10px; align-items: center; justify-content: space-between;
-  box-shadow: 0 8px 24px rgba(0,0,0,.25); z-index: 10;
+/* the confirm dialog sits in the middle of the screen over the table */
+.confirm-backdrop {
+  position: fixed; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: rgba(0,0,0,.45);
 }
-.confirm-buttons { display: flex; gap: 8px; flex-shrink: 0; }
+.confirm {
+  width: min(420px, 100%);
+  background: var(--panel); border: 3px solid var(--select); border-radius: 16px;
+  padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,.4);
+}
+.confirm p { margin: 0 0 18px; font-size: 19px; font-weight: 600; text-align: center; }
+.confirm-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.confirm-buttons button { min-height: 52px; font-size: 18px; font-weight: 600; }
 .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 640px) { .columns { grid-template-columns: 1fr; gap: 0; } }
 .members { list-style: none; margin: 0; padding: 0; }

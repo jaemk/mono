@@ -25,7 +25,7 @@ and is rendered as text only.
 
 ### ROOM-5
 A player can change their name at any time, including mid-game. The change is broadcast to
-every room the player is currently present in.
+every room the player is a current member of.
 
 ## Rooms
 

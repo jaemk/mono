@@ -2,6 +2,7 @@ pub mod config;
 pub mod game;
 pub mod handlers;
 pub mod models;
+pub mod sealed;
 pub mod service;
 pub mod test_utils;
 
@@ -16,6 +17,8 @@ pub struct Resources {
     pub db: common::db::DbPool,
     pub config: Config,
     pub hub: Hub,
+    /// Static ECDH key that seals private card values (SEAL-3).
+    pub server_key: sealed::ServerKey,
 }
 
 /// This machine's websocket fanout. Each room gets a broadcast channel that

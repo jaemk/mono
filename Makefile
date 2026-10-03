@@ -3,7 +3,7 @@
 -include .env
 export
 
-.PHONY: fmt test lint run push \
+.PHONY: fmt test test-js acceptance lint run push \
 	db-setup db-setup-spot db-setup-spot-create db-setup-paste db-setup-paste-create \
 	db-setup-mapour db-setup-mapour-create db-setup-komino db-setup-komino-create \
 	db-migrate db-migrate-spot db-migrate-paste db-migrate-mapour db-migrate-komino \
@@ -14,6 +14,16 @@ fmt:
 
 test:
 	./bin/test-db.sh
+
+# komino client tests (jsdom); needs node and npm on PATH
+test-js:
+	cd crates/komino/web && npm ci && npm test
+
+# post-deploy checks against the live site (node 22+ on PATH); see
+# acceptance/live.test.mjs for ACCEPTANCE_BASE and ACCEPTANCE_HOSTS
+acceptance: ACCEPTANCE_VERSION ?= $(shell git rev-parse --short=7 HEAD)
+acceptance:
+	ACCEPTANCE_VERSION=$(ACCEPTANCE_VERSION) node --test acceptance/live.test.mjs
 
 lint:
 	cargo clippy --workspace --tests -- -D warnings

@@ -197,8 +197,10 @@ pub async fn home(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-pub async fn status() -> impl IntoResponse {
+// the version is read at startup: the image writes commit_hash.txt after the
+// build, so compiling it in would only ever report the checked-in placeholder
+pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
-        "hash": include_str!("../../../commit_hash.txt").trim(),
+        "hash": state.config.version,
     }))
 }

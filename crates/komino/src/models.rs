@@ -2,7 +2,7 @@
 //! state; each action locks the game row, applies the rules engine, and saves
 //! state, events, and stats in one transaction that also notifies the room.
 
-use crate::game::{self, Action, Game, Outcome, Reject, Stat};
+use crate::game::{self, Action, Game, Outcome, Reject, Secret, Stat};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -21,8 +21,15 @@ const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 6;
 pub const MAX_NAME_CHARS: usize = 24;
 
-/// How long a page load or socket heartbeat counts a member as present.
+/// How long a page load or socket heartbeat counts a member as present, and
+/// how long an observer lease lasts between heartbeats.
 pub const PRESENCE_SECS: i64 = 25;
+
+/// Observer sockets allowed per room, across every machine.
+pub const MAX_OBSERVERS: i64 = 4;
+
+/// How long a client ECDH key may be used after its first reveal (SEAL-5).
+pub const CLIENT_KEY_SECS: i64 = 300;
 
 pub type Tx<'a> = Transaction<'a, Postgres>;
 
@@ -57,6 +64,13 @@ impl ApiError {
             "you were removed from this room",
         )
     }
+    pub fn full() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "full",
+            format!("this room already has {MAX_OBSERVERS} observers"),
+        )
+    }
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -75,10 +89,10 @@ impl From<serde_json::Error> for ApiError {
 
 impl From<Reject> for ApiError {
     fn from(r: Reject) -> Self {
-        let status = if r.code == "too_late" || r.code == "stale" {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::BAD_REQUEST
+        let status = match r.code {
+            "too_late" | "stale" => StatusCode::CONFLICT,
+            "forbidden" => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_REQUEST,
         };
         Self::new(status, r.code, r.message)
     }
@@ -299,6 +313,82 @@ pub async fn require_member(db: &DbPool, room_id: i64, player: &str) -> Result<(
         Some(r) if !r.get::<bool, _>("gone") => Ok(()),
         _ => Err(ApiError::forbidden("join the room first")),
     }
+}
+
+/// Anyone but a player the host removed may watch a room.
+pub async fn require_not_removed(db: &DbPool, room_id: i64, player: &str) -> Result<()> {
+    let removed: Option<bool> = sqlx::query_scalar(
+        "SELECT removed FROM room_members WHERE room_id = $1 AND player_id = $2",
+    )
+    .bind(room_id)
+    .bind(player)
+    .fetch_optional(db)
+    .await?;
+    match removed {
+        Some(true) => Err(ApiError::removed()),
+        _ => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Observers
+// ---------------------------------------------------------------------------
+
+/// Take one of the room's observer slots, returning the lease id. The room
+/// row lock serializes claims from every machine.
+pub async fn claim_observer(db: &DbPool, room_id: i64) -> Result<String> {
+    let mut tx = db.begin().await?;
+    lock_room(&mut tx, room_id).await?;
+    sqlx::query("DELETE FROM room_observers WHERE room_id = $1 AND until <= now()")
+        .bind(room_id)
+        .execute(&mut *tx)
+        .await?;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM room_observers WHERE room_id = $1")
+        .bind(room_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if n >= MAX_OBSERVERS {
+        return Err(ApiError::full());
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    sqlx::query(
+        "INSERT INTO room_observers (id, room_id, until)
+         VALUES ($1, $2, now() + make_interval(secs => $3))",
+    )
+    .bind(&id)
+    .bind(room_id)
+    .bind(PRESENCE_SECS as f64)
+    .execute(&mut *tx)
+    .await?;
+    notify(&mut tx, room_id).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Extend a live observer lease by another [`PRESENCE_SECS`]. False when the
+/// lease expired or was deleted, since its slot may have been claimed again.
+pub async fn refresh_observer(db: &DbPool, id: &str) -> Result<bool> {
+    let n = sqlx::query(
+        "UPDATE room_observers SET until = now() + make_interval(secs => $2)
+         WHERE id = $1 AND until > now()",
+    )
+    .bind(id)
+    .bind(PRESENCE_SECS as f64)
+    .execute(db)
+    .await?
+    .rows_affected();
+    Ok(n == 1)
+}
+
+pub async fn release_observer(db: &DbPool, room_id: i64, id: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM room_observers WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    notify(&mut tx, room_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Add a member, or bring a returning one back. Removed players stay out.
@@ -659,7 +749,91 @@ pub async fn tick_all(db: &DbPool) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Sealed reveals
+// ---------------------------------------------------------------------------
+
+/// Bind a client key to `player` on first use and refuse it once its window
+/// has passed or when another player bound it first.
+async fn check_client_key(tx: &mut Tx<'_>, player: &str, key_hash: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO client_keys (key_hash, player_id) VALUES ($1, $2)
+         ON CONFLICT (key_hash) DO NOTHING",
+    )
+    .bind(key_hash)
+    .bind(player)
+    .execute(&mut **tx)
+    .await?;
+    let row = sqlx::query(
+        "SELECT player_id, first_seen < now() - make_interval(secs => $2) AS expired
+         FROM client_keys WHERE key_hash = $1",
+    )
+    .bind(key_hash)
+    .bind(CLIENT_KEY_SECS as f64)
+    .fetch_one(&mut **tx)
+    .await?;
+    if row.get::<String, _>("player_id") != player {
+        return Err(ApiError::forbidden("that key belongs to another player"));
+    }
+    if row.get::<bool, _>("expired") {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "key_expired",
+            "the client key expired; make a new one",
+        ));
+    }
+    Ok(())
+}
+
+/// The private value `player` asked for, after every check (SEAL-5,
+/// SEAL-6). The caller seals it to the client's key.
+pub async fn reveal(
+    db: &DbPool,
+    room: &Room,
+    player: &str,
+    what: &Secret,
+    key_hash: &str,
+) -> Result<Value> {
+    require_member(db, room.id, player).await?;
+    let mut tx = db.begin().await?;
+    check_client_key(&mut tx, player, key_hash).await?;
+    // lock room then game like every action, so a concurrent swap, ready, or
+    // discard can't commit between this check and the reveal
+    lock_room(&mut tx, room.id).await?;
+    let (game_id, game) = lock_game(&mut tx, room.id)
+        .await?
+        .ok_or_else(|| ApiError::forbidden("no game is in progress"))?;
+    let secret = game.secret(player, what, now_ms())?;
+    if let Secret::Peek(id) = what {
+        let fresh = sqlx::query(
+            "INSERT INTO reveal_fetches (reveal_id, game_id) VALUES ($1, $2)
+             ON CONFLICT (reveal_id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(game_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if fresh == 0 {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "already_revealed",
+                "that peek was already revealed",
+            ));
+        }
+    }
+    tx.commit().await?;
+    Ok(secret)
+}
+
 pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
+    sqlx::query("DELETE FROM client_keys WHERE first_seen < now() - interval '1 day'")
+        .execute(db)
+        .await?;
+    // leases left behind by a machine that died mid-socket
+    sqlx::query("DELETE FROM room_observers WHERE until <= now()")
+        .execute(db)
+        .await?;
     Ok(
         sqlx::query("DELETE FROM rooms WHERE last_active < now() - interval '30 days'")
             .execute(db)
@@ -672,9 +846,16 @@ pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
 // Views
 // ---------------------------------------------------------------------------
 
-/// Everything a member's page shows, redacted for that member.
-pub async fn view(db: &DbPool, room: &Room, viewer: &str, base_url: &str) -> Result<Value> {
+/// Everything a member's page shows, redacted for that member. A `None`
+/// viewer is an observer, who sees only public state.
+pub async fn view(db: &DbPool, room: &Room, viewer: Option<&str>, base_url: &str) -> Result<Value> {
     let room = room_by_code(db, &room.code).await?;
+    let observers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM room_observers WHERE room_id = $1 AND until > now()",
+    )
+    .bind(room.id)
+    .fetch_one(db)
+    .await?;
     let members: Vec<Value> = sqlx::query(
         "SELECT m.player_id, p.name, m.removed, m.left_at IS NOT NULL AS gone,
                 coalesce(m.present_until > now(), false) AS present
@@ -706,7 +887,10 @@ pub async fn view(db: &DbPool, room: &Room, viewer: &str, base_url: &str) -> Res
         Some(row) => {
             let game_id: i64 = row.get("id");
             let state: Game = serde_json::from_value(row.get::<Value, _>("state"))?;
-            let mut view = state.view(viewer, now_ms());
+            let mut view = match viewer {
+                Some(viewer) => state.view(viewer, now_ms()),
+                None => state.observer_view(now_ms()),
+            };
             view["id"] = json!(game_id);
             view["version"] = json!(row.get::<i64, _>("version"));
             let events: Vec<Value> = sqlx::query(
@@ -755,8 +939,13 @@ pub async fn view(db: &DbPool, room: &Room, viewer: &str, base_url: &str) -> Res
             "code": room.code,
             "host": room.host,
             "url": format!("{base_url}/komino/r/{}", room.code),
+            "watch_url": format!("{base_url}/komino/r/{}/watch", room.code),
         },
         "me": viewer,
+        "observer": viewer.is_none(),
+        // lets the client read deadlines against the server clock
+        "server_now": now_ms(),
+        "observers": observers,
         "members": members,
         "game": game,
         "events": events,

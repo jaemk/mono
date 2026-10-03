@@ -6,6 +6,7 @@ local
 **/.env.docker
 **/.idea
 **/bin/spot
+**/node_modules
 
 
 # flyctl launch added from .idea/.gitignore

@@ -30,8 +30,9 @@ echoing the `ref`, either ok or a typed rejection (`not_your_turn`, `not_seated`
 
 ### RT-5
 After every applied action the server pushes each connected member a fresh view of the game
-redacted for that member: card values they are entitled to see, slot positions and counts for
-everything else, plus the event that caused the update.
+redacted for that member: public card values, slot positions and counts for everything else,
+and references to any private values they may reveal (SEAL-1), plus the event that caused the
+update.
 
 ### RT-6
 Machines fan updates out to each other with postgres `LISTEN`/`NOTIFY` on the shared `komino`

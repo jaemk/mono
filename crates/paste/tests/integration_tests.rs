@@ -44,11 +44,11 @@ fn skip_if_no_s3() -> bool {
 
 #[tokio::test]
 async fn test_status() {
-    let (server, _state) = get_server().await;
+    let (server, state) = get_server().await;
     let response = server.get("/status").await;
     response.assert_status_ok();
     let body: serde_json::Value = response.json();
-    assert!(body.get("hash").is_some());
+    assert_eq!(body["hash"], state.config.version);
 }
 
 #[tokio::test]

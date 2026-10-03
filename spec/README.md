@@ -12,10 +12,12 @@ can be built). Keep each row's status current with `spec.py set`.
 |---------|--------|------|
 | Komino Rooms | done | [komino-rooms.md](komino-rooms.md) |
 | Komino Rules | done | [komino-rules.md](komino-rules.md) |
-| Komino Interface | pending | [komino-interface.md](komino-interface.md) |
+| Komino Interface | done | [komino-interface.md](komino-interface.md) |
 | Komino Realtime | done | [komino-realtime.md](komino-realtime.md) |
 | Komino Stats | done | [komino-stats.md](komino-stats.md) |
 | Komino Storage | done | [komino-storage.md](komino-storage.md) |
+| Komino Observers | done | [komino-observers.md](komino-observers.md) |
+| Komino Sealed Reveals | done | [komino-sealed-reveals.md](komino-sealed-reveals.md) |
 
 ## Conventions
 

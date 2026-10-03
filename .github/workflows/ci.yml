@@ -1,0 +1,141 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --tests -- -D warnings
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # ignores live in .cargo/audit.toml, each with its reason
+      - run: cargo audit --deny warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # s3-compatible store so the paste and mapour storage tests run instead of skipping
+      s3:
+        image: rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+        env:
+          RUSTFS_ACCESS_KEY: testkey
+          RUSTFS_SECRET_KEY: testsecret
+          RUSTFS_SERVER_DOMAINS: localhost:9000
+        ports:
+          - 9000:9000
+    env:
+      PGUSER: postgres
+      SPOT_DB_HOST: localhost
+      SPOT_DB_PORT: "5432"
+      SPOT_DB_USER: spot
+      SPOT_DB_PASS: spot
+      PASTE_DB_HOST: localhost
+      PASTE_DB_PORT: "5432"
+      PASTE_DB_USER: paste
+      PASTE_DB_PASS: paste
+      MAPOUR_DB_HOST: localhost
+      MAPOUR_DB_PORT: "5432"
+      MAPOUR_DB_USER: mapour
+      MAPOUR_DB_PASS: mapour
+      KOMINO_DB_HOST: localhost
+      KOMINO_DB_PORT: "5432"
+      KOMINO_DB_USER: komino
+      KOMINO_DB_PASS: komino
+      SPOT_ENC_KEY: "01234567890123456789012345678901"
+      PASTE_ENCRYPTION_KEY: "01234567890123456789012345678901"
+      PASTE_SIGNING_KEY: "01234567890123456789012345678901"
+      MAPOUR_SIGNING_KEY: "01234567890123456789012345678901"
+      SPOT_SPOTIFY_CLIENT_ID: setme
+      SPOT_SPOTIFY_SECRET_ID: setme
+      SPOT_SPOTIFY_REDIRECT_URL: http://localhost:3003/auth
+      AWS_ACCESS_KEY_ID: testkey
+      AWS_SECRET_ACCESS_KEY: testsecret
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL_S3: http://localhost:9000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install --yes postgresql-client libpq-dev
+      - name: cache migrant
+        id: migrant
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/migrant
+          key: migrant-${{ runner.os }}-v1
+      - if: steps.migrant.outputs.cache-hit != 'true'
+        run: cargo install migrant --features postgres
+      - name: create buckets
+        run: |
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://localhost:9000/ && break
+            sleep 1
+          done
+          for bucket in kom-paste kom-mapour; do
+            curl -sS -f --aws-sigv4 "aws:amz:us-east-1:s3" --user testkey:testsecret -X PUT "http://localhost:9000/$bucket"
+          done
+      - run: ./bin/test-db.sh
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/komino/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/komino/web/package-lock.json
+      - run: npm ci
+      - run: npm run coverage
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # the production image builds with the toolchain pinned in the Dockerfile
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -21,10 +21,15 @@ where
         .route("/", get(handlers::index))
         .route("/r/{code}", get(handlers::index))
         .route("/r/{code}/ws", get(handlers::ws))
+        .route("/r/{code}/watch", get(handlers::index))
+        .route("/r/{code}/watch/ws", get(handlers::watch_ws))
         .route("/api/me", get(handlers::me).post(handlers::rename))
+        .route("/api/key", get(handlers::server_key))
+        .route("/api/rooms/{code}/reveal", post(handlers::reveal))
         .route("/api/rooms", post(handlers::create_room))
         .route("/api/rooms/{code}", get(handlers::get_room))
         .route("/api/rooms/{code}/join", post(handlers::join_room))
+        .route("/api/rooms/{code}/watch", get(handlers::watch_room))
         .route("/api/rooms/{code}/leave", post(handlers::leave_room))
         .route("/api/rooms/{code}/remove", post(handlers::remove_member))
         .route("/api/rooms/{code}/unban", post(handlers::unban_member))
@@ -118,12 +123,14 @@ pub fn init_sweeper(state: State) {
 }
 
 pub async fn init(config: crate::Config) -> anyhow::Result<State> {
+    let server_key = crate::sealed::ServerKey::from_hex(&config.ecdh_key)?;
     let db = common::db::init_pool(&config.database_url).await?;
     info!(" ** Established komino database connection pool **");
     let state = Arc::new(crate::Resources {
         db,
         config,
         hub: Default::default(),
+        server_key,
     });
     init_listener(state.clone());
     init_sweeper(state.clone());

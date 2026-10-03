@@ -28,6 +28,18 @@ make fmt
 make lint
 make test
 ```
+After touching `crates/komino/assets`, also run `make test-js` (node tests under
+`crates/komino/web`).
+
+## CI
+`.github/workflows/ci.yml` runs on every PR and push to main: fmt and clippy, `cargo audit
+--deny warnings` (ignores in `.cargo/audit.toml`), the full `bin/test-db.sh` suite against
+postgres plus a RustFS S3 store (so S3-backed tests run), the komino client tests with
+coverage thresholds, and a Docker image build. Deploys are still manual.
+
+After a deploy, `make acceptance` (or the manual `acceptance` workflow) runs
+`acceptance/live.test.mjs` against the live site: every mounted app, a paste round trip,
+and a full komino round with sealed reveals and an observer. Writes are short-lived.
 
 ## Docker
 - `bin/stub_workspace.sh` generates stub source files from the workspace manifest for dependency-caching Docker builds
