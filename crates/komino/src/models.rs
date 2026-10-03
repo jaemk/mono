@@ -797,13 +797,12 @@ pub async fn reveal(
     require_member(db, room.id, player).await?;
     let mut tx = db.begin().await?;
     check_client_key(&mut tx, player, key_hash).await?;
-    let row = sqlx::query("SELECT id, state FROM games WHERE room_id = $1 AND status <> 'scored'")
-        .bind(room.id)
-        .fetch_optional(&mut *tx)
+    // lock room then game like every action, so a concurrent swap, ready, or
+    // discard can't commit between this check and the reveal
+    lock_room(&mut tx, room.id).await?;
+    let (game_id, game) = lock_game(&mut tx, room.id)
         .await?
         .ok_or_else(|| ApiError::forbidden("no game is in progress"))?;
-    let game_id: i64 = row.get("id");
-    let game: Game = serde_json::from_value(row.get::<Value, _>("state"))?;
     let secret = game.secret(player, what, now_ms())?;
     if let Secret::Peek(id) = what {
         let fresh = sqlx::query(

@@ -1335,6 +1335,62 @@ async fn test_reveals_check_the_cookie_and_the_game() {
         .assert_status_ok();
 }
 
+/// A reveal waits for an action that holds the game row, then checks the
+/// state that action committed.
+#[tokio::test]
+async fn test_reveals_serialize_with_actions() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let host_id = me(&host).await;
+
+    // an in-flight action: holds room and game, marks the host ready
+    let mut tx = state.db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM rooms WHERE code = $1 FOR UPDATE")
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let game: Value = sqlx::query_scalar(
+        "SELECT g.state FROM games g JOIN rooms r ON r.id = g.room_id
+         WHERE r.code = $1 AND g.status <> 'scored' FOR UPDATE",
+    )
+    .bind(&code)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let mut game: Game = serde_json::from_value(game).unwrap();
+    let seat = game.seat_of(&host_id).unwrap();
+    game.seats[seat].ready = true;
+
+    let key = ClientKey::new();
+    let pending = tokio::spawn({
+        let host = host;
+        let code = code.clone();
+        async move { reveal(&host, &code, &key, "opening", None).await }
+    });
+    // the reveal is blocked on the row lock, not answered from the old state
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!pending.is_finished());
+
+    sqlx::query(
+        "UPDATE games g SET state = $1 FROM rooms r
+         WHERE r.id = g.room_id AND r.code = $2 AND g.status <> 'scored'",
+    )
+    .bind(serde_json::to_value(&game).unwrap())
+    .bind(&code)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    pending
+        .await
+        .unwrap()
+        .assert_status(StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn test_reveal_requests_are_validated() {
     let state = get_state().await;
