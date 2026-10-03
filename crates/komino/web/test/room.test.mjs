@@ -282,7 +282,10 @@ test("a peeked card stays up 5s or until hidden; others see the slot lit", async
   g2.seats[1].slots[1] = { v: 2 };
   page.push(makeView(g2));
   assert.equal(page.slot(1, 1).getAttribute("aria-label"), "bob's card 2: 2");
-  t.mock.timers.tick(5000);
+  t.mock.timers.tick(5999);
+  page.push(makeView(g2));
+  assert.equal(page.slot(1, 1).getAttribute("aria-label"), "bob's card 2: 2", "up until the server deadline");
+  t.mock.timers.tick(1);
   page.push(makeView(g2));
   assert.equal(page.slot(1, 1).getAttribute("aria-label"), "bob's card 2, face down");
   assert.equal(peeked(1, 1), false);
@@ -297,6 +300,22 @@ test("the slot light for someone else's peek fades after 5s", async (t) => {
   t.mock.timers.tick(5000);
   page.push(makeView(makeGame({ turn: 1, peeked: [{ seat: 1, slot: 0, until: 2_005_000 }] })));
   assert.equal(page.slot(1, 0).classList.contains("peeked"), false);
+});
+
+test("peek deadlines are read against the server clock, not when the view arrived", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 5_000_000 });
+  // this browser's clock is 4s behind the server, and the peek has 1s left
+  const reveal = { seat: 1, slot: 0, until: 5_005_000 };
+  const g = makeGame({ turn: 1, matchable: false, reveals: [reveal], peeked: [reveal, { seat: 0, slot: 3, until: 5_005_000 }] });
+  g.seats[1].slots[0] = { v: 11 };
+  const page = await boot({ view: makeView(g, { server_now: 5_004_000 }) });
+  t.after(page.stop);
+  assert.equal(page.slot(1, 0).getAttribute("aria-label"), "bob's card 1: 11, blind swap");
+  assert.ok(page.slot(0, 3).classList.contains("peeked"));
+  t.mock.timers.tick(1000);
+  page.push(makeView(g, { server_now: 5_005_000 }));
+  assert.equal(page.slot(1, 0).getAttribute("aria-label"), "bob's card 1, face down");
+  assert.equal(page.slot(0, 3).classList.contains("peeked"), false);
 });
 
 test("an away player's countdown shows", async (t) => {

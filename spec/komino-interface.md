@@ -96,9 +96,11 @@ banner naming the caller, and the final-turn countdown of remaining players.
 
 ### UI-17
 A peeked card (RULE-12, RULE-13, RULE-15) stays face up for the peeking player until they
-dismiss it with a `hide card` button or 5 seconds pass, then flips back. Other players and
-observers see the slot highlighted for the same 5 seconds; the view carries the peeked slots
-without their values. The opening peek (RULE-7) is not a reveal: it lasts until `ready`.
+dismiss it with a `hide card` button or the server's 5 second peek deadline passes, then flips
+back. Other players and observers see the slot highlighted until the same deadline; the view
+carries the peeked slots and deadlines without their values. Deadlines are read against the
+server clock: each view carries `server_now`, and the client corrects for its own clock's
+offset. The opening peek (RULE-7) is not a reveal: it lasts until `ready`.
 
 ### UI-18
 At scoring, all hands flip face up, each player's total is shown, and the winner(s) are

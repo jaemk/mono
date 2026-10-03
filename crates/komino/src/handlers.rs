@@ -244,19 +244,17 @@ pub async fn watch_ws(
         cookie_id(&state, &jar).ok_or_else(|| ApiError::forbidden("load the watch page first"))?;
     let room = models::room_by_code(&state.db, &code).await?;
     models::require_not_removed(&state.db, room.id, &player).await?;
-    Ok(upgrade.on_upgrade(move |socket| watch_loop(state, room, socket)))
+    Ok(upgrade.on_upgrade(move |socket| watch_loop(state, room, player, socket)))
 }
 
-async fn watch_loop(state: State, room: Room, mut socket: WebSocket) {
+async fn watch_loop(state: State, room: Room, player: String, mut socket: WebSocket) {
     match models::claim_observer(&state.db, room.id).await {
         Ok(lease) => {
-            socket_loop(
-                state.clone(),
-                room.clone(),
-                Who::Observer(lease.clone()),
-                socket,
-            )
-            .await;
+            let who = Who::Observer {
+                lease: lease.clone(),
+                player,
+            };
+            socket_loop(state.clone(), room.clone(), who, socket).await;
             if let Err(e) = models::release_observer(&state.db, room.id, &lease).await {
                 tracing::warn!("komino observer release error: {e:?}");
             }
@@ -272,8 +270,12 @@ async fn watch_loop(state: State, room: Room, mut socket: WebSocket) {
 /// Who is on the other end of a room socket.
 enum Who {
     Member(String),
-    /// An observer, by lease id.
-    Observer(String),
+    /// An observer's lease id, and the cookie player behind it, so a removal
+    /// while watching still closes the socket.
+    Observer {
+        lease: String,
+        player: String,
+    },
 }
 
 /// Send the socket's current view. False when the socket should close.
@@ -286,10 +288,15 @@ async fn send_view(state: &State, room: &Room, who: &Who, socket: &mut WebSocket
                 Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
             },
         },
-        Who::Observer(_) => match observer_view(state, room).await {
-            Ok(view) => json!({ "type": "view", "view": view }),
-            Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
-        },
+        Who::Observer { player, .. } => {
+            match models::require_not_removed(&state.db, room.id, player).await {
+                Err(e) => json!({ "type": "removed", "code": e.code }),
+                Ok(()) => match observer_view(state, room).await {
+                    Ok(view) => json!({ "type": "view", "view": view }),
+                    Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
+                },
+            }
+        }
     };
     let closing = msg["type"] == "removed";
     socket
@@ -305,7 +312,7 @@ async fn handle_text(state: &State, room: &Room, who: &Who, text: &str) -> Value
         Ok(mut body) => {
             let reference = body.get_mut("ref").map(Value::take);
             let result = match (who, ClientAction::parse(body)) {
-                (Who::Observer(_), _) => Err(ApiError::forbidden("observers cannot act")),
+                (Who::Observer { .. }, _) => Err(ApiError::forbidden("observers cannot act")),
                 (Who::Member(player), Ok(action)) => {
                     models::act(&state.db, room, player, action).await
                 }
@@ -323,11 +330,15 @@ async fn handle_text(state: &State, room: &Room, who: &Who, text: &str) -> Value
     }
 }
 
-/// Refresh a member's presence or an observer's lease.
-async fn heartbeat(state: &State, room: &Room, who: &Who) -> Result<()> {
+/// Refresh a member's presence or an observer's lease. False when an
+/// observer's lease is gone (expired and reclaimed), so its slot may already
+/// belong to someone else and the socket has to close.
+async fn heartbeat(state: &State, room: &Room, who: &Who) -> Result<bool> {
     match who {
-        Who::Member(player) => models::set_presence(&state.db, room.id, player, true).await,
-        Who::Observer(lease) => models::refresh_observer(&state.db, lease).await,
+        Who::Member(player) => models::set_presence(&state.db, room.id, player, true)
+            .await
+            .map(|()| true),
+        Who::Observer { lease, .. } => models::refresh_observer(&state.db, lease).await,
     }
 }
 
@@ -361,12 +372,18 @@ async fn socket_loop(state: State, room: Room, who: Who, mut socket: WebSocket) 
                     }
                     Err(RecvError::Closed) => break,
                 },
-                _ = beat.tick() => {
-                    let _ = heartbeat(&state, &room, &who).await;
-                }
+                _ = beat.tick() => match heartbeat(&state, &room, &who).await {
+                    Ok(true) => {}
+                    // the page reconnects and claims a slot again, or hears the room is full
+                    Ok(false) => break,
+                    // a transient db error; the lease outlives a missed beat
+                    Err(e) => tracing::warn!("komino heartbeat error: {e:?}"),
+                },
             }
         }
     }
+    // a clean close, whichever side ended it; ignored if the peer is gone
+    let _ = socket.send(Message::Close(None)).await;
     if let Who::Member(player) = &who {
         if state.hub.disconnect(room.id, player) == 0 {
             let _ = models::set_presence(&state.db, room.id, player, false).await;

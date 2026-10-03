@@ -362,16 +362,19 @@ pub async fn claim_observer(db: &DbPool, room_id: i64) -> Result<String> {
     Ok(id)
 }
 
-/// Extend an observer lease by another [`PRESENCE_SECS`].
-pub async fn refresh_observer(db: &DbPool, id: &str) -> Result<()> {
-    sqlx::query(
-        "UPDATE room_observers SET until = now() + make_interval(secs => $2) WHERE id = $1",
+/// Extend a live observer lease by another [`PRESENCE_SECS`]. False when the
+/// lease expired or was deleted, since its slot may have been claimed again.
+pub async fn refresh_observer(db: &DbPool, id: &str) -> Result<bool> {
+    let n = sqlx::query(
+        "UPDATE room_observers SET until = now() + make_interval(secs => $2)
+         WHERE id = $1 AND until > now()",
     )
     .bind(id)
     .bind(PRESENCE_SECS as f64)
     .execute(db)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected();
+    Ok(n == 1)
 }
 
 pub async fn release_observer(db: &DbPool, room_id: i64, id: &str) -> Result<()> {
@@ -857,6 +860,8 @@ pub async fn view(db: &DbPool, room: &Room, viewer: Option<&str>, base_url: &str
         },
         "me": viewer,
         "observer": viewer.is_none(),
+        // lets the client read deadlines against the server clock
+        "server_now": now_ms(),
         "observers": observers,
         "members": members,
         "game": game,

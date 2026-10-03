@@ -10,7 +10,8 @@ observer is not a member, is never seated, and does not appear in the member lis
 
 ### OBS-2
 A player removed from the room (ROOM-17) cannot watch it either; the watch page shows the same
-removed notice as the room page.
+removed notice as the room page. A removal while watching closes the watch socket with a
+`removed` message, as for a member socket.
 
 ### OBS-3
 At most 4 observer sockets are connected to a room at once, counted across every machine. A
@@ -19,7 +20,9 @@ instead of reconnecting.
 
 ### OBS-4
 An observer socket holds a 25 second lease refreshed every 10 seconds, and releases it on
-disconnect, so an observer slot left by a crashed machine frees itself within 25 seconds.
+disconnect, so an observer slot left by a crashed machine frees itself within 25 seconds. A
+socket whose lease is gone when it refreshes (expired, possibly reclaimed) closes; the page
+reconnects and claims a slot again, or hears that the room is full.
 
 ## View
 

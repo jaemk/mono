@@ -840,6 +840,103 @@ async fn test_observer_socket_gets_views_and_cannot_act() {
 }
 
 #[tokio::test]
+async fn test_removal_closes_an_open_watch_socket() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    let member = ws_client(&state);
+    member
+        .post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    let mut socket = member
+        .get_websocket(&format!("/r/{code}/watch/ws"))
+        .await
+        .into_websocket()
+        .await;
+    assert_eq!(next(&mut socket).await["type"], "view");
+    host.post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": me(&member).await }))
+        .await
+        .assert_status_ok();
+    let msg = next_matching(&mut socket, |m| m["type"] == "removed").await;
+    assert_eq!(msg["code"], "removed");
+}
+
+/// Wait for the server to close a socket, skipping any views on the way.
+async fn closed(socket: &mut axum_test::TestWebSocket, within: std::time::Duration) {
+    use axum_test::WsMessage;
+    tokio::time::timeout(within, async {
+        loop {
+            if let WsMessage::Close(_) = socket.receive_message().await {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the socket stayed open");
+}
+
+#[tokio::test]
+async fn test_observer_socket_closes_when_its_lease_is_gone() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    let watcher = ws_client(&state);
+    me(&watcher).await;
+    let mut socket = watcher
+        .get_websocket(&format!("/r/{code}/watch/ws"))
+        .await
+        .into_websocket()
+        .await;
+    assert_eq!(next(&mut socket).await["type"], "view");
+    // the lease expired and was cleaned up, so the slot may belong to someone else
+    sqlx::query("DELETE FROM room_observers")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    // the next heartbeat (every 10s) notices and closes the socket
+    closed(&mut socket, std::time::Duration::from_secs(15)).await;
+}
+
+#[tokio::test]
+async fn test_observer_leases_refresh_only_while_live() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    let room = komino::models::room_by_code(&state.db, &code)
+        .await
+        .unwrap();
+    let lease = komino::models::claim_observer(&state.db, room.id)
+        .await
+        .unwrap();
+    assert!(komino::models::refresh_observer(&state.db, &lease)
+        .await
+        .unwrap());
+    sqlx::query("UPDATE room_observers SET until = now() - interval '1 second'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert!(!komino::models::refresh_observer(&state.db, &lease)
+        .await
+        .unwrap());
+    assert!(!komino::models::refresh_observer(&state.db, "nope")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn test_views_carry_the_server_clock() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    let before = chrono::Utc::now().timestamp_millis();
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    let at = view["server_now"].as_i64().unwrap();
+    assert!(at >= before && at <= chrono::Utc::now().timestamp_millis());
+}
+
+#[tokio::test]
 async fn test_at_most_four_observers() {
     let state = get_state().await;
     let host = client(&state);

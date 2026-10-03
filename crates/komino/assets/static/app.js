@@ -16,8 +16,6 @@
     blind_swap: { color: "#7b4bc9", label: "blind swap" },
     look_swap: { color: "#d0393b", label: "look and swap" },
   };
-  // how long a peeked card stays up, and how long others see the slot lit
-  const PEEK_MS = 5000;
   const MAX_BACKOFF = 10000;
 
   const esc = (s) =>
@@ -106,7 +104,7 @@
     let matchMode = false;
     let ticker = null;
     let closed = false;
-    const seen = {}; // reveal or peek key -> local time first seen
+    let skew = 0; // server clock minus this clock, from the last view
     const dismissed = new Set();
     let refCounter = 0;
 
@@ -142,10 +140,9 @@
     function matchKey(g) {
       return `m:${g.id}:${g.discard_seq}:${g.matchable}`;
     }
-    // true for PEEK_MS after `key` is first rendered
-    function fresh(key) {
-      seen[key] = seen[key] || Date.now();
-      return Date.now() - seen[key] < PEEK_MS;
+    // peeks end at the server's deadline, read against the server clock
+    function live(until) {
+      return Date.now() + skew < until;
     }
     function revealKey(g, r) {
       return `${g.id}:${r.seat}:${r.slot}:${r.until}`;
@@ -157,9 +154,8 @@
       if (g.status === "scored" || g.status === "peeking") return s.v;
       const r = (g.reveals || []).find((r) => r.seat === seat && r.slot === slot);
       if (!r) return null;
-      const key = revealKey(g, r);
-      if (dismissed.has(key)) return null;
-      return fresh(key) ? s.v : null;
+      if (dismissed.has(revealKey(g, r))) return null;
+      return live(r.until) ? s.v : null;
     }
     function shownReveals(g) {
       return (g.reveals || []).filter((r) => visibleValue(g, r.seat, r.slot) !== null);
@@ -293,12 +289,12 @@
     }
 
     // own reveals light up while face up; anyone else's peek lights the slot
-    // for everyone else for the same time, without the value
+    // for everyone else until the same deadline, without the value
     function isPeeked(g, seat, slot, v) {
       const at = (r) => r.seat === seat && r.slot === slot;
       if ((g.reveals || []).some(at)) return v !== null;
       const p = (g.peeked || []).find(at);
-      return Boolean(p) && fresh(`p:${revealKey(g, p)}`);
+      return Boolean(p) && live(p.until);
     }
 
     function slotButton(g, seat, slot) {
@@ -538,6 +534,7 @@
     function applyView(v) {
       const before = game();
       view = v;
+      if (typeof v.server_now === "number") skew = v.server_now - Date.now();
       const g = game();
       // a pending action that no longer applies is dropped, with the reason
       if (sel && g) {
