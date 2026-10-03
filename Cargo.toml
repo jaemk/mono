@@ -38,6 +38,7 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 hex = "0.4"
 ring = "0.17"
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "std"] }
 async-trait = "0.1"
 time = "0.3"
 aws-config = { version = "1", features = ["behavior-version-latest"] }

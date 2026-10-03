@@ -2,7 +2,7 @@
 //! state; each action locks the game row, applies the rules engine, and saves
 //! state, events, and stats in one transaction that also notifies the room.
 
-use crate::game::{self, Action, Game, Outcome, Reject, Stat};
+use crate::game::{self, Action, Game, Outcome, Reject, Secret, Stat};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -27,6 +27,9 @@ pub const PRESENCE_SECS: i64 = 25;
 
 /// Observer sockets allowed per room, across every machine.
 pub const MAX_OBSERVERS: i64 = 4;
+
+/// How long a client ECDH key may be used after its first reveal (SEAL-5).
+pub const CLIENT_KEY_SECS: i64 = 300;
 
 pub type Tx<'a> = Transaction<'a, Postgres>;
 
@@ -86,10 +89,10 @@ impl From<serde_json::Error> for ApiError {
 
 impl From<Reject> for ApiError {
     fn from(r: Reject) -> Self {
-        let status = if r.code == "too_late" || r.code == "stale" {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::BAD_REQUEST
+        let status = match r.code {
+            "too_late" | "stale" => StatusCode::CONFLICT,
+            "forbidden" => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_REQUEST,
         };
         Self::new(status, r.code, r.message)
     }
@@ -746,7 +749,88 @@ pub async fn tick_all(db: &DbPool) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Sealed reveals
+// ---------------------------------------------------------------------------
+
+/// Bind a client key to `player` on first use and refuse it once its window
+/// has passed or when another player bound it first.
+async fn check_client_key(tx: &mut Tx<'_>, player: &str, key_hash: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO client_keys (key_hash, player_id) VALUES ($1, $2)
+         ON CONFLICT (key_hash) DO NOTHING",
+    )
+    .bind(key_hash)
+    .bind(player)
+    .execute(&mut **tx)
+    .await?;
+    let row = sqlx::query(
+        "SELECT player_id, first_seen < now() - make_interval(secs => $2) AS expired
+         FROM client_keys WHERE key_hash = $1",
+    )
+    .bind(key_hash)
+    .bind(CLIENT_KEY_SECS as f64)
+    .fetch_one(&mut **tx)
+    .await?;
+    if row.get::<String, _>("player_id") != player {
+        return Err(ApiError::forbidden("that key belongs to another player"));
+    }
+    if row.get::<bool, _>("expired") {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "key_expired",
+            "the client key expired; make a new one",
+        ));
+    }
+    Ok(())
+}
+
+/// The private value `player` asked for, after every check (SEAL-5,
+/// SEAL-6). The caller seals it to the client's key.
+pub async fn reveal(
+    db: &DbPool,
+    room: &Room,
+    player: &str,
+    what: &Secret,
+    key_hash: &str,
+) -> Result<Value> {
+    require_member(db, room.id, player).await?;
+    let mut tx = db.begin().await?;
+    check_client_key(&mut tx, player, key_hash).await?;
+    let row = sqlx::query("SELECT id, state FROM games WHERE room_id = $1 AND status <> 'scored'")
+        .bind(room.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| ApiError::forbidden("no game is in progress"))?;
+    let game_id: i64 = row.get("id");
+    let game: Game = serde_json::from_value(row.get::<Value, _>("state"))?;
+    let secret = game.secret(player, what, now_ms())?;
+    if let Secret::Peek(id) = what {
+        let fresh = sqlx::query(
+            "INSERT INTO reveal_fetches (reveal_id, game_id) VALUES ($1, $2)
+             ON CONFLICT (reveal_id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(game_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if fresh == 0 {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "already_revealed",
+                "that peek was already revealed",
+            ));
+        }
+    }
+    tx.commit().await?;
+    Ok(secret)
+}
+
 pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
+    sqlx::query("DELETE FROM client_keys WHERE first_seen < now() - interval '1 day'")
+        .execute(db)
+        .await?;
     // leases left behind by a machine that died mid-socket
     sqlx::query("DELETE FROM room_observers WHERE until <= now()")
         .execute(db)

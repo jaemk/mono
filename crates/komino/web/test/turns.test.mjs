@@ -4,8 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { boot, makeGame, makeView, seat } from "../helpers.mjs";
 
-async function playing(t, game = {}, extra = {}) {
-  const page = await boot({ view: makeView(makeGame(game), extra) });
+async function playing(t, game = {}, extra = {}, secrets = {}) {
+  const page = await boot({ view: makeView(makeGame(game), extra), secrets });
   t.after(page.stop);
   page.live();
   return page;
@@ -85,8 +85,11 @@ test("the deck and discard do nothing off turn or mid turn", async (t) => {
   assert.deepEqual(page.controls(), ["draw", "KOMINO"]);
 });
 
-test("a drawn card is shown to the drawer and swapped or discarded", async (t) => {
-  const page = await playing(t, { stage: { kind: "drawn", card: 8 } });
+test("a drawn card is revealed sealed to the drawer, then swapped or discarded", async (t) => {
+  // views never carry the drawn card; it comes from a sealed reveal
+  const page = await playing(t, { stage: { kind: "drawn", card: null } }, {}, { drawn: { card: 8 } });
+  await page.settle(() => page.$("drawn"));
+  assert.deepEqual(page.reveals().map((r) => r.what), ["drawn"]);
   assert.ok(page.$("drawn").querySelector("svg"));
   assert.match(page.$("status").textContent, /tap one of your cards to swap, or discard$/);
   page.slot(0, 2).click();
@@ -101,9 +104,33 @@ test("a drawn card is shown to the drawer and swapped or discarded", async (t) =
 });
 
 test("a plain drawn card discards without a move", async (t) => {
-  const page = await playing(t, { stage: { kind: "drawn", card: 3 } });
+  const page = await playing(t, { stage: { kind: "drawn", card: null } }, {}, { drawn: { card: 3 } });
+  await page.settle(() => page.control("discard 3"));
   page.control("discard 3").click();
   assert.equal(page.confirmText(), "discard the 3?");
+});
+
+test("until the drawn card arrives the controls still work without it", async (t) => {
+  const page = await playing(t, { stage: { kind: "drawn", card: null } }, {}, { drawn: [500, { message: "database error" }] });
+  await page.settle(() => page.toast() === "database error");
+  assert.equal(page.$("drawn"), null);
+  page.slot(0, 1).click();
+  assert.equal(page.confirmText(), "swap the drawn card into your card 2?");
+  page.$("confirm-cancel").click();
+  page.control("discard").click();
+  assert.equal(page.confirmText(), "discard the drawn card?");
+});
+
+test("the drawn card is forgotten once the turn moves on", async (t) => {
+  const page = await playing(t, { stage: { kind: "drawn", card: null } }, {}, { drawn: { card: 12 } });
+  await page.settle(() => page.$("drawn"));
+  page.push(makeView(makeGame({ turn: 1, turn_seq: 6 })));
+  assert.equal(page.$("drawn"), null);
+  // the next drawn card is a new reveal; the old value is not reused
+  page.push(makeView(makeGame({ turn_seq: 9, stage: { kind: "drawn", card: null } })));
+  assert.equal(page.$("drawn"), null);
+  await page.settle(() => page.$("drawn"));
+  assert.equal(page.reveals().length, 2);
 });
 
 test("a taken card must be swapped", async (t) => {

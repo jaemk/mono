@@ -4,8 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { boot, makeGame, makeView, seat } from "../helpers.mjs";
 
-async function waiting(t, game = {}) {
-  const page = await boot({ view: makeView(makeGame({ turn: 1, ...game })) });
+async function waiting(t, game = {}, secrets = {}) {
+  const page = await boot({ view: makeView(makeGame({ turn: 1, ...game })), secrets });
   t.after(page.stop);
   page.live();
   return page;
@@ -69,7 +69,8 @@ test("matches stay open while scoring", async (t) => {
 });
 
 test("on your turn after drawing, match mode turns taps into matches", async (t) => {
-  const page = await waiting(t, { turn: 0, stage: { kind: "drawn", card: 3 } });
+  const page = await waiting(t, { turn: 0, stage: { kind: "drawn", card: null } }, { drawn: { card: 3 } });
+  await page.settle(() => page.control("discard 3"));
   assert.deepEqual(page.controls(), ["discard 3", "match 4", "KOMINO"]);
   page.slot(0, 0).click();
   assert.equal(page.confirmText(), "swap the 3 into your card 1?");

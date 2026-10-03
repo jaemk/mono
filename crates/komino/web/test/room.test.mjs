@@ -260,35 +260,62 @@ test("the observer count shows only when someone is watching", async (t) => {
 
 test("a peeked card stays up 5s or until hidden; others see the slot lit", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
-  const reveal = { seat: 1, slot: 2, until: 1_005_000 };
+  const reveal = { id: "r1", seat: 1, slot: 2, until: 1_005_000 };
   const g = makeGame({ turn: 1, matchable: false, reveals: [reveal], peeked: [reveal, { seat: 0, slot: 0, until: 1_004_000 }] });
-  g.seats[1].slots[2] = { v: 9 };
-  const page = await boot({ view: makeView(g) });
+  const page = await boot({
+    view: makeView(g),
+    secrets: {
+      "peek:r1": { cards: [{ seat: 1, slot: 2, v: 9 }] },
+      "peek:r2": { cards: [{ seat: 1, slot: 1, v: 2 }] },
+    },
+  });
   t.after(page.stop);
   const peeked = (s, i) => page.slot(s, i).classList.contains("peeked");
-  assert.equal(page.slot(1, 2).getAttribute("aria-label"), "bob's card 3: 9, peek other");
+  // the view only names the peek; the value comes sealed
+  await page.settle(() => page.label(1, 2) === "bob's card 3: 9, peek other");
+  assert.deepEqual(page.reveals().map((r) => [r.what, r.id]), [["peek", "r1"]]);
   assert.ok(peeked(1, 2));
   assert.ok(peeked(0, 0), "someone else's peek lights the slot");
   assert.ok(page.control("hide card"));
 
   page.control("hide card").click();
-  assert.equal(page.slot(1, 2).getAttribute("aria-label"), "bob's card 3, face down");
+  assert.equal(page.label(1, 2), "bob's card 3, face down");
   assert.equal(peeked(1, 2), false);
   assert.equal(page.control("hide card"), undefined);
+  // hidden means forgotten: no second fetch for the same peek
+  page.push(makeView(g));
+  assert.equal(page.label(1, 2), "bob's card 3, face down");
+  assert.equal(page.reveals().length, 1);
 
-  // a fresh peek flips back on its own
-  const again = { seat: 1, slot: 1, until: 1_006_000 };
+  // a fresh peek flips back on its own at the server deadline
+  const again = { id: "r2", seat: 1, slot: 1, until: 1_006_000 };
   const g2 = makeGame({ turn: 1, matchable: false, reveals: [again], peeked: [again] });
-  g2.seats[1].slots[1] = { v: 2 };
   page.push(makeView(g2));
-  assert.equal(page.slot(1, 1).getAttribute("aria-label"), "bob's card 2: 2");
+  await page.settle(() => page.label(1, 1) === "bob's card 2: 2");
   t.mock.timers.tick(5999);
   page.push(makeView(g2));
-  assert.equal(page.slot(1, 1).getAttribute("aria-label"), "bob's card 2: 2", "up until the server deadline");
+  assert.equal(page.label(1, 1), "bob's card 2: 2", "up until the server deadline");
   t.mock.timers.tick(1);
   page.push(makeView(g2));
-  assert.equal(page.slot(1, 1).getAttribute("aria-label"), "bob's card 2, face down");
+  assert.equal(page.label(1, 1), "bob's card 2, face down");
   assert.equal(peeked(1, 1), false);
+  assert.equal(page.control("hide card"), undefined);
+});
+
+test("a peek the server already handed out is not an error", async (t) => {
+  const reveal = { id: "r9", seat: 1, slot: 0, until: Date.now() + 60_000 };
+  const page = await boot({
+    view: makeView(makeGame({ turn: 1, reveals: [reveal] })),
+    secrets: { "peek:r9": [409, { code: "already_revealed", message: "that peek was already revealed" }] },
+  });
+  t.after(page.stop);
+  await page.settle(() => page.reveals().length === 1);
+  await page.idle();
+  assert.equal(page.toast(), null);
+  assert.equal(page.label(1, 0), "bob's card 1, face down");
+  // and it is not asked for again
+  page.push(makeView(makeGame({ turn: 1, reveals: [reveal], deck_count: 3 })));
+  assert.equal(page.reveals().length, 1);
 });
 
 test("the slot light for someone else's peek fades after 5s", async (t) => {
@@ -305,12 +332,14 @@ test("the slot light for someone else's peek fades after 5s", async (t) => {
 test("peek deadlines are read against the server clock, not when the view arrived", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 5_000_000 });
   // this browser's clock is 4s behind the server, and the peek has 1s left
-  const reveal = { seat: 1, slot: 0, until: 5_005_000 };
+  const reveal = { id: "r3", seat: 1, slot: 0, until: 5_005_000 };
   const g = makeGame({ turn: 1, matchable: false, reveals: [reveal], peeked: [reveal, { seat: 0, slot: 3, until: 5_005_000 }] });
-  g.seats[1].slots[0] = { v: 11 };
-  const page = await boot({ view: makeView(g, { server_now: 5_004_000 }) });
+  const page = await boot({
+    view: makeView(g, { server_now: 5_004_000 }),
+    secrets: { "peek:r3": { cards: [{ seat: 1, slot: 0, v: 11 }] } },
+  });
   t.after(page.stop);
-  assert.equal(page.slot(1, 0).getAttribute("aria-label"), "bob's card 1: 11, blind swap");
+  await page.settle(() => page.label(1, 0) === "bob's card 1: 11, blind swap");
   assert.ok(page.slot(0, 3).classList.contains("peeked"));
   t.mock.timers.tick(1000);
   page.push(makeView(g, { server_now: 5_005_000 }));

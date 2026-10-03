@@ -85,6 +85,38 @@
     return mv ? `${v}, ${MOVE_INFO[mv].label}` : String(v);
   }
 
+  // ---------------------------------------------------------------- sealing
+  //
+  // Private card values arrive sealed to a short-lived client ECDH key
+  // (spec SEAL-*): AES-256-GCM under HKDF-SHA256 of the P-256 shared secret
+  // with the server's static key. Mirrors crates/komino/src/sealed.rs.
+
+  const CURVE = { name: "ECDH", namedCurve: "P-256" };
+  const INFO = new TextEncoder().encode("komino reveal v1");
+  // how long one client key pair is used before a fresh one is made
+  const KEY_MS = 5 * 60 * 1000;
+
+  function b64d(s) {
+    return Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+  }
+  function b64e(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function importServerKey(subtle, b64) {
+    return subtle.importKey("raw", b64d(b64), CURVE, false, []);
+  }
+
+  async function openSealed(subtle, serverKey, privateKey, aad, sealed) {
+    const bits = await subtle.deriveBits({ name: "ECDH", public: serverKey }, privateKey, 256);
+    const hkdf = await subtle.importKey("raw", bits, "HKDF", false, ["deriveKey"]);
+    const aes = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: b64d(sealed.salt), info: INFO },
+      hkdf, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv: b64d(sealed.iv), additionalData: new TextEncoder().encode(aad) },
+      aes, b64d(sealed.ct));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
   // turn actions carry the turn token they were chosen against, so a stale
   // or repeated confirm is refused instead of applied to a moved-on turn
   const TURN_ACTIONS = ["draw", "take", "swap", "discard", "komino", "peek", "blind_swap", "look_swap", "skip"];
@@ -105,8 +137,15 @@
     let ticker = null;
     let closed = false;
     let skew = 0; // server clock minus this clock, from the last view
-    const dismissed = new Set();
     let refCounter = 0;
+
+    const subtle = win.crypto.subtle;
+    let serverKey = null; // { kid, key }, fetched once per page (SEAL-4)
+    let clientKey = null; // { pair, pub, born }, replaced every KEY_MS (SEAL-5)
+    // decrypted private values, only while they are shown (SEAL-9):
+    // "o:<game>" opening, "d:<game>:<turn_seq>" drawn, "p:<id>" a peek
+    const secrets = new Map();
+    const asked = new Set(); // secret keys already requested
 
     // ---------------------------------------------------------------- helpers
 
@@ -144,21 +183,99 @@
     function live(until) {
       return Date.now() + skew < until;
     }
-    function revealKey(g, r) {
-      return `${g.id}:${r.seat}:${r.slot}:${r.until}`;
+    // ---------------------------------------------------------------- secrets
+
+    async function loadServerKey() {
+      const k = await api("GET", "/komino/api/key");
+      serverKey = { kid: k.kid, key: await importServerKey(subtle, k.public_key) };
+    }
+    async function myKey() {
+      if (!clientKey || Date.now() - clientKey.born >= KEY_MS) {
+        // non-extractable: the private half never leaves WebCrypto
+        const pair = await subtle.generateKey(CURVE, false, ["deriveBits"]);
+        clientKey = { pair, pub: b64e(await subtle.exportKey("raw", pair.publicKey)), born: Date.now() };
+      }
+      return clientKey;
+    }
+    // ask for one private value and open it with this page's key
+    async function reveal(body) {
+      let ck = await myKey();
+      const ask = () => api("POST", `/komino/api/rooms/${code}/reveal`, Object.assign({ client_key: ck.pub }, body));
+      let sealed;
+      try {
+        sealed = await ask();
+      } catch (err) {
+        if (err.code !== "key_expired") throw err;
+        clientKey = null;
+        ck = await myKey();
+        sealed = await ask();
+      }
+      if (!serverKey) await loadServerKey();
+      try {
+        return await openSealed(subtle, serverKey.key, ck.pair.privateKey, code, sealed);
+      } catch (_) {
+        // the server key may have changed since this page loaded (SEAL-8)
+        await loadServerKey();
+        return await openSealed(subtle, serverKey.key, ck.pair.privateKey, code, sealed);
+      }
+    }
+
+    // the private values this player may see right now
+    function wanted(g) {
+      const want = [];
+      if (watching || !g || g.me === null) return want;
+      if (g.status === "peeking" && !g.seats[g.me].ready) want.push([`o:${g.id}`, { what: "opening" }]);
+      if (myTurn(g) && g.stage.kind === "drawn") want.push([`d:${g.id}:${g.turn_seq}`, { what: "drawn" }]);
+      for (const r of g.reveals || []) {
+        if (live(r.until)) want.push([`p:${r.id}`, { what: "peek", id: r.id }, r.until]);
+      }
+      return want;
+    }
+
+    // drop values no longer shown and fetch newly allowed ones
+    function syncSecrets(g) {
+      const want = wanted(g);
+      const keys = new Set(want.map((w) => w[0]));
+      for (const k of [...secrets.keys()]) if (!keys.has(k)) secrets.delete(k);
+      for (const [k, body, until] of want) {
+        if (asked.has(k)) continue;
+        asked.add(k);
+        reveal(body)
+          .then((value) => {
+            if (closed) return;
+            if (wanted(game()).some((w) => w[0] === k)) secrets.set(k, Object.assign({ until }, value));
+            render();
+          })
+          .catch((err) => {
+            if (closed) return;
+            // a peek is revealed once; anything else may be asked for again
+            if (!k.startsWith("p:")) asked.delete(k);
+            if (err.code !== "already_revealed") toast(err.message || "could not reveal the card");
+          });
+      }
     }
 
     function visibleValue(g, seat, slot) {
       const s = g.seats[seat].slots[slot];
-      if (!s || s.v === undefined) return null;
-      if (g.status === "scored" || g.status === "peeking") return s.v;
-      const r = (g.reveals || []).find((r) => r.seat === seat && r.slot === slot);
-      if (!r) return null;
-      if (dismissed.has(revealKey(g, r))) return null;
-      return live(r.until) ? s.v : null;
+      if (!s) return null;
+      if (s.v !== undefined) return s.v; // public, once scored
+      for (const sec of secrets.values()) {
+        const c = (sec.cards || []).find((c) => c.seat === seat && c.slot === slot);
+        if (c) return c.v;
+      }
+      return null;
     }
-    function shownReveals(g) {
-      return (g.reveals || []).filter((r) => visibleValue(g, r.seat, r.slot) !== null);
+    function drawnCard(g) {
+      const sec = secrets.get(`d:${g.id}:${g.turn_seq}`);
+      return sec ? sec.card : null;
+    }
+    // the card in hand mid turn: drawn (private) or taken (public)
+    function heldName(g) {
+      const card = g.stage.kind === "taken" ? g.stage.card : drawnCard(g);
+      return card === null ? "the drawn card" : `the ${card}`;
+    }
+    function shownPeeks() {
+      return [...secrets.keys()].filter((k) => k.startsWith("p:"));
     }
 
     function toast(msg) {
@@ -242,7 +359,7 @@
       if (!matchMode && myTurn(g)) {
         const k = turnKey(g);
         if ((st.kind === "drawn" || st.kind === "taken") && mine) {
-          return confirmAction({ type: "swap", slot }, `swap the ${st.card} into your card ${slot + 1}?`, k);
+          return confirmAction({ type: "swap", slot }, `swap ${heldName(g)} into your card ${slot + 1}?`, k);
         }
         if (st.kind === "special") {
           if (st.mv === "peek_own" && mine) return confirmAction({ type: "peek", seat, slot }, `peek at your card ${slot + 1}?`, k);
@@ -330,8 +447,9 @@
       }
       const others = g.seats.map((_, i) => i).filter((i) => i !== g.me).map((i) => hand(g, i, false)).join("");
       const top = g.discard_top;
-      const drawn = g.stage.kind === "drawn" && g.stage.card !== null && g.stage.card !== undefined && myTurn(g)
-        ? `<div class="pile"><span class="card" id="drawn">${face(g.stage.card)}</span><span>drawn</span></div>` : "";
+      const card = g.stage.kind === "drawn" && myTurn(g) ? drawnCard(g) : null;
+      const drawn = card === null ? ""
+        : `<div class="pile"><span class="card" id="drawn">${face(card)}</span><span>drawn</span></div>`;
       t.innerHTML =
         `<div class="opponents">${others}</div>` +
         `<div class="center">` +
@@ -422,7 +540,12 @@
           c.append(button("draw", () => confirmAction({ type: "draw" }, "draw from the deck?", k)));
           if (g.discard_top !== null) c.append(button(`take ${g.discard_top}`, () => confirmAction({ type: "take" }, `take the ${g.discard_top} from the discard pile?`, k)));
         }
-        if (st.kind === "drawn") c.append(button(`discard ${st.card}`, () => confirmAction({ type: "discard" }, `discard the ${st.card}${MOVES[st.card] ? " and use " + MOVE_INFO[MOVES[st.card]].label : ""}?`, k)));
+        if (st.kind === "drawn") {
+          const card = drawnCard(g);
+          const move = card !== null && MOVES[card] ? ` and use ${MOVE_INFO[MOVES[card]].label}` : "";
+          c.append(button(card === null ? "discard" : `discard ${card}`,
+            () => confirmAction({ type: "discard" }, `discard ${heldName(g)}${move}?`, k)));
+        }
         if (st.kind === "special") c.append(button("skip move", () => confirmAction({ type: "skip" }, "skip the special move?", k)));
         if (st.kind === "looked") c.append(button("keep my cards", () => confirmAction({ type: "look_swap", slot: null }, "keep your cards and end the turn?", k)));
       }
@@ -435,10 +558,11 @@
           render();
         }));
       }
-      const shown = shownReveals(g);
-      if (shown.length && g.status !== "peeking") {
+      const shown = shownPeeks();
+      if (shown.length) {
         c.append(button("hide card", () => {
-          for (const r of shown) dismissed.add(revealKey(g, r));
+          // forget the values; a peek can't be fetched again
+          for (const k of shown) secrets.delete(k);
           render();
         }));
       }
@@ -515,6 +639,8 @@
     function render() {
       if (!view) return;
       const g = game();
+      // every render (each view and each second) drops expired values
+      syncSecrets(g);
       $("code").textContent = view.room.code;
       const amHost = !watching && view.room.host === me;
       const canStart = amHost && (!g || g.status === "scored");
@@ -671,6 +797,9 @@
       if (watching) {
         doc.body.classList.add("watching");
         $("join-link").href = `/komino/r/${code}`;
+      } else {
+        // cached for the page; a failure here is retried at the first reveal
+        await loadServerKey().catch(() => {});
       }
       try {
         applyView(watching
@@ -692,7 +821,7 @@
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createKomino, face, back, cardLabel };
+    module.exports = { createKomino, face, back, cardLabel, openSealed, importServerKey, b64d, b64e };
   } else {
     createKomino(root).start();
   }

@@ -1,5 +1,6 @@
+use crate::game::Secret;
 use crate::models::{self, ApiError, ClientAction, Player, Result, Room};
-use crate::State;
+use crate::{sealed, State};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -199,6 +200,48 @@ pub async fn watch_room(
     models::require_not_removed(&state.db, room.id, &player.id).await?;
     let view = observer_view(&state, &room).await?;
     Ok((jar, Json(view)).into_response())
+}
+
+/// The server's static ECDH public key (SEAL-3).
+pub async fn server_key(AxumState(state): AxumState<State>) -> Json<Value> {
+    Json(json!({ "kid": state.server_key.kid, "public_key": state.server_key.public_key }))
+}
+
+#[derive(Deserialize)]
+pub struct RevealRequest {
+    pub client_key: String,
+    pub what: String,
+    pub id: Option<String>,
+}
+
+/// A private card value, sealed to the client's key (SEAL-6, SEAL-7).
+pub async fn reveal(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+    Json(req): Json<RevealRequest>,
+) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    let client = sealed::parse_public(&req.client_key)
+        .ok_or_else(|| ApiError::invalid("client_key must be a P-256 public key"))?;
+    let what = match (req.what.as_str(), req.id) {
+        ("opening", _) => Secret::Opening,
+        ("drawn", _) => Secret::Drawn,
+        ("peek", Some(id)) => Secret::Peek(id),
+        ("peek", None) => return Err(ApiError::invalid("a peek reveal needs its id")),
+        _ => return Err(ApiError::invalid("what must be opening, drawn, or peek")),
+    };
+    let key_hash = hex::encode(common::crypto::sha256(&sealed::public_point(&client)));
+    let secret = models::reveal(&state.db, &room, &player.id, &what, &key_hash).await?;
+    let body = state
+        .server_key
+        .seal(&client, room.code.as_bytes(), secret.to_string().as_bytes())
+        .map_err(|e| {
+            tracing::error!("komino seal error: {e}");
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "error", "could not seal")
+        })?;
+    Ok((jar, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response())
 }
 
 /// The same actions the websocket takes, over plain http.

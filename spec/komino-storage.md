@@ -31,6 +31,7 @@ Environment variables:
 | `KOMINO_DATABASE_URL` | `postgres://localhost/komino` |
 | `KOMINO_SIGNING_KEY` | a dev-only placeholder; startup fails when enabled with it or a key under 32 chars |
 | `KOMINO_REAL_HOSTNAME` | `http://localhost:3000` |
+| `KOMINO_ECDH_KEY` | a dev-only P-256 scalar; startup fails when enabled with it (SEAL-3) |
 | `KOMINO_DB_USER/NAME/HOST/PORT/PASS` | used by migrant |
 
 `fly.toml` gets the non-secret vars and lists the secrets in its required-secrets comment.
@@ -53,6 +54,7 @@ Tables:
 - `game_events`: game_id, version, player_id, kind, public payload (jsonb), created. Used for
   the event log (UI-8).
 - `room_observers`: id, room_id, until (observer lease, OBS-9).
+- `client_keys` and `reveal_fetches` (SEAL-11).
 
 ### STORE-7
 At most one non-scored game exists per room (partial unique index on `games(room_id)` where

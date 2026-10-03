@@ -1,6 +1,6 @@
 use axum::http::StatusCode;
 use axum_test::TestServer;
-use komino::game::{Game, Stage, Status};
+use komino::game::{Game, Reveal, Stage, Status};
 use komino::{service, Config, State};
 use serde_json::{json, Value};
 
@@ -98,6 +98,67 @@ async fn observer_count(state: &State, code: &str) -> i64 {
     .fetch_one(&state.db)
     .await
     .unwrap()
+}
+
+/// A client's ECDH key pair, as the browser makes one (SEAL-5).
+struct ClientKey {
+    secret: p256::SecretKey,
+    public_b64: String,
+}
+
+impl ClientKey {
+    fn new() -> Self {
+        use base64::Engine;
+        let secret = loop {
+            let bytes = common::crypto::rand_bytes(32).unwrap();
+            if let Ok(s) = p256::SecretKey::from_slice(&bytes) {
+                break s;
+            }
+        };
+        let public_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(komino::sealed::public_point(&secret.public_key()));
+        Self { secret, public_b64 }
+    }
+
+    /// How the server records the key in `client_keys`.
+    fn hash(&self) -> String {
+        hex::encode(common::crypto::sha256(&komino::sealed::public_point(
+            &self.secret.public_key(),
+        )))
+    }
+
+    /// Decrypt a sealed reveal response for room `code`.
+    fn open(&self, state: &State, code: &str, resp: axum_test::TestResponse) -> Value {
+        resp.assert_status_ok();
+        let body: Value = resp.json();
+        let sealed = komino::sealed::Sealed {
+            kid: body["kid"].as_str().unwrap().into(),
+            salt: body["salt"].as_str().unwrap().into(),
+            iv: body["iv"].as_str().unwrap().into(),
+            ct: body["ct"].as_str().unwrap().into(),
+        };
+        let plain = komino::sealed::open(
+            &self.secret,
+            &state.server_key.public_key,
+            code.as_bytes(),
+            &sealed,
+        )
+        .expect("could not open the sealed reveal");
+        serde_json::from_slice(&plain).unwrap()
+    }
+}
+
+async fn reveal(
+    server: &TestServer,
+    code: &str,
+    key: &ClientKey,
+    what: &str,
+    id: Option<&str>,
+) -> axum_test::TestResponse {
+    server
+        .post(&format!("/api/rooms/{code}/reveal"))
+        .json(&json!({ "client_key": key.public_b64, "what": what, "id": id }))
+        .await
 }
 
 /// Replace the running game's state wholesale.
@@ -248,9 +309,19 @@ async fn test_views_are_redacted_per_player() {
     }
     let text = view.to_string();
     assert!(!text.contains("\"deck\""));
-    // the guest does see their own opening peek
-    let guest_seat = seats.iter().find(|s| s["player"] != host_id).unwrap();
-    assert!(guest_seat["slots"][2].get("v").is_some());
+    // no private value at all travels in a view, not even the guest's own
+    assert!(!view["game"].to_string().contains("\"v\""), "{view}");
+    // the guest reveals their own opening peek, sealed
+    let key = ClientKey::new();
+    let cards = key.open(
+        &state,
+        &code,
+        reveal(&guest, &code, &key, "opening", None).await,
+    );
+    let guest_seat = seats.iter().position(|s| s["player"] != host_id).unwrap();
+    assert_eq!(cards["cards"].as_array().unwrap().len(), 2);
+    assert_eq!(cards["cards"][0]["seat"], guest_seat);
+    assert_eq!(cards["cards"][0]["slot"], 2);
 }
 
 #[tokio::test]
@@ -280,7 +351,15 @@ async fn test_turn_flow_over_http_and_stats() {
     let view: Value = act(&host, &code, json!({ "type": "draw", "turn_seq": seq }))
         .await
         .json();
-    assert_eq!(view["game"]["stage"]["card"], 3);
+    // the drawn card is only ever revealed sealed
+    assert!(view["game"]["stage"]["card"].is_null());
+    let key = ClientKey::new();
+    let drawn = key.open(
+        &state,
+        &code,
+        reveal(&host, &code, &key, "drawn", None).await,
+    );
+    assert_eq!(drawn, json!({ "card": 3 }));
     // the spent token can't be replayed
     act(&host, &code, json!({ "type": "draw", "turn_seq": seq }))
         .await
@@ -1077,4 +1156,222 @@ async fn test_idle_rooms_and_dead_observer_leases_are_cleaned() {
         .await
         .unwrap();
     assert_eq!(leases, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Sealed reveals (SEAL-*)
+// ---------------------------------------------------------------------------
+
+/// A two player game in play, host (seat 0) to move, with a live peek the
+/// host made of the guest's slot 1, whose value was 9. Returns the peek id.
+async fn game_with_a_peek(state: &State, host: &TestServer, code: &str) -> String {
+    act(host, code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let host_id = me(host).await;
+    let id = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6".to_string();
+    let peek = id.clone();
+    set_game(state, code, move |g| {
+        g.status = Status::Playing;
+        g.stage = Stage::Start;
+        g.ready_deadline = None;
+        g.turn = 0;
+        // the host joined first, so holds seat 0
+        assert_eq!(g.seats[0].player, host_id);
+        g.reveals = vec![Reveal {
+            id: peek,
+            player: host_id,
+            seat: 1,
+            slot: 1,
+            value: 9,
+            until: chrono::Utc::now().timestamp_millis() + 60_000,
+        }];
+    })
+    .await;
+    id
+}
+
+#[tokio::test]
+async fn test_server_key_is_published() {
+    let state = get_state().await;
+    let server = client(&state);
+    let body: Value = server.get("/api/key").await.json();
+    assert_eq!(body["kid"], state.server_key.kid);
+    assert_eq!(body["public_key"], state.server_key.public_key);
+    assert!(komino::sealed::parse_public(body["public_key"].as_str().unwrap()).is_some());
+}
+
+#[tokio::test]
+async fn test_peeks_reveal_sealed_and_only_once() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    let id = game_with_a_peek(&state, &host, &code).await;
+    // the view names the peek but carries no value
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["game"]["reveals"][0]["id"], id);
+    assert!(!view["game"].to_string().contains("\"v\""));
+
+    let key = ClientKey::new();
+    let resp = reveal(&host, &code, &key, "peek", Some(&id)).await;
+    assert_eq!(resp.header("cache-control"), "no-store");
+    let raw = resp.text();
+    assert!(!raw.contains("\"v\""), "the response is not sealed: {raw}");
+    let cards = key.open(&state, &code, resp);
+    assert_eq!(
+        cards,
+        json!({ "cards": [{ "seat": 1, "slot": 1, "v": 9 }] })
+    );
+
+    // spent
+    let again = reveal(&host, &code, &key, "peek", Some(&id)).await;
+    again.assert_status(StatusCode::CONFLICT);
+    assert_eq!(again.json::<Value>()["code"], "already_revealed");
+    // and never anyone else's
+    let resp = reveal(&guest, &code, &ClientKey::new(), "peek", Some(&id)).await;
+    resp.assert_status(StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_a_failed_peek_reveal_does_not_spend_it() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    let id = game_with_a_peek(&state, &host, &code).await;
+    let key = ClientKey::new();
+    // the host's key is already past its window
+    sqlx::query(
+        "INSERT INTO client_keys (key_hash, player_id, first_seen)
+         VALUES ($1, $2, now() - interval '10 minutes')",
+    )
+    .bind(key.hash())
+    .bind(me(&host).await)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let resp = reveal(&host, &code, &key, "peek", Some(&id)).await;
+    resp.assert_status(StatusCode::CONFLICT);
+    assert_eq!(resp.json::<Value>()["code"], "key_expired");
+    // a fresh key still gets the peek
+    let fresh = ClientKey::new();
+    let cards = fresh.open(
+        &state,
+        &code,
+        reveal(&host, &code, &fresh, "peek", Some(&id)).await,
+    );
+    assert_eq!(cards["cards"][0]["v"], 9);
+}
+
+#[tokio::test]
+async fn test_client_keys_are_bound_to_one_player_for_five_minutes() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let key = ClientKey::new();
+    reveal(&host, &code, &key, "opening", None)
+        .await
+        .assert_status_ok();
+    // the same key works again for the same player inside the window
+    reveal(&host, &code, &key, "opening", None)
+        .await
+        .assert_status_ok();
+    // another player can't reuse it
+    let resp = reveal(&guest, &code, &key, "opening", None).await;
+    resp.assert_status(StatusCode::FORBIDDEN);
+    // after five minutes it is refused
+    sqlx::query("UPDATE client_keys SET first_seen = now() - interval '301 seconds'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let resp = reveal(&host, &code, &key, "opening", None).await;
+    resp.assert_status(StatusCode::CONFLICT);
+    assert_eq!(resp.json::<Value>()["code"], "key_expired");
+    // stale bindings are cleaned up after a day
+    sqlx::query("UPDATE client_keys SET first_seen = now() - interval '2 days'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    komino::models::delete_stale_rooms(&state.db).await.unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM client_keys")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[tokio::test]
+async fn test_reveals_check_the_cookie_and_the_game() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    let key = ClientKey::new();
+    // no game yet
+    reveal(&host, &code, &key, "opening", None)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    // strangers and observers are not members
+    let stranger = client(&state);
+    stranger
+        .get(&format!("/api/rooms/{code}/watch"))
+        .await
+        .assert_status_ok();
+    reveal(&stranger, &code, &ClientKey::new(), "opening", None)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    // nothing has been drawn, and after ready the opening peek is over
+    reveal(&guest, &code, &ClientKey::new(), "drawn", None)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    act(&guest, &code, json!({ "type": "ready" }))
+        .await
+        .assert_status_ok();
+    reveal(&guest, &code, &ClientKey::new(), "opening", None)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    reveal(&host, &code, &key, "opening", None)
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_reveal_requests_are_validated() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let key = ClientKey::new();
+    for body in [
+        json!({ "client_key": "not a key", "what": "opening" }),
+        json!({ "client_key": key.public_b64, "what": "everything" }),
+        json!({ "client_key": key.public_b64, "what": "peek" }),
+    ] {
+        let resp = host
+            .post(&format!("/api/rooms/{code}/reveal"))
+            .json(&body)
+            .await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(resp.json::<Value>()["code"], "invalid");
+    }
+    reveal(&host, "ZZZZZZ", &key, "opening", None)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    // a sealed reveal opens only for its room
+    let resp = reveal(&host, &code, &key, "opening", None).await;
+    let body: Value = resp.json();
+    let sealed = komino::sealed::Sealed {
+        kid: body["kid"].as_str().unwrap().into(),
+        salt: body["salt"].as_str().unwrap().into(),
+        iv: body["iv"].as_str().unwrap().into(),
+        ct: body["ct"].as_str().unwrap().into(),
+    };
+    assert!(komino::sealed::open(
+        &key.secret,
+        &state.server_key.public_key,
+        b"ZZZZZZ",
+        &sealed
+    )
+    .is_err());
 }

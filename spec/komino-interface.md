@@ -100,7 +100,8 @@ dismiss it with a `hide card` button or the server's 5 second peek deadline pass
 back. Other players and observers see the slot highlighted until the same deadline; the view
 carries the peeked slots and deadlines without their values. Deadlines are read against the
 server clock: each view carries `server_now`, and the client corrects for its own clock's
-offset. The opening peek (RULE-7) is not a reveal: it lasts until `ready`.
+offset. The opening peek (RULE-7) is not a reveal: it lasts until `ready`. Peeked, drawn,
+and opening values are fetched sealed (SEAL-6) and dropped once hidden (SEAL-9).
 
 ### UI-18
 At scoring, all hands flip face up, each player's total is shown, and the winner(s) are

@@ -78,6 +78,7 @@ primary_region = "ewr"
 #  - KOMINO_DB_PASS
 #  - KOMINO_DATABASE_URL
 #  - KOMINO_SIGNING_KEY
+#  - KOMINO_ECDH_KEY (P-256 scalar, 64 hex chars: openssl rand -hex 32)
 #  - AWS_ACCESS_KEY_ID
 #  - AWS_SECRET_ACCESS_KEY
 
