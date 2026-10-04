@@ -42,6 +42,8 @@ coverage thresholds, and a Docker image build. Deploys are still manual.
 After a deploy, `make acceptance` (or the manual `acceptance` workflow) runs
 `acceptance/live.test.mjs` against the live site: every mounted app, a paste round trip,
 and a full komino round with sealed reveals and an observer. Writes are short-lived.
+Every feature or behavior change extends this suite as part of its test coverage, alongside the
+unit, integration, and client tests.
 
 ## Docker
 - `bin/stub_workspace.sh` generates stub source files from the workspace manifest for dependency-caching Docker builds

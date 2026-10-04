@@ -340,6 +340,8 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   const room = await host.json("POST", "/komino/api/rooms");
   const code = room.room.code;
   assert.match(code, /^[A-Z0-9]{6}$/);
+  // no body takes every default setting
+  assert.deepEqual(room.room.settings, { hand_size: 4, away_grace_secs: 30, turn_limit_secs: null, reveal_secs: null });
   t.after(async () => {
     // leaving as host ends the game; the empty room is swept later
     await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
@@ -411,6 +413,52 @@ test("komino plays a sealed round with an observer watching", async (t) => {
     json: { type: "swap", slot: 0, turn_seq: view.game.turn_seq },
   });
   assert.notEqual(view.game.seats[view.game.turn].player, turnPlayer, "the turn should pass");
+});
+
+test("komino rooms play by the settings they were created with", async (t) => {
+  const host = new Client();
+  const guest = new Client();
+  await expectStatus(await host.get("/komino"), 200, "komino page");
+  await expectStatus(await guest.get("/komino"), 200, "komino page");
+  const server = await host.json("GET", "/komino/api/key");
+
+  // out of range settings create nothing
+  for (const bad of [{ hand_size: 11 }, { hand_size: 3 }, { turn_limit_secs: 5 }, { reveal_secs: 61 }]) {
+    const err = await host.json("POST", "/komino/api/rooms", { json: bad }, 400);
+    assert.equal(err.code, "invalid", JSON.stringify(bad));
+  }
+
+  const settings = { hand_size: 6, away_grace_secs: 15, turn_limit_secs: 60, reveal_secs: null };
+  const room = await host.json("POST", "/komino/api/rooms", { json: settings });
+  const code = room.room.code;
+  t.after(async () => {
+    await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+    await host.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+  });
+  assert.deepEqual(room.room.settings, settings);
+  const joined = await guest.json("POST", `/komino/api/rooms/${code}/join`);
+  assert.deepEqual(joined.room.settings, settings, "a joiner sees the same settings");
+
+  let view = await host.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "start" } });
+  assert.equal(view.game.hand_size, 6);
+  for (const seat of view.game.seats) assert.equal(seat.slots.length, 6);
+  // 2 x 6 + 1 leaves 47 of one deck
+  assert.equal(view.game.deck_count, 47);
+
+  // the opening peek is the near row: slots 4-6
+  const key = await clientKey();
+  const opened = await openSealed(key, server.public_key, code, await reveal(host, code, key, "opening"));
+  assert.deepEqual(opened.cards.map((c) => c.slot), [3, 4, 5]);
+
+  await host.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "ready" } });
+  view = await guest.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "ready" } });
+  assert.equal(view.game.status, "playing");
+  const left = view.game.turn_deadline - view.server_now;
+  assert.ok(left > 50_000 && left <= 60_000, `the turn limit should be about 60s, got ${left}ms`);
+
+  // hide is accepted from anyone seated and carries no turn token
+  view = await guest.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "hide" } });
+  assert.deepEqual(view.game.reveals, []);
 });
 
 test("komino rejects unknown rooms", async () => {
