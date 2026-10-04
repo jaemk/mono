@@ -28,8 +28,10 @@ make fmt
 make lint
 make test
 ```
-After touching `crates/komino/assets`, also run `make test-js` (node tests under
-`crates/komino/web`).
+`make test` needs no setup beyond docker and cargo: `bin/test-db.sh` uses a postgres
+reachable without a password (as in CI) or starts a throwaway `postgres:16` container, and
+`bin/test-js.sh` runs the komino client tests (`crates/komino/web`) with node from PATH or
+nvm, or in a `node:24` container. `make test-rust` and `make test-js` run either half.
 
 ## CI
 `.github/workflows/ci.yml` runs on every PR and push to main: fmt and clippy, `cargo audit

@@ -3,7 +3,7 @@
 -include .env
 export
 
-.PHONY: fmt test test-js acceptance lint run push \
+.PHONY: fmt test test-rust test-js acceptance lint run push \
 	db-setup db-setup-spot db-setup-spot-create db-setup-paste db-setup-paste-create \
 	db-setup-mapour db-setup-mapour-create db-setup-komino db-setup-komino-create \
 	db-migrate db-migrate-spot db-migrate-paste db-migrate-mapour db-migrate-komino \
@@ -12,12 +12,16 @@ export
 fmt:
 	cargo fmt --all
 
-test:
+# Everything, with no manual setup: test-db.sh brings its own postgres when
+# none is reachable, and test-js.sh finds node or runs it in docker.
+test: test-rust test-js
+
+test-rust:
 	./bin/test-db.sh
 
-# komino client tests (jsdom); needs node and npm on PATH
+# komino client tests (jsdom) with CI's coverage thresholds
 test-js:
-	cd crates/komino/web && npm ci && npm test
+	./bin/test-js.sh
 
 # post-deploy checks against the live site (node 22+ on PATH); see
 # acceptance/live.test.mjs for ACCEPTANCE_BASE and ACCEPTANCE_HOSTS
