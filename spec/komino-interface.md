@@ -61,9 +61,14 @@ with confirm and cancel buttons. Nothing is sent to the server until confirm. Th
 dialog is the "confirm bar" referred to below.
 
 ### UI-11
-UI-10 applies to: drawing, taking the discard, swapping, discarding, each special move (and
-skipping one), matching, and pressing ready. Matching another player's card selects the target,
-then the card to give (RULE-19), then confirms both as one action.
+UI-10 applies to: drawing, taking the discard, swapping, discarding, using each special move
+(and skipping one), matching, and pressing ready. Matching another player's card selects the
+target, then the card to give (RULE-19), then confirms both as one action.
+
+### UI-22
+While a discarded special move waits (RULE-10), the turn player's taps on cards are matches
+(UI-13), and the controls offer `use <move>` and `end turn`. Once the move is in use, taps
+pick its targets, and a `match <value>` button switches taps back to matching.
 
 ### UI-12
 Confirmation is client-side only. The server treats each received action as final.
@@ -90,7 +95,9 @@ allowed (RULE-22) and disabled with a tooltip explaining why otherwise.
 
 ### UI-16
 Pressing it opens a confirmation (UI-10). On confirm, all players see a prominent komino
-banner naming the caller, and the final-turn countdown of remaining players.
+banner naming the caller, and the final-turn countdown of remaining players. A call made mid
+turn (RULE-22) shows only the caller a banner saying it takes effect when the turn ends, and
+the button reads `KOMINO called`, disabled, until then.
 
 ## Peeks and reveals
 

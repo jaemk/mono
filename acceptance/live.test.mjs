@@ -461,6 +461,71 @@ test("komino rooms play by the settings they were created with", async (t) => {
   assert.deepEqual(view.game.reveals, []);
 });
 
+test("komino holds a discarded special move for matches and takes komino mid turn", async (t) => {
+  const host = new Client();
+  const guest = new Client();
+  await expectStatus(await host.get("/komino"), 200, "komino page");
+  await expectStatus(await guest.get("/komino"), 200, "komino page");
+  const server = await host.json("GET", "/komino/api/key");
+  const hostMe = await host.json("POST", "/komino/api/me", { json: { name: "accept-host" } });
+  const guestMe = await guest.json("POST", "/komino/api/me", { json: { name: "accept-guest" } });
+  // a long away grace, since neither player holds a socket
+  const room = await host.json("POST", "/komino/api/rooms", { json: { away_grace_secs: 600 } });
+  const code = room.room.code;
+  t.after(async () => {
+    await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+    await host.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+  });
+  await guest.json("POST", `/komino/api/rooms/${code}/join`);
+  const act = (c, body) => c.json("POST", `/komino/api/rooms/${code}/action`, { json: body });
+  const seated = {
+    [hostMe.id]: { c: host, key: await clientKey() },
+    [guestMe.id]: { c: guest, key: await clientKey() },
+  };
+  const mover = (v) => seated[v.game.seats[v.game.turn].player];
+  const other = (v) => seated[v.game.seats[1 - v.game.turn].player];
+
+  await act(host, { type: "start" });
+  await act(host, { type: "ready" });
+  let view = await act(guest, { type: "ready" });
+
+  // draw and discard until a special card comes up
+  let card = null;
+  for (let i = 0; i < 40 && !(card >= 7); i++) {
+    const { c, key } = mover(view);
+    view = await act(c, { type: "draw", turn_seq: view.game.turn_seq });
+    ({ card } = await openSealed(key, server.public_key, code, await reveal(c, code, key, "drawn")));
+    view = await act(c, { type: "discard", turn_seq: view.game.turn_seq });
+  }
+  assert.ok(card >= 7, "no special card in 40 draws");
+  assert.equal(view.game.stage.kind, "earned");
+  // the turn waits on its player, with the discard open to matches
+  const seen = await other(view).c.json("GET", `/komino/api/rooms/${code}`);
+  assert.equal(seen.game.turn, view.game.turn);
+  assert.equal(seen.game.stage.kind, "earned");
+  assert.equal(seen.game.matchable, true);
+  const special = mover(view);
+  view = await act(special.c, { type: "use_special", turn_seq: view.game.turn_seq });
+  assert.equal(view.game.stage.kind, "special");
+  view = await act(special.c, { type: "skip", turn_seq: view.game.turn_seq });
+  assert.notEqual(mover(view), special, "the turn should pass");
+
+  // everyone has played once this turn's player draws, so they may call
+  const caller = mover(view);
+  view = await act(caller.c, { type: "draw", turn_seq: view.game.turn_seq });
+  assert.equal(view.game.can_call, true);
+  view = await act(caller.c, { type: "komino", turn_seq: view.game.turn_seq });
+  assert.equal(view.game.calling, true);
+  assert.equal(view.game.status, "playing");
+  const theirs = await special.c.json("GET", `/komino/api/rooms/${code}`);
+  assert.equal(theirs.game.calling, false, "a pending call is the caller's alone");
+  assert.equal(theirs.game.status, "playing");
+  view = await act(caller.c, { type: "swap", slot: 0, turn_seq: view.game.turn_seq });
+  assert.equal(view.game.status, "final");
+  assert.equal(seated[view.game.seats[view.game.caller].player], caller);
+  assert.ok(view.events.some((e) => e.kind === "komino"));
+});
+
 test("komino rejects unknown rooms", async () => {
   const c = new Client();
   await c.json("GET", "/komino/api/rooms/ZZZZZZ/watch", {}, 404);

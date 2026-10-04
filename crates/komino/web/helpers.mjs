@@ -77,6 +77,7 @@ export function makeGame(extra = {}) {
     reveals: [],
     peeked: [],
     can_call: false,
+    calling: false,
     ready_deadline: null,
     away_deadline: null,
     score_at: null,

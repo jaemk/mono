@@ -150,10 +150,24 @@ impl Status {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Stage {
     Start,
-    Drawn { card: i8 },
-    Taken { card: i8 },
-    Special { mv: Move },
-    Looked { seat: usize, slot: usize },
+    Drawn {
+        card: i8,
+    },
+    Taken {
+        card: i8,
+    },
+    /// A discarded draw earned `mv`; matching is open until the player uses
+    /// it or ends the turn (RULE-10).
+    Earned {
+        mv: Move,
+    },
+    Special {
+        mv: Move,
+    },
+    Looked {
+        seat: usize,
+        slot: usize,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -217,6 +231,10 @@ pub struct Game {
     pub turn_deadline: Option<i64>,
     #[serde(default = "Settings::legacy")]
     pub settings: Settings,
+    /// The turn player called komino mid turn; the call takes effect when
+    /// the turn ends (RULE-22).
+    #[serde(default)]
+    pub calling: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -229,6 +247,8 @@ pub enum Action {
         slot: usize,
     },
     Discard,
+    /// Start the special move a discard earned.
+    UseSpecial,
     Komino,
     Peek {
         seat: usize,
@@ -405,6 +425,7 @@ impl Game {
             score_at: None,
             turn_deadline: None,
             settings,
+            calling: false,
         }
     }
 
@@ -481,8 +502,44 @@ impl Game {
         self.require_filled(seat, slot)
     }
 
-    fn all_have_played(&self) -> bool {
-        self.seats.iter().all(|s| s.forfeited || s.turns > 0)
+    /// Whether every seated player has had a turn once `seat`'s current turn
+    /// ends: before drawing it doesn't count yet, mid turn it does.
+    fn all_have_played(&self, seat: usize) -> bool {
+        let counting = self.stage != Stage::Start;
+        self.seats
+            .iter()
+            .enumerate()
+            .all(|(i, s)| s.forfeited || s.turns > 0 || (counting && i == seat))
+    }
+
+    /// Whether the turn player at `seat` may call komino now (RULE-22).
+    fn may_call(&self, seat: usize) -> Result<(), Reject> {
+        if self.status != Status::Playing {
+            return Err(Reject::invalid("komino was already called"));
+        }
+        if self.calling {
+            return Err(Reject::invalid(
+                "you already called komino; it takes effect when your turn ends",
+            ));
+        }
+        if !self.all_have_played(seat) {
+            return Err(Reject::invalid("everyone must take a turn before komino"));
+        }
+        Ok(())
+    }
+
+    fn call_komino(&mut self, out: &mut Outcome) {
+        let me = self.turn;
+        let player = self.seats[me].player.clone();
+        self.caller = Some(me);
+        self.status = Status::Final;
+        let n = self.seats.len();
+        self.final_remaining = (1..n)
+            .map(|step| (me + step) % n)
+            .filter(|&s| self.active(s))
+            .collect();
+        out.stat(&player, Stat::KominoCalls, 1);
+        out.event(Some(&player), "komino", json!({ "seat": me }));
     }
 
     fn start_play(&mut self, now: i64, out: &mut Outcome) {
@@ -518,11 +575,14 @@ impl Game {
         }
     }
 
-    fn end_turn(&mut self, now: i64) {
+    fn end_turn(&mut self, now: i64, out: &mut Outcome) {
         self.stage = Stage::Start;
         self.away_since = None;
         if let Some(seat) = self.seats.get_mut(self.turn) {
             seat.turns += 1;
+        }
+        if std::mem::take(&mut self.calling) {
+            self.call_komino(out);
         }
         if self.caller.is_some() {
             let done = self.turn;
@@ -649,7 +709,7 @@ impl Game {
                     "swap",
                     json!({ "seat": me, "slot": slot, "discarded": old }),
                 );
-                self.end_turn(now);
+                self.end_turn(now, &mut out);
             }
             Action::Discard => {
                 self.require_turn(me)?;
@@ -662,30 +722,28 @@ impl Game {
                 out.stat(player, Stat::CardsInteracted, 1);
                 out.event(Some(player), "discard", json!({ "value": card }));
                 match special(card) {
-                    Some(mv) => self.stage = Stage::Special { mv },
-                    None => self.end_turn(now),
+                    Some(mv) => self.stage = Stage::Earned { mv },
+                    None => self.end_turn(now, &mut out),
                 }
+            }
+            Action::UseSpecial => {
+                self.require_turn(me)?;
+                let Stage::Earned { mv } = self.stage else {
+                    return Err(Reject::invalid("there is no special move to use"));
+                };
+                self.stage = Stage::Special { mv };
+                out.changed = true;
             }
             Action::Komino => {
                 self.require_turn(me)?;
-                if self.status != Status::Playing || self.stage != Stage::Start {
-                    return Err(Reject::invalid(
-                        "komino can only be called at the start of a turn",
-                    ));
+                self.may_call(me)?;
+                self.calling = true;
+                if self.stage == Stage::Start {
+                    self.end_turn(now, &mut out);
+                } else {
+                    // only the caller knows until the turn ends
+                    out.changed = true;
                 }
-                if !self.all_have_played() {
-                    return Err(Reject::invalid("everyone must take a turn before komino"));
-                }
-                self.caller = Some(me);
-                self.status = Status::Final;
-                let n = self.seats.len();
-                self.final_remaining = (1..n)
-                    .map(|step| (me + step) % n)
-                    .filter(|&s| self.active(s))
-                    .collect();
-                out.stat(player, Stat::KominoCalls, 1);
-                out.event(Some(player), "komino", json!({ "seat": me }));
-                self.end_turn(now);
             }
             Action::Peek { seat, slot } => {
                 self.require_turn(me)?;
@@ -713,7 +771,7 @@ impl Game {
                 if matches!(self.stage, Stage::Special { mv: Move::LookSwap }) {
                     self.stage = Stage::Looked { seat, slot };
                 } else {
-                    self.end_turn(now);
+                    self.end_turn(now, &mut out);
                 }
             }
             Action::BlindSwap {
@@ -740,7 +798,7 @@ impl Game {
                     "blind_swap",
                     json!({ "seat": me, "slot": slot, "target_seat": seat, "target_slot": target_slot }),
                 );
-                self.end_turn(now);
+                self.end_turn(now, &mut out);
             }
             Action::LookSwap { slot } => {
                 self.require_turn(me)?;
@@ -767,15 +825,18 @@ impl Game {
                 } else {
                     out.event(Some(player), "skip", json!({}));
                 }
-                self.end_turn(now);
+                self.end_turn(now, &mut out);
             }
             Action::Skip => {
                 self.require_turn(me)?;
-                if !matches!(self.stage, Stage::Special { .. } | Stage::Looked { .. }) {
+                if !matches!(
+                    self.stage,
+                    Stage::Earned { .. } | Stage::Special { .. } | Stage::Looked { .. }
+                ) {
                     return Err(Reject::invalid("there is no special move to skip"));
                 }
                 out.event(Some(player), "skip", json!({}));
-                self.end_turn(now);
+                self.end_turn(now, &mut out);
             }
             Action::Match {
                 seq,
@@ -905,6 +966,7 @@ impl Game {
             Status::Playing | Status::Final if self.turn == seat => {
                 self.stage = Stage::Start;
                 self.away_since = None;
+                self.calling = false;
                 if self.caller.is_some() && self.final_remaining.is_empty() {
                     self.start_scoring(now);
                 } else {
@@ -973,7 +1035,7 @@ impl Game {
             self.push_discard(card);
         }
         out.event(Some(player), kind, json!({}));
-        self.end_turn(now);
+        self.end_turn(now, out);
     }
 
     /// Reveal and score every hand.
@@ -998,6 +1060,7 @@ impl Game {
         }
         self.status = Status::Scored;
         self.stage = Stage::Start;
+        self.calling = false;
         self.score_at = None;
         self.turn_deadline = None;
         self.reveals.clear();
@@ -1141,10 +1204,9 @@ impl Game {
             "deck_count": self.deck.len(),
             "reveals": reveals,
             "peeked": peeked,
-            "can_call": is_turn
-                && self.status == Status::Playing
-                && self.stage == Stage::Start
-                && self.all_have_played(),
+            "can_call": is_turn && self.may_call(self.turn).is_ok(),
+            // a mid turn call stays the caller's until the turn ends
+            "calling": is_turn && self.calling,
             "ready_deadline": self.ready_deadline,
             "away_deadline": self.away_since.map(|t| t + self.settings.away_grace_ms()),
             "turn_deadline": self.turn_deadline,
@@ -1381,6 +1443,8 @@ mod tests {
         let mut g = playing(&[[1, 2, 3, 4], [5; 4]], 0, &[7]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        assert_eq!(g.stage, Stage::Earned { mv: Move::PeekOwn });
+        act(&mut g, "p0", Action::UseSpecial);
         assert_eq!(g.stage, Stage::Special { mv: Move::PeekOwn });
         assert_eq!(
             reject(&mut g, "p0", Action::Peek { seat: 1, slot: 0 }),
@@ -1440,6 +1504,7 @@ mod tests {
         let mut g = playing(&[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[9]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         assert_eq!(
             reject(&mut g, "p0", Action::Peek { seat: 0, slot: 0 }),
             "invalid"
@@ -1457,6 +1522,7 @@ mod tests {
         let mut g = playing(&[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[11]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         act(
             &mut g,
             "p0",
@@ -1476,6 +1542,7 @@ mod tests {
         let mut g = playing(&[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[13, 13]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         act(&mut g, "p0", Action::Peek { seat: 1, slot: 0 });
         assert_eq!(g.stage, Stage::Looked { seat: 1, slot: 0 });
         act(&mut g, "p0", Action::LookSwap { slot: Some(2) });
@@ -1486,6 +1553,7 @@ mod tests {
 
         act(&mut g, "p1", Action::Draw);
         act(&mut g, "p1", Action::Discard);
+        act(&mut g, "p1", Action::UseSpecial);
         act(&mut g, "p1", Action::Peek { seat: 0, slot: 0 });
         act(&mut g, "p1", Action::LookSwap { slot: None });
         assert_eq!(g.seats[0].slots[0], Some(1));
@@ -1500,6 +1568,67 @@ mod tests {
         let out = act(&mut g, "p0", Action::Skip);
         assert!(!out.stats.iter().any(|s| s.1 == Stat::SpecialMoves));
         assert_eq!(g.turn, 1);
+    }
+
+    #[test]
+    fn a_discarded_special_card_waits_for_its_player_to_use_it() {
+        let mut g = playing(&[[9, 2, 3, 4], [5, 6, 7, 9]], 0, &[9, 1]);
+        assert_eq!(reject(&mut g, "p0", Action::UseSpecial), "invalid");
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        assert_eq!(
+            g.view("p1", 0)["stage"],
+            json!({ "kind": "earned", "mv": "peek_other" })
+        );
+        // it is still p0's turn, and the discard is open to matches
+        assert_eq!(g.turn, 0);
+        assert_eq!(
+            reject(&mut g, "p0", Action::Peek { seat: 1, slot: 0 }),
+            "invalid"
+        );
+        let seq = g.discard_seq;
+        let mine = Action::Match {
+            seq,
+            seat: 0,
+            slot: 0,
+            give_slot: None,
+        };
+        act(&mut g, "p0", mine);
+        assert_eq!(g.seats[0].slots[0], None);
+        // the matched 9 tops the pile and is matchable in turn
+        let seq = g.discard_seq;
+        let theirs = Action::Match {
+            seq,
+            seat: 1,
+            slot: 3,
+            give_slot: None,
+        };
+        act(&mut g, "p1", theirs);
+        assert_eq!(g.seats[1].slots[3], None);
+        // matching moved nothing in the turn, so the move is still p0's
+        assert_eq!(
+            g.stage,
+            Stage::Earned {
+                mv: Move::PeekOther
+            }
+        );
+        let out = act(&mut g, "p0", Action::UseSpecial);
+        assert!(out.events.is_empty() && out.changed);
+        assert_eq!(reject(&mut g, "p0", Action::UseSpecial), "invalid");
+        act(&mut g, "p0", Action::Peek { seat: 1, slot: 1 });
+        assert_eq!(g.turn, 1);
+    }
+
+    #[test]
+    fn using_a_special_move_moves_the_turn_token() {
+        let mut g = playing(&[[1; 4], [2; 4]], 0, &[7]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        let seq = g.turn_seq;
+        act(&mut g, "p0", Action::UseSpecial);
+        assert_eq!(g.turn_seq, seq + 1);
+        let late = g.apply("p0", Action::Skip, Some(seq), 0, &mut rng());
+        assert_eq!(late.unwrap_err().code, "stale");
     }
 
     #[test]
@@ -1650,6 +1779,7 @@ mod tests {
         // the caller's cards are locked against matches by others
         act(&mut g, "p1", Action::Draw);
         act(&mut g, "p1", Action::Discard);
+        act(&mut g, "p1", Action::UseSpecial);
         assert_eq!(
             reject(&mut g, "p1", Action::Peek { seat: 0, slot: 0 }),
             "invalid"
@@ -1708,6 +1838,94 @@ mod tests {
         }
         g.tick(SCORE_DELAY_MS, &|_| true);
         assert_eq!(g.winners(), vec!["p1", "p2"]);
+    }
+
+    #[test]
+    fn komino_called_mid_turn_takes_effect_when_the_turn_ends() {
+        let mut g = playing(&[[0; 4], [5; 4], [6; 4]], 1, &[3, 3, 3, 3, 3]);
+        for p in ["p0", "p1"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+        }
+        // p2 is the last to play a first turn, so they can call during it
+        assert!(!g.view("p2", 0)["can_call"].as_bool().unwrap());
+        act(&mut g, "p2", Action::Draw);
+        assert!(g.view("p2", 0)["can_call"].as_bool().unwrap());
+        let seq = g.turn_seq;
+        let out = act(&mut g, "p2", Action::Komino);
+        assert!(out.events.is_empty() && out.changed);
+        // only the caller knows until the turn ends
+        assert_eq!(g.status, Status::Playing);
+        assert_eq!(g.turn_seq, seq);
+        assert_eq!(g.view("p2", 0)["calling"], true);
+        assert!(!g.view("p2", 0)["can_call"].as_bool().unwrap());
+        assert_eq!(g.view("p0", 0)["calling"], false);
+        assert_eq!(g.observer_view(0)["calling"], false);
+        assert_eq!(reject(&mut g, "p2", Action::Komino), "invalid");
+        let out = act(&mut g, "p2", Action::Swap { slot: 0 });
+        let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, vec!["swap", "komino"]);
+        assert!(out.stats.contains(&("p2".into(), Stat::KominoCalls, 1)));
+        assert_eq!(g.status, Status::Final);
+        assert_eq!(g.caller, Some(2));
+        assert_eq!(g.final_remaining, vec![0, 1]);
+        assert_eq!(g.turn, 0);
+        assert!(!g.calling);
+        // nobody calls again once komino is called
+        act(&mut g, "p0", Action::Draw);
+        assert_eq!(reject(&mut g, "p0", Action::Komino), "invalid");
+    }
+
+    #[test]
+    fn komino_can_be_called_with_a_special_move_pending() {
+        let mut g = playing(&[[0; 4], [5; 4]], 1, &[3, 3, 9]);
+        for p in ["p0", "p1"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+        }
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Komino);
+        act(&mut g, "p0", Action::UseSpecial);
+        act(&mut g, "p0", Action::Peek { seat: 1, slot: 0 });
+        assert_eq!(g.caller, Some(0));
+        assert_eq!(g.final_remaining, vec![1]);
+    }
+
+    #[test]
+    fn a_skipped_turn_keeps_its_komino_call() {
+        let settings = Settings {
+            turn_limit_secs: Some(60),
+            ..Settings::default()
+        };
+        let mut g = with(settings, &[[0; 4], [5; 4]], 1, &[3, 3, 3]);
+        for p in ["p0", "p1"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+        }
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Komino);
+        let out = g.tick(60_000, &|_| true);
+        let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, vec!["timeout_skip", "komino"]);
+        assert_eq!(g.caller, Some(0));
+        assert_eq!(g.turn, 1);
+    }
+
+    #[test]
+    fn a_forfeit_drops_a_pending_komino_call() {
+        let mut g = playing(&[[0; 4], [5; 4], [6; 4]], 1, &[3, 3, 3, 3]);
+        for p in ["p0", "p1", "p2"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+        }
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Komino);
+        g.forfeit("p0", 0);
+        assert!(!g.calling);
+        assert_eq!(g.caller, None);
+        assert_eq!(g.status, Status::Playing);
+        assert_eq!(g.turn, 1);
     }
 
     #[test]
@@ -1780,6 +1998,7 @@ mod tests {
         assert_eq!(obs["can_call"], false);
 
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         act(&mut g, "p0", Action::Peek { seat: 0, slot: 1 });
         // the peeker may reveal the value; observers and the other player see only the slot
         let id = g.reveals[0].id.clone();
@@ -1902,6 +2121,7 @@ mod tests {
         let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
         let later = 24 * 60 * 60 * 1000;
         let view = g.view("p0", later);
@@ -1928,9 +2148,11 @@ mod tests {
         let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
         act(&mut g, "p1", Action::Draw);
         act(&mut g, "p1", Action::Discard);
+        act(&mut g, "p1", Action::UseSpecial);
         act(&mut g, "p1", Action::Peek { seat: 1, slot: 2 });
         act(&mut g, "p1", Action::Hide);
         assert_eq!(g.reveals.len(), 1);
@@ -1942,6 +2164,7 @@ mod tests {
         let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 6]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
         act(&mut g, "p1", Action::Draw);
         act(&mut g, "p1", Action::Swap { slot: 0 });
@@ -1960,6 +2183,7 @@ mod tests {
         let mut g = with(settings, &[[1, 2, 3, 4], [5; 4]], 0, &[7]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
         act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
         assert_eq!(g.reveals[0].until, Some(10_000));
         assert_eq!(g.view("p1", 9_999)["peeked"].as_array().unwrap().len(), 1);

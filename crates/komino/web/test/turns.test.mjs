@@ -98,7 +98,7 @@ test("a drawn card is revealed sealed to the drawer, then swapped or discarded",
   page.$("confirm-cancel").click();
   assert.equal(page.slot(0, 2).classList.contains("sel"), false);
   page.control("discard 8").click();
-  assert.equal(page.confirmText(), "discard the 8 and use peek own?");
+  assert.equal(page.confirmText(), "discard the 8? you can match first, then use peek own");
   page.ok();
   assert.deepEqual(page.socket.sent, [{ ref: 1, type: "discard", turn_seq: 5 }]);
 });
@@ -210,6 +210,35 @@ test("blind swap picks your card, then theirs", async (t) => {
   assert.deepEqual(page.socket.sent, [{ ref: 1, type: "blind_swap", slot: 1, seat: 1, target_slot: 2, turn_seq: 5 }]);
 });
 
+test("a discarded special card waits: taps match, and the move is a button", async (t) => {
+  const page = await playing(t, { stage: { kind: "earned", mv: "peek_other" }, discard_top: 9 });
+  assert.match(page.$("status").textContent, /your turn: match the discard, use peek other, or end your turn$/);
+  // no match mode to enter: a tap on a card is already a match
+  assert.deepEqual(page.controls(), ["use peek other", "end turn", "KOMINO"]);
+  page.slot(1, 2).click();
+  assert.equal(page.toast(), "now tap one of your cards to give");
+  page.slot(0, 0).click();
+  assert.equal(page.confirmText(), "match bob's card 3 with the 9, giving your card 1?");
+  page.ok();
+  page.control("use peek other").click();
+  assert.equal(page.confirmText(), "use peek other now?");
+  page.ok();
+  page.control("end turn").click();
+  assert.equal(page.confirmText(), "end your turn without using peek other?");
+  page.ok();
+  assert.deepEqual(page.socket.sent, [
+    { ref: 1, type: "match", seq: 2, seat: 1, slot: 2, give_slot: 0 },
+    { ref: 2, type: "use_special", turn_seq: 5 },
+    { ref: 3, type: "skip", turn_seq: 5 },
+  ]);
+});
+
+test("others see a waiting special move as the turn player's", async (t) => {
+  const page = await playing(t, { turn: 1, stage: { kind: "earned", mv: "blind_swap" } });
+  assert.equal(page.$("status").textContent, "bob's turn");
+  assert.deepEqual(page.controls(), ["KOMINO"]);
+});
+
 test("a special move can be skipped", async (t) => {
   const page = await playing(t, { stage: { kind: "special", mv: "peek_own" }, matchable: false });
   page.control("skip move").click();
@@ -237,8 +266,7 @@ test("ready confirms and carries no turn token", async (t) => {
 test("the komino button explains when it can't be pressed", async (t) => {
   const cases = [
     [{ status: "peeking" }, "only during play"],
-    [{ turn: 1 }, "only at the start of your turn"],
-    [{ stage: { kind: "drawn", card: 3 } }, "only before drawing"],
+    [{ turn: 1 }, "only on your turn"],
     [{}, "everyone must take a turn first"],
   ];
   for (const [game, why] of cases) {
@@ -255,6 +283,22 @@ test("the komino button explains when it can't be pressed", async (t) => {
   assert.equal(page.confirmText(), "call KOMINO? everyone else gets one more turn.");
   page.ok();
   assert.deepEqual(page.socket.sent, [{ ref: 1, type: "komino", turn_seq: 5 }]);
+});
+
+test("komino called mid turn says it lands when the turn ends", async (t) => {
+  const page = await playing(t, { stage: { kind: "taken", card: 4 }, can_call: true });
+  page.control("KOMINO").click();
+  assert.equal(page.confirmText(), "call KOMINO? it takes effect when this turn ends, then everyone else gets one more turn.");
+  page.ok();
+  assert.deepEqual(page.socket.sent, [{ ref: 1, type: "komino", turn_seq: 5 }]);
+  page.push(makeView(makeGame({ stage: { kind: "taken", card: 4 }, calling: true })));
+  assert.equal(page.$("status").querySelector(".komino").textContent, "you called KOMINO; it takes effect when your turn ends. ");
+  const b = page.control("KOMINO called");
+  assert.equal(b.disabled, true);
+  assert.equal(b.title, "called; it takes effect when your turn ends");
+  // the turn goes on as usual
+  page.slot(0, 1).click();
+  assert.equal(page.confirmText(), "swap the 4 into your card 2?");
 });
 
 test("a confirm whose move went away closes and says why", async (t) => {

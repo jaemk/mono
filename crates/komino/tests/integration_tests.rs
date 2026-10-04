@@ -1311,6 +1311,99 @@ async fn test_hide_ends_a_peek_for_everyone() {
     assert_eq!(view["game"]["peeked"], json!([]));
 }
 
+// ---------------------------------------------------------------------------
+// Within a turn (RULE-10, RULE-22)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_a_special_discard_waits_and_komino_lands_at_the_turn_end() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    set_game(&state, &code, |g| {
+        g.status = Status::Playing;
+        g.stage = Stage::Drawn { card: 9 };
+        g.ready_deadline = None;
+        g.turn = 0;
+        for seat in g.seats.iter_mut() {
+            seat.turns = 1;
+        }
+        g.seats[0].slots = vec![Some(1); 4];
+        g.seats[1].slots = vec![Some(9), Some(2), Some(2), Some(2)];
+    })
+    .await;
+    let url = format!("/api/rooms/{code}");
+    let seq = |v: &Value| v["game"]["turn_seq"].as_u64().unwrap();
+    let view: Value = host.get(&url).await.json();
+    assert_eq!(view["game"]["can_call"], true);
+
+    // the host calls komino with the drawn card still in hand
+    let view: Value = act(
+        &host,
+        &code,
+        json!({ "type": "komino", "turn_seq": seq(&view) }),
+    )
+    .await
+    .json();
+    assert_eq!(view["game"]["calling"], true);
+    assert_eq!(view["game"]["status"], "playing");
+    let view: Value = act(
+        &host,
+        &code,
+        json!({ "type": "discard", "turn_seq": seq(&view) }),
+    )
+    .await
+    .json();
+    assert_eq!(
+        view["game"]["stage"],
+        json!({ "kind": "earned", "mv": "peek_other" })
+    );
+
+    // the guest sees neither the call nor a finished turn, and matches the 9
+    let guest_view: Value = guest.get(&url).await.json();
+    assert_eq!(guest_view["game"]["calling"], false);
+    assert_eq!(guest_view["game"]["turn"], 0);
+    act(
+        &guest,
+        &code,
+        json!({ "type": "match", "seq": guest_view["game"]["discard_seq"], "seat": 1, "slot": 0 }),
+    )
+    .await
+    .assert_status_ok();
+
+    let view: Value = host.get(&url).await.json();
+    let view: Value = act(
+        &host,
+        &code,
+        json!({ "type": "use_special", "turn_seq": seq(&view) }),
+    )
+    .await
+    .json();
+    assert_eq!(
+        view["game"]["stage"],
+        json!({ "kind": "special", "mv": "peek_other" })
+    );
+    let view: Value = act(
+        &host,
+        &code,
+        json!({ "type": "peek", "seat": 1, "slot": 1, "turn_seq": seq(&view) }),
+    )
+    .await
+    .json();
+    assert_eq!(view["game"]["status"], "final");
+    assert_eq!(view["game"]["caller"], 0);
+    assert_eq!(view["game"]["turn"], 1);
+    let kinds: Vec<&str> = view["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"komino"));
+}
+
 #[tokio::test]
 async fn test_server_key_is_published() {
     let state = get_state().await;

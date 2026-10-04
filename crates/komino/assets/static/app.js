@@ -119,7 +119,7 @@
 
   // turn actions carry the turn token they were chosen against, so a stale
   // or repeated confirm is refused instead of applied to a moved-on turn
-  const TURN_ACTIONS = ["draw", "take", "swap", "discard", "komino", "peek", "blind_swap", "look_swap", "skip"];
+  const TURN_ACTIONS = ["draw", "take", "swap", "discard", "use_special", "komino", "peek", "blind_swap", "look_swap", "skip"];
 
   function createKomino(win) {
     const doc = win.document;
@@ -504,8 +504,9 @@
         const w = g.seats.filter((s) => s.won).map((s) => (s.player === me && seated ? "you" : nameOf(s.player)));
         text = w.length ? `game over. winner: ${w.join(", ")}` : "game over";
       }
-      const banner = g.caller !== null && g.status !== "scored"
+      let banner = g.caller !== null && g.status !== "scored"
         ? `<span class="komino">KOMINO called by ${esc(g.caller === g.me ? "you" : nameOf(g.seats[g.caller].player))}, ${g.final_remaining.length} turn(s) left. </span>` : "";
+      if (g.calling) banner = `<span class="komino">you called KOMINO; it takes effect when your turn ends. </span>`;
       el.innerHTML = banner + esc(text);
     }
 
@@ -515,6 +516,7 @@
       if (st.kind === "start") return ": draw from the deck or take the discard";
       if (st.kind === "drawn") return ": tap one of your cards to swap, or discard";
       if (st.kind === "taken") return ": tap one of your cards to swap";
+      if (st.kind === "earned") return `: match the discard, use ${MOVE_INFO[st.mv].label}, or end your turn`;
       if (st.kind === "special") {
         return {
           peek_own: ": tap one of your cards to peek",
@@ -554,14 +556,20 @@
         }
         if (st.kind === "drawn") {
           const card = drawnCard(g);
-          const move = card !== null && MOVES[card] ? ` and use ${MOVE_INFO[MOVES[card]].label}` : "";
+          const move = card !== null && MOVES[card] ? `? you can match first, then use ${MOVE_INFO[MOVES[card]].label}` : "?";
           c.append(button(card === null ? "discard" : `discard ${card}`,
-            () => confirmAction({ type: "discard" }, `discard ${heldName(g)}${move}?`, k)));
+            () => confirmAction({ type: "discard" }, `discard ${heldName(g)}${move}`, k)));
+        }
+        if (st.kind === "earned") {
+          const label = MOVE_INFO[st.mv].label;
+          c.append(button(`use ${label}`, () => confirmAction({ type: "use_special" }, `use ${label} now?`, k), { cls: "primary" }));
+          c.append(button("end turn", () => confirmAction({ type: "skip" }, `end your turn without using ${label}?`, k)));
         }
         if (st.kind === "special") c.append(button("skip move", () => confirmAction({ type: "skip" }, "skip the special move?", k)));
         if (st.kind === "looked") c.append(button("keep my cards", () => confirmAction({ type: "look_swap", slot: null }, "keep your cards and end the turn?", k)));
       }
-      if (canMatch(g) && myTurn(g) && g.stage.kind !== "start") {
+      // while a move waits to be used, taps on cards already match
+      if (canMatch(g) && myTurn(g) && !["start", "earned"].includes(g.stage.kind)) {
         c.append(button(matchMode ? "cancel match" : `match ${g.discard_top}`, () => {
           matchMode = !matchMode;
           sel = null;
@@ -581,9 +589,13 @@
           render();
         }));
       }
-      const why = g.status !== "playing" ? "only during play" : !myTurn(g) ? "only at the start of your turn"
-        : g.stage.kind !== "start" ? "only before drawing" : "everyone must take a turn first";
-      c.append(button("KOMINO", () => confirmAction({ type: "komino" }, "call KOMINO? everyone else gets one more turn.", k),
+      // komino can be called any time in your own turn; mid turn it lands
+      // when the turn ends (RULE-22)
+      const why = g.status !== "playing" ? "only during play" : !myTurn(g) ? "only on your turn"
+        : g.calling ? "called; it takes effect when your turn ends" : "everyone must take a turn first";
+      const ask = g.stage.kind === "start" ? "call KOMINO? everyone else gets one more turn."
+        : "call KOMINO? it takes effect when this turn ends, then everyone else gets one more turn.";
+      c.append(button(g.calling ? "KOMINO called" : "KOMINO", () => confirmAction({ type: "komino" }, ask, k),
         { cls: "komino-btn", disabled: !g.can_call, title: g.can_call ? "end the round" : why }));
     }
 

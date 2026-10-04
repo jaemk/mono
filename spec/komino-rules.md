@@ -63,6 +63,12 @@ After drawing from the draw pile, the player either:
 - swaps it into one of their slots, discarding the replaced card face up, or
 - discards it face up, then may use its special move if it has one.
 
+Discarding a card with a special move does not start the move. The turn stays with the player
+and the discard is open to matches by anyone (RULE-18), the player included, so they can match
+before the move changes any hand. The player then either uses the move (`use_special`,
+followed by the move itself) or ends the turn without it (`skip`). Matches made while the move
+waits do not use it up.
+
 ### RULE-11
 After taking the discard, the player must swap it into one of their slots, discarding the
 replaced card face up. A card taken from the discard pile never triggers a special move.
@@ -112,8 +118,12 @@ becomes the new top discard and can be matched in turn.
 ## Calling komino
 
 ### RULE-22
-A player can call komino only at the start of their own turn, before drawing, and only after
-every seated player has had at least one turn. Calling ends their turn.
+A player can call komino at any point in their own turn, once every seated player has had at
+least one turn (the caller's current turn counts once they have drawn or taken). Calling at the
+start of the turn, before drawing, ends the turn at once. Calling later in the turn takes
+effect when the turn ends, however it ends (including a skip, SET-9 and ROOM-14), so the
+player finishes their move first. Until then only the caller sees the call (the view's
+`calling`), and it cannot be taken back. A call pending when its player forfeits is dropped.
 
 ### RULE-23
 After a call, every other seated player gets exactly one more turn. The caller's slots are
