@@ -7,15 +7,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const HAND_SIZE: usize = 4;
 pub const MAX_SEATS: usize = 8;
 pub const READY_MS: i64 = 30_000;
-pub const GRACE_MS: i64 = 30_000;
 pub const SCORE_DELAY_MS: i64 = 2_000;
-pub const PEEK_MS: i64 = 5_000;
 
-/// Slots seen during the opening peek: the row nearest the player.
-const OPENING_PEEK: [usize; 2] = [2, 3];
+/// A deal that leaves fewer cards than this to draw is played with two decks
+/// (SET-7).
+const MIN_DRAW_PILE: usize = 20;
 
 /// The 60 card deck, unshuffled.
 pub fn deck() -> Vec<i8> {
@@ -26,6 +24,80 @@ pub fn deck() -> Vec<i8> {
         }
     }
     cards
+}
+
+/// The unshuffled cards for a game of `players` with `hand_size` cards each:
+/// one deck, or two when one would leave too few to draw (SET-7).
+pub fn deck_for(players: usize, hand_size: usize) -> Vec<i8> {
+    let mut cards = deck();
+    if cards.len() < players * hand_size + 1 + MIN_DRAW_PILE {
+        cards.extend(deck());
+    }
+    cards
+}
+
+/// Per-room game settings (SET-1), copied into each game as it starts. A
+/// missing field takes its default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub hand_size: usize,
+    pub away_grace_secs: i64,
+    /// `None` is no turn limit.
+    pub turn_limit_secs: Option<i64>,
+    /// `None` keeps a peek up until the player hides it.
+    pub reveal_secs: Option<i64>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            hand_size: 4,
+            away_grace_secs: 30,
+            turn_limit_secs: None,
+            reveal_secs: None,
+        }
+    }
+}
+
+impl Settings {
+    /// The fixed rules of games saved before settings existed (SET-3).
+    pub fn legacy() -> Self {
+        Self {
+            reveal_secs: Some(5),
+            ..Self::default()
+        }
+    }
+
+    /// The allowed ranges of SET-1.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(4..=10).contains(&self.hand_size) {
+            return Err("hand_size must be 4 to 10".into());
+        }
+        if !(10..=600).contains(&self.away_grace_secs) {
+            return Err("away_grace_secs must be 10 to 600".into());
+        }
+        if self
+            .turn_limit_secs
+            .is_some_and(|s| !(10..=600).contains(&s))
+        {
+            return Err("turn_limit_secs must be 10 to 600, or null".into());
+        }
+        if self.reveal_secs.is_some_and(|s| !(1..=60).contains(&s)) {
+            return Err("reveal_secs must be 1 to 60, or null".into());
+        }
+        Ok(())
+    }
+
+    fn away_grace_ms(&self) -> i64 {
+        self.away_grace_secs * 1000
+    }
+
+    /// Slots seen during the opening peek: the row nearest the player
+    /// (SET-6).
+    fn opening_slots(&self) -> std::ops::Range<usize> {
+        self.hand_size.div_ceil(2)..self.hand_size
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +168,8 @@ pub struct Seat {
     pub won: bool,
 }
 
-/// A card value shown to one player until `until`.
+/// A card value shown to one player until `until`, or until they hide it
+/// when `until` is `None` (SET-11).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reveal {
     /// Names the peek in a sealed reveal request; empty on states saved
@@ -107,7 +180,13 @@ pub struct Reveal {
     pub seat: usize,
     pub slot: usize,
     pub value: i8,
-    pub until: i64,
+    pub until: Option<i64>,
+}
+
+impl Reveal {
+    fn live(&self, now: i64) -> bool {
+        self.until.is_none_or(|until| until > now)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,6 +212,11 @@ pub struct Game {
     #[serde(default)]
     pub turn_seq: u64,
     pub score_at: Option<i64>,
+    /// When the current turn's limit runs out (SET-9).
+    #[serde(default)]
+    pub turn_deadline: Option<i64>,
+    #[serde(default = "Settings::legacy")]
+    pub settings: Settings,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -150,6 +234,8 @@ pub enum Action {
         seat: usize,
         slot: usize,
     },
+    /// End every peek the player holds (SET-12).
+    Hide,
     BlindSwap {
         slot: usize,
         seat: usize,
@@ -178,7 +264,7 @@ pub enum Secret {
 impl Action {
     /// Actions that only the turn player takes, guarded by `turn_seq`.
     pub fn is_turn_action(&self) -> bool {
-        !matches!(self, Action::Ready | Action::Match { .. })
+        !matches!(self, Action::Ready | Action::Match { .. } | Action::Hide)
     }
 }
 
@@ -274,12 +360,18 @@ impl Outcome {
 
 impl Game {
     /// Deal a new game. `deck` is already shuffled, top last.
-    pub fn new(players: Vec<String>, mut deck: Vec<i8>, first: usize, now: i64) -> Self {
+    pub fn new(
+        players: Vec<String>,
+        mut deck: Vec<i8>,
+        first: usize,
+        now: i64,
+        settings: Settings,
+    ) -> Self {
         let mut seats: Vec<Seat> = players
             .into_iter()
             .map(|player| Seat {
                 player,
-                slots: Vec::with_capacity(HAND_SIZE),
+                slots: Vec::with_capacity(settings.hand_size),
                 ready: false,
                 forfeited: false,
                 turns: 0,
@@ -287,7 +379,7 @@ impl Game {
                 won: false,
             })
             .collect();
-        for _ in 0..HAND_SIZE {
+        for _ in 0..settings.hand_size {
             for seat in seats.iter_mut() {
                 seat.slots.push(deck.pop());
             }
@@ -311,6 +403,8 @@ impl Game {
             away_since: None,
             turn_seq: 0,
             score_at: None,
+            turn_deadline: None,
+            settings,
         }
     }
 
@@ -391,14 +485,26 @@ impl Game {
         self.seats.iter().all(|s| s.forfeited || s.turns > 0)
     }
 
-    fn start_play(&mut self, out: &mut Outcome) {
+    fn start_play(&mut self, now: i64, out: &mut Outcome) {
         self.status = Status::Playing;
         self.ready_deadline = None;
         for seat in self.seats.iter_mut() {
             seat.ready = true;
         }
+        self.begin_turn(now);
         let first = self.seats[self.turn].player.clone();
         out.event(None, "play", json!({ "first": first }));
+    }
+
+    /// Start the turn limit's clock for the turn starting now (SET-9).
+    fn begin_turn(&mut self, now: i64) {
+        self.turn_deadline = self.settings.turn_limit_secs.map(|s| now + s * 1000);
+    }
+
+    fn start_scoring(&mut self, now: i64) {
+        self.status = Status::Scoring;
+        self.score_at = Some(now + SCORE_DELAY_MS);
+        self.turn_deadline = None;
     }
 
     fn next_turn(&mut self) {
@@ -422,12 +528,12 @@ impl Game {
             let done = self.turn;
             self.final_remaining.retain(|&s| s != done);
             if self.final_remaining.is_empty() {
-                self.status = Status::Scoring;
-                self.score_at = Some(now + SCORE_DELAY_MS);
+                self.start_scoring(now);
                 return;
             }
         }
         self.next_turn();
+        self.begin_turn(now);
     }
 
     /// Everything a turn action depends on. `turn_seq` moves whenever this
@@ -481,7 +587,7 @@ impl Game {
             .seat_of(player)
             .filter(|&s| self.active(s))
             .ok_or_else(|| Reject::new("not_seated", "you are not playing in this game"))?;
-        self.reveals.retain(|r| r.until > now);
+        self.reveals.retain(|r| r.live(now));
         let mut out = Outcome::default();
         match action {
             Action::Ready => {
@@ -491,8 +597,12 @@ impl Game {
                 self.seats[me].ready = true;
                 out.event(Some(player), "ready", json!({}));
                 if self.seats.iter().all(|s| s.ready || s.forfeited) {
-                    self.start_play(&mut out);
+                    self.start_play(now, &mut out);
                 }
+            }
+            Action::Hide => {
+                self.reveals.retain(|r| r.player != player);
+                out.changed = true;
             }
             Action::Draw => {
                 self.require_turn(me)?;
@@ -595,7 +705,7 @@ impl Game {
                     seat,
                     slot,
                     value,
-                    until: now + PEEK_MS,
+                    until: self.settings.reveal_secs.map(|s| now + s * 1000),
                 });
                 out.stat(player, Stat::SpecialMoves, 1);
                 out.stat(player, Stat::CardsInteracted, 1);
@@ -785,33 +895,31 @@ impl Game {
         }
         match self.status {
             Status::Peeking => {
-                if self.seats.iter().all(|s| s.ready || s.forfeited) {
-                    self.start_play(&mut out);
-                }
                 if self.turn == seat {
                     self.next_turn();
+                }
+                if self.seats.iter().all(|s| s.ready || s.forfeited) {
+                    self.start_play(now, &mut out);
                 }
             }
             Status::Playing | Status::Final if self.turn == seat => {
                 self.stage = Stage::Start;
                 self.away_since = None;
                 if self.caller.is_some() && self.final_remaining.is_empty() {
-                    self.status = Status::Scoring;
-                    self.score_at = Some(now + SCORE_DELAY_MS);
+                    self.start_scoring(now);
                 } else {
                     self.next_turn();
+                    self.begin_turn(now);
                 }
             }
-            Status::Final if self.final_remaining.is_empty() => {
-                self.status = Status::Scoring;
-                self.score_at = Some(now + SCORE_DELAY_MS);
-            }
+            Status::Final if self.final_remaining.is_empty() => self.start_scoring(now),
             _ => {}
         }
         out
     }
 
-    /// Advance timers: the ready deadline, away turns, and scoring.
+    /// Advance timers: the ready deadline, away turns, turn limits, and
+    /// scoring.
     pub fn tick(&mut self, now: i64, present: &dyn Fn(&str) -> bool) -> Outcome {
         let before = self.turn_marker();
         let out = self.tick_inner(now, present);
@@ -824,12 +932,14 @@ impl Game {
         match self.status {
             Status::Peeking => {
                 if self.ready_deadline.is_some_and(|d| now >= d) {
-                    self.start_play(&mut out);
+                    self.start_play(now, &mut out);
                 }
             }
             Status::Playing | Status::Final => {
                 let player = self.seats[self.turn].player.clone();
-                if present(&player) {
+                if self.turn_deadline.is_some_and(|d| now >= d) {
+                    self.skip_turn(&player, "timeout_skip", now, &mut out);
+                } else if present(&player) {
                     if self.away_since.take().is_some() {
                         out.changed = true;
                     }
@@ -839,12 +949,8 @@ impl Game {
                             self.away_since = Some(now);
                             out.changed = true;
                         }
-                        Some(since) if now - since >= GRACE_MS => {
-                            if let Stage::Drawn { card } | Stage::Taken { card } = self.stage {
-                                self.push_discard(card);
-                            }
-                            out.event(Some(&player), "away_skip", json!({}));
-                            self.end_turn(now);
+                        Some(since) if now - since >= self.settings.away_grace_ms() => {
+                            self.skip_turn(&player, "away_skip", now, &mut out);
                         }
                         Some(_) => {}
                     }
@@ -858,6 +964,16 @@ impl Game {
             Status::Scored => {}
         }
         out
+    }
+
+    /// End the turn player's turn for them: a held card goes onto the discard
+    /// pile and a pending special move is lost.
+    fn skip_turn(&mut self, player: &str, kind: &'static str, now: i64, out: &mut Outcome) {
+        if let Stage::Drawn { card } | Stage::Taken { card } = self.stage {
+            self.push_discard(card);
+        }
+        out.event(Some(player), kind, json!({}));
+        self.end_turn(now);
     }
 
     /// Reveal and score every hand.
@@ -883,6 +999,7 @@ impl Game {
         self.status = Status::Scored;
         self.stage = Stage::Start;
         self.score_at = None;
+        self.turn_deadline = None;
         self.reveals.clear();
         for (i, seat) in self.seats.iter().enumerate() {
             out.stat(&seat.player, Stat::GamesPlayed, 1);
@@ -919,9 +1036,10 @@ impl Game {
                 if self.status != Status::Peeking || self.seats[seat].ready {
                     return Err(denied());
                 }
-                let cards: Vec<Value> = OPENING_PEEK
-                    .iter()
-                    .filter_map(|&slot| {
+                let cards: Vec<Value> = self
+                    .settings
+                    .opening_slots()
+                    .filter_map(|slot| {
                         let v = self.card_at(seat, slot)?;
                         Some(json!({ "seat": seat, "slot": slot, "v": v }))
                     })
@@ -940,7 +1058,7 @@ impl Game {
                     .iter()
                     .find(|r| !r.id.is_empty() && &r.id == id && r.player == player)
                     .ok_or_else(denied)?;
-                if r.until <= now {
+                if !r.live(now) {
                     return Err(Reject::new("too_late", "that peek is over"));
                 }
                 Ok(json!({ "cards": [{ "seat": r.seat, "slot": r.slot, "v": r.value }] }))
@@ -997,14 +1115,14 @@ impl Game {
         let reveals: Vec<Value> = self
             .reveals
             .iter()
-            .filter(|r| Some(r.player.as_str()) == viewer && r.until > now)
+            .filter(|r| Some(r.player.as_str()) == viewer && r.live(now))
             .map(|r| json!({ "id": r.id, "seat": r.seat, "slot": r.slot, "until": r.until }))
             .collect();
         // which slots someone is looking at is public; the values are not
         let peeked: Vec<Value> = self
             .reveals
             .iter()
-            .filter(|r| r.until > now)
+            .filter(|r| r.live(now))
             .map(|r| json!({ "seat": r.seat, "slot": r.slot, "until": r.until }))
             .collect();
         json!({
@@ -1028,8 +1146,10 @@ impl Game {
                 && self.stage == Stage::Start
                 && self.all_have_played(),
             "ready_deadline": self.ready_deadline,
-            "away_deadline": self.away_since.map(|t| t + GRACE_MS),
+            "away_deadline": self.away_since.map(|t| t + self.settings.away_grace_ms()),
+            "turn_deadline": self.turn_deadline,
             "score_at": self.score_at,
+            "hand_size": self.settings.hand_size,
         })
     }
 }
@@ -1039,8 +1159,16 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
 
+    const PEEK_MS: i64 = 5_000;
+    const GRACE_MS: i64 = 30_000;
+
     fn rng() -> rand::rngs::StdRng {
         rand::rngs::StdRng::seed_from_u64(7)
+    }
+
+    /// A new game with 4 card hands and 5 second peeks.
+    fn deal(players: Vec<String>, deck: Vec<i8>) -> Game {
+        Game::new(players, deck, 0, 0, Settings::legacy())
     }
 
     /// Build a deck so that dealing gives each player the listed hand (slot
@@ -1064,7 +1192,7 @@ mod tests {
 
     /// A two player game past the peek phase, p0 to move.
     fn playing(hands: &[[i8; 4]], starter: i8, draws: &[i8]) -> Game {
-        let mut g = Game::new(players(hands.len()), stacked(hands, starter, draws), 0, 0);
+        let mut g = deal(players(hands.len()), stacked(hands, starter, draws));
         for p in players(hands.len()) {
             g.apply(&p, Action::Ready, None, 0, &mut rng()).unwrap();
         }
@@ -1168,12 +1296,7 @@ mod tests {
 
     #[test]
     fn deal_gives_four_cards_and_a_starter_that_cannot_be_matched() {
-        let g = Game::new(
-            players(2),
-            stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[]),
-            0,
-            0,
-        );
+        let g = deal(players(2), stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[]));
         assert_eq!(g.seats[0].slots, vec![Some(1), Some(2), Some(3), Some(4)]);
         assert_eq!(g.seats[1].slots, vec![Some(5), Some(6), Some(0), Some(-1)]);
         assert_eq!(g.discard, vec![9]);
@@ -1183,12 +1306,7 @@ mod tests {
 
     #[test]
     fn opening_peek_shows_only_near_row_until_ready() {
-        let mut g = Game::new(
-            players(2),
-            stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[]),
-            0,
-            0,
-        );
+        let mut g = deal(players(2), stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[]));
         // the view carries no values; the near row is revealed sealed
         assert!(!g.view("p0", 0).to_string().contains("\"v\""));
         assert_eq!(
@@ -1213,7 +1331,7 @@ mod tests {
 
     #[test]
     fn ready_deadline_starts_play() {
-        let mut g = Game::new(players(2), stacked(&[[1; 4], [2; 4]], 9, &[]), 0, 0);
+        let mut g = deal(players(2), stacked(&[[1; 4], [2; 4]], 9, &[]));
         assert!(!g.tick(READY_MS - 1, &|_| true).changed);
         assert!(g.tick(READY_MS, &|_| true).changed);
         assert_eq!(g.status, Status::Playing);
@@ -1305,7 +1423,7 @@ mod tests {
             seat: 0,
             slot: 0,
             value: 1,
-            until: 10,
+            until: Some(10),
         });
         let stored = serde_json::to_value(&g).unwrap();
         let mut old = stored.clone();
@@ -1645,12 +1763,7 @@ mod tests {
 
     #[test]
     fn observers_see_no_opening_peek_drawn_card_or_reveal() {
-        let mut g = Game::new(
-            players(2),
-            stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[7]),
-            0,
-            0,
-        );
+        let mut g = deal(players(2), stacked(&[[1, 2, 3, 4], [5, 6, 0, -1]], 9, &[7]));
         // during the opening peek each player may reveal their near row, observers nothing
         assert!(g.secret("p0", &Secret::Opening, 0).is_ok());
         let text = g.observer_view(0).to_string();
@@ -1695,5 +1808,249 @@ mod tests {
                 assert!(slot.get("v").is_some());
             }
         }
+    }
+
+    fn with(settings: Settings, hands: &[[i8; 4]], starter: i8, draws: &[i8]) -> Game {
+        let mut g = Game::new(
+            players(hands.len()),
+            stacked(hands, starter, draws),
+            0,
+            0,
+            settings,
+        );
+        for p in players(hands.len()) {
+            g.apply(&p, Action::Ready, None, 0, &mut rng()).unwrap();
+        }
+        g
+    }
+
+    #[test]
+    fn settings_are_checked_against_their_ranges() {
+        assert_eq!(Settings::default().validate(), Ok(()));
+        let ok = Settings {
+            hand_size: 10,
+            away_grace_secs: 600,
+            turn_limit_secs: Some(10),
+            reveal_secs: Some(60),
+        };
+        assert_eq!(ok.validate(), Ok(()));
+        let bad = [
+            Settings { hand_size: 3, ..ok },
+            Settings {
+                hand_size: 11,
+                ..ok
+            },
+            Settings {
+                away_grace_secs: 9,
+                ..ok
+            },
+            Settings {
+                turn_limit_secs: Some(601),
+                ..ok
+            },
+            Settings {
+                reveal_secs: Some(0),
+                ..ok
+            },
+        ];
+        for s in bad {
+            assert!(s.validate().is_err(), "{s:?} passed");
+        }
+    }
+
+    #[test]
+    fn a_second_deck_joins_when_one_would_run_short() {
+        // 8 x 4 + 1 leaves 27 to draw
+        assert_eq!(deck_for(8, 4).len(), 60);
+        // 4 x 9 + 1 leaves 23; 5 x 8 + 1 leaves 19
+        assert_eq!(deck_for(4, 9).len(), 60);
+        assert_eq!(deck_for(5, 8).len(), 120);
+        let two = deck_for(8, 10);
+        assert_eq!(two.len(), 120);
+        assert_eq!(two.iter().filter(|&&v| v == 13).count(), 8);
+    }
+
+    #[test]
+    fn larger_hands_deal_and_open_the_near_row() {
+        for (hand_size, near) in [(5, 3..5), (10, 5..10)] {
+            let settings = Settings {
+                hand_size,
+                ..Settings::default()
+            };
+            let deck = deck_for(8, hand_size);
+            let g = Game::new(players(8), deck.clone(), 0, 0, settings);
+            assert!(g.seats.iter().all(|s| s.slots.len() == hand_size));
+            assert_eq!(g.deck.len(), deck.len() - 8 * hand_size - 1);
+            assert_eq!(g.view("p0", 0)["hand_size"], hand_size);
+            let opened = g.secret("p0", &Secret::Opening, 0).unwrap();
+            let slots: Vec<usize> = opened["cards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["slot"].as_u64().unwrap() as usize)
+                .collect();
+            assert_eq!(slots, near.collect::<Vec<_>>());
+            for c in opened["cards"].as_array().unwrap() {
+                let slot = c["slot"].as_u64().unwrap() as usize;
+                assert_eq!(c["v"], g.seats[0].slots[slot].unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn an_untimed_peek_lasts_until_hidden() {
+        let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
+        let later = 24 * 60 * 60 * 1000;
+        let view = g.view("p0", later);
+        assert_eq!(view["reveals"][0]["until"], Value::Null);
+        let peek = Secret::Peek(view["reveals"][0]["id"].as_str().unwrap().into());
+        assert!(g.secret("p0", &peek, later).is_ok());
+        assert_eq!(
+            g.view("p1", later)["peeked"],
+            json!([{ "seat": 0, "slot": 0, "until": null }])
+        );
+        // hiding takes no turn token and is open to anyone seated
+        let seq = g.turn_seq;
+        let out = g
+            .apply("p0", Action::Hide, None, later, &mut rng())
+            .unwrap();
+        assert!(out.changed && out.events.is_empty());
+        assert_eq!(g.turn_seq, seq);
+        assert_eq!(g.view("p1", later)["peeked"], json!([]));
+        assert_eq!(g.secret("p0", &peek, later).unwrap_err().code, "forbidden");
+    }
+
+    #[test]
+    fn hiding_ends_only_the_hiders_peeks() {
+        let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
+        act(&mut g, "p1", Action::Draw);
+        act(&mut g, "p1", Action::Discard);
+        act(&mut g, "p1", Action::Peek { seat: 1, slot: 2 });
+        act(&mut g, "p1", Action::Hide);
+        assert_eq!(g.reveals.len(), 1);
+        assert_eq!(g.reveals[0].player, "p0");
+    }
+
+    #[test]
+    fn an_untimed_peek_ends_when_the_slot_changes() {
+        let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 6]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
+        act(&mut g, "p1", Action::Draw);
+        act(&mut g, "p1", Action::Swap { slot: 0 });
+        assert_eq!(g.reveals.len(), 1);
+        act(&mut g, "p0", Action::Take);
+        act(&mut g, "p0", Action::Swap { slot: 0 });
+        assert!(g.reveals.is_empty());
+    }
+
+    #[test]
+    fn a_timed_peek_uses_the_room_peek_time() {
+        let settings = Settings {
+            reveal_secs: Some(10),
+            ..Settings::default()
+        };
+        let mut g = with(settings, &[[1, 2, 3, 4], [5; 4]], 0, &[7]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Peek { seat: 0, slot: 0 });
+        assert_eq!(g.reveals[0].until, Some(10_000));
+        assert_eq!(g.view("p1", 9_999)["peeked"].as_array().unwrap().len(), 1);
+        assert_eq!(g.view("p1", 10_000)["peeked"], json!([]));
+    }
+
+    #[test]
+    fn the_turn_limit_skips_a_present_player() {
+        let settings = Settings {
+            turn_limit_secs: Some(60),
+            ..Settings::default()
+        };
+        let mut g = with(settings, &[[1; 4], [2; 4]], 5, &[9, 9]);
+        assert_eq!(g.turn_deadline, Some(60_000));
+        assert_eq!(g.view("p1", 0)["turn_deadline"], 60_000);
+        act(&mut g, "p0", Action::Draw);
+        assert!(!g.tick(59_999, &|_| true).changed);
+        let seq = g.turn_seq;
+        let out = g.tick(60_000, &|_| true);
+        assert_eq!(out.events[0].kind, "timeout_skip");
+        // the held card goes face up and the next turn gets a fresh limit
+        assert_eq!(g.discard.last(), Some(&9));
+        assert!(g.matchable);
+        assert_eq!(g.turn, 1);
+        assert!(g.turn_seq > seq);
+        assert_eq!(g.turn_deadline, Some(120_000));
+        // a turn that ends in time restarts the clock from when it ended
+        g.apply("p1", Action::Draw, Some(g.turn_seq), 70_000, &mut rng())
+            .unwrap();
+        g.apply("p1", Action::Discard, Some(g.turn_seq), 70_000, &mut rng())
+            .unwrap();
+        g.apply("p1", Action::Skip, Some(g.turn_seq), 70_000, &mut rng())
+            .unwrap();
+        assert_eq!(g.turn_deadline, Some(130_000));
+    }
+
+    #[test]
+    fn without_a_turn_limit_turns_never_time_out() {
+        let mut g = with(Settings::default(), &[[1; 4], [2; 4]], 5, &[9]);
+        assert_eq!(g.turn_deadline, None);
+        assert!(!g.tick(i64::MAX / 2, &|_| true).changed);
+        assert_eq!(g.turn, 0);
+    }
+
+    #[test]
+    fn the_turn_limit_stops_at_scoring() {
+        let settings = Settings {
+            turn_limit_secs: Some(30),
+            ..Settings::default()
+        };
+        let mut g = with(settings, &[[1; 4], [2; 4]], 5, &[9, 9, 9]);
+        for p in ["p0", "p1"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+            act(&mut g, p, Action::Skip);
+        }
+        act(&mut g, "p0", Action::Komino);
+        assert!(g.turn_deadline.is_some());
+        g.forfeit("p1", 0);
+        assert_eq!(g.status, Status::Scored);
+        assert_eq!(g.turn_deadline, None);
+    }
+
+    #[test]
+    fn the_away_grace_follows_the_setting() {
+        let settings = Settings {
+            away_grace_secs: 15,
+            ..Settings::default()
+        };
+        let mut g = with(settings, &[[1; 4], [2; 4]], 5, &[]);
+        let away = |p: &str| p != "p0";
+        g.tick(0, &away);
+        assert_eq!(g.view("p1", 0)["away_deadline"], 15_000);
+        assert!(g.tick(14_999, &away).events.is_empty());
+        assert_eq!(g.tick(15_000, &away).events[0].kind, "away_skip");
+    }
+
+    #[test]
+    fn states_saved_before_settings_play_by_the_old_rules() {
+        let g = playing(&[[1; 4], [2; 4]], 5, &[]);
+        let mut stored = serde_json::to_value(&g).unwrap();
+        let obj = stored.as_object_mut().unwrap();
+        obj.remove("settings");
+        obj.remove("turn_deadline");
+        obj.insert(
+            "reveals".into(),
+            json!([{ "id": "a", "player": "p0", "seat": 0, "slot": 0, "value": 1, "until": 5000 }]),
+        );
+        let loaded: Game = serde_json::from_value(stored).unwrap();
+        assert_eq!(loaded.settings, Settings::legacy());
+        assert_eq!(loaded.turn_deadline, None);
+        assert_eq!(loaded.reveals[0].until, Some(5000));
     }
 }

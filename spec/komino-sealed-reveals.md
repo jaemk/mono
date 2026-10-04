@@ -40,7 +40,7 @@ a new pair and retries once.
 
 | what | Allowed when | Returns |
 |------|--------------|---------|
-| `opening` | the cookie player is seated, the game is peeking, and they are not ready (RULE-7) | their slots 3 and 4 |
+| `opening` | the cookie player is seated, the game is peeking, and they are not ready (RULE-7) | their nearest row (SET-6) |
 | `drawn` | it is the cookie player's turn and they drew from the deck (RULE-9) | the drawn card |
 | `peek` | `id` names a live peek made by the cookie player (RULE-12, RULE-13, RULE-15) | the peeked slot's value at peek time |
 

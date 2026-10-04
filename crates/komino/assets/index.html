@@ -19,6 +19,33 @@
     <section class="panel">
       <h1>komino</h1>
       <p>A card game of memory and quick hands. Lowest total wins.</p>
+      <div class="settings-form">
+        <label>cards in hand
+          <select id="set-hand">
+            <option selected>4</option><option>5</option><option>6</option><option>7</option>
+            <option>8</option><option>9</option><option>10</option>
+          </select>
+        </label>
+        <label>turn limit
+          <select id="set-turn">
+            <option value="" selected>off</option><option value="30">30s</option>
+            <option value="60">60s</option><option value="90">90s</option>
+            <option value="120">2m</option><option value="300">5m</option>
+          </select>
+        </label>
+        <label>away grace
+          <select id="set-away">
+            <option value="15">15s</option><option value="30" selected>30s</option>
+            <option value="60">60s</option><option value="120">2m</option>
+          </select>
+        </label>
+        <label>peek time
+          <select id="set-reveal">
+            <option value="" selected>until hidden</option><option value="3">3s</option>
+            <option value="5">5s</option><option value="10">10s</option><option value="30">30s</option>
+          </select>
+        </label>
+      </div>
       <button id="create" class="primary">create a room</button>
       <form id="join-form" class="join">
         <input id="join-code" placeholder="room code" maxlength="6" autocomplete="off" aria-label="room code">
@@ -33,6 +60,7 @@
         room <strong id="code"></strong>
         <span id="watch-tag" class="watch-tag">watching</span>
         <span id="observers" class="observers" hidden></span>
+        <div id="settings" class="room-settings"></div>
       </div>
       <div class="actions">
         <button id="copy" class="small player-only">copy link</button>

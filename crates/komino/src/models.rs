@@ -2,7 +2,7 @@
 //! state; each action locks the game row, applies the rules engine, and saves
 //! state, events, and stats in one transaction that also notifies the room.
 
-use crate::game::{self, Action, Game, Outcome, Reject, Secret, Stat};
+use crate::game::{self, Action, Game, Outcome, Reject, Secret, Settings, Stat};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -204,6 +204,25 @@ pub struct Room {
     pub code: String,
     pub host: String,
     pub last_winner: Option<String>,
+    pub settings: Settings,
+}
+
+const ROOM_COLUMNS: &str =
+    "id, code, host_player_id, last_winner, hand_size, away_grace_secs, turn_limit_secs, reveal_secs";
+
+fn room_from_row(row: &sqlx::postgres::PgRow) -> Room {
+    Room {
+        id: row.get("id"),
+        code: row.get("code"),
+        host: row.get("host_player_id"),
+        last_winner: row.get("last_winner"),
+        settings: Settings {
+            hand_size: row.get::<i32, _>("hand_size") as usize,
+            away_grace_secs: row.get::<i32, _>("away_grace_secs").into(),
+            turn_limit_secs: row.get::<Option<i32>, _>("turn_limit_secs").map(Into::into),
+            reveal_secs: row.get::<Option<i32>, _>("reveal_secs").map(Into::into),
+        },
+    }
 }
 
 fn new_code() -> String {
@@ -229,16 +248,23 @@ pub async fn notify(tx: &mut Tx<'_>, room_id: i64) -> Result<()> {
     Ok(())
 }
 
-pub async fn create_room(db: &DbPool, host: &str) -> Result<Room> {
+pub async fn create_room(db: &DbPool, host: &str, settings: Settings) -> Result<Room> {
+    settings.validate().map_err(ApiError::invalid)?;
     for _ in 0..10 {
         let code = new_code();
         let mut tx = db.begin().await?;
         let id: Option<i64> = sqlx::query_scalar(
-            "INSERT INTO rooms (code, host_player_id) VALUES ($1, $2)
+            "INSERT INTO rooms (code, host_player_id, hand_size, away_grace_secs,
+                                turn_limit_secs, reveal_secs)
+             VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (code) DO NOTHING RETURNING id",
         )
         .bind(&code)
         .bind(host)
+        .bind(settings.hand_size as i32)
+        .bind(settings.away_grace_secs as i32)
+        .bind(settings.turn_limit_secs.map(|s| s as i32))
+        .bind(settings.reveal_secs.map(|s| s as i32))
         .fetch_optional(&mut *tx)
         .await?;
         let Some(id) = id else { continue };
@@ -257,6 +283,7 @@ pub async fn create_room(db: &DbPool, host: &str) -> Result<Room> {
             code,
             host: host.to_string(),
             last_winner: None,
+            settings,
         });
     }
     Err(ApiError::new(
@@ -268,34 +295,23 @@ pub async fn create_room(db: &DbPool, host: &str) -> Result<Room> {
 
 pub async fn room_by_code(db: &DbPool, raw: &str) -> Result<Room> {
     let code = normalize_code(raw).ok_or_else(ApiError::not_found)?;
-    let row =
-        sqlx::query("SELECT id, code, host_player_id, last_winner FROM rooms WHERE code = $1")
-            .bind(&code)
-            .fetch_optional(db)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-    Ok(Room {
-        id: row.get("id"),
-        code: row.get("code"),
-        host: row.get("host_player_id"),
-        last_winner: row.get("last_winner"),
-    })
+    let row = sqlx::query(&format!("SELECT {ROOM_COLUMNS} FROM rooms WHERE code = $1"))
+        .bind(&code)
+        .fetch_optional(db)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(room_from_row(&row))
 }
 
 async fn lock_room(tx: &mut Tx<'_>, room_id: i64) -> Result<Room> {
-    let row = sqlx::query(
-        "SELECT id, code, host_player_id, last_winner FROM rooms WHERE id = $1 FOR UPDATE",
-    )
+    let row = sqlx::query(&format!(
+        "SELECT {ROOM_COLUMNS} FROM rooms WHERE id = $1 FOR UPDATE"
+    ))
     .bind(room_id)
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(ApiError::not_found)?;
-    Ok(Room {
-        id: row.get("id"),
-        code: row.get("code"),
-        host: row.get("host_player_id"),
-        last_winner: row.get("last_winner"),
-    })
+    Ok(room_from_row(&row))
 }
 
 /// A current member: joined, not left, not removed.
@@ -645,7 +661,7 @@ async fn start_game(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<()> {
     let (game, out) = {
         use rand::seq::SliceRandom;
         let mut rng = rand::rng();
-        let mut deck = game::deck();
+        let mut deck = game::deck_for(players.len(), room.settings.hand_size);
         deck.shuffle(&mut rng);
         let first = match room
             .last_winner
@@ -655,7 +671,7 @@ async fn start_game(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<()> {
             Some(winner) => winner + 1,
             None => rng.random_range(0..players.len()),
         };
-        let game = Game::new(players, deck, first, now_ms());
+        let game = Game::new(players, deck, first, now_ms(), room.settings);
         let mut out = Outcome::default();
         out.events.push(game::Event {
             player: Some(player.to_string()),
@@ -940,6 +956,7 @@ pub async fn view(db: &DbPool, room: &Room, viewer: Option<&str>, base_url: &str
             "host": room.host,
             "url": format!("{base_url}/komino/r/{}", room.code),
             "watch_url": format!("{base_url}/komino/r/{}/watch", room.code),
+            "settings": room.settings,
         },
         "me": viewer,
         "observer": viewer.is_none(),

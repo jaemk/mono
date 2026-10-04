@@ -30,7 +30,8 @@ every room the player is a current member of.
 ## Rooms
 
 ### ROOM-6
-Any player can create a room. The creator becomes the room's host.
+Any player can create a room, choosing its game settings (SET-1). The creator becomes the
+room's host.
 
 ### ROOM-7
 Each room has a share code: 6 characters drawn from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (no
@@ -63,7 +64,8 @@ Leaving (closing the tab or navigating away) does not remove membership. A retur
 resumes whatever seat and hand they had, if their game is still running.
 
 ### ROOM-14
-A seated player who is `away` when their turn starts gets a 30 second grace period. If they
+A seated player who is `away` when their turn starts gets a grace period (SET-8, 30 seconds
+by default). If they
 have not returned when it ends, their turn is skipped (no draw, no action). Their cards stay
 in play and are scored normally.
 

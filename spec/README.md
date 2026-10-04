@@ -18,6 +18,7 @@ can be built). Keep each row's status current with `spec.py set`.
 | Komino Storage | done | [komino-storage.md](komino-storage.md) |
 | Komino Observers | done | [komino-observers.md](komino-observers.md) |
 | Komino Sealed Reveals | done | [komino-sealed-reveals.md](komino-sealed-reveals.md) |
+| Komino Settings | done | [komino-settings.md](komino-settings.md) |
 
 ## Conventions
 

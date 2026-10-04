@@ -44,12 +44,14 @@ Migrations live in `migrations/komino/` with a `Migrant.toml` matching `migratio
 ### STORE-6
 Tables:
 - `players`: id, name, created, last_seen.
-- `rooms`: id, code (unique), host_player_id, last_winner, created, last_active.
+- `rooms`: id, code (unique), host_player_id, last_winner, created, last_active, and the
+  settings (SET-3): hand_size, away_grace_secs, turn_limit_secs (nullable), reveal_secs
+  (nullable).
 - `room_members`: room_id, player_id, joined, left_at (nullable), removed (bool),
   present_until (presence heartbeat, ROOM-12), primary key (room_id, player_id).
 - `games`: id, room_id, status (`peeking`, `playing`, `final`, `scoring`, `scored`), version,
   state (jsonb: deck, discard pile, discard sequence number, seats with hands and scores, turn,
-  caller, reveals, deadlines), created, ended.
+  caller, reveals, deadlines, settings), created, ended.
 - `room_stats`: room_id, player_id, one integer column per STAT-2 counter.
 - `game_events`: game_id, version, player_id, kind, public payload (jsonb), created. Used for
   the event log (UI-8).

@@ -181,9 +181,14 @@
     function matchKey(g) {
       return `m:${g.id}:${g.discard_seq}:${g.matchable}`;
     }
-    // peeks end at the server's deadline, read against the server clock
+    // peeks end at the server's deadline, read against the server clock; a
+    // peek with no deadline lasts until hidden (SET-11)
     function live(until) {
-      return Date.now() + skew < until;
+      return until === null || until === undefined || Date.now() + skew < until;
+    }
+    // hands are two rows, the second nearest the player (SET-5)
+    function columns(g) {
+      return Math.ceil((g.hand_size || 4) / 2);
     }
     // ---------------------------------------------------------------- secrets
 
@@ -436,9 +441,10 @@
       else if (g.status === "peeking") tag = s.ready ? " (ready)" : " (peeking)";
       if (s.score !== null && s.score !== undefined) tag = ` <span class="score${s.won ? " won" : ""}">${s.score}${s.won ? " won" : ""}</span>`;
       const slots = s.slots.map((_, i) => slotButton(g, seat, i)).join("");
+      const cols = columns(g);
       return `<div class="hand${mine ? " mine" : ""}${g.turn === seat && inPlay(g) ? " turn" : ""}">` +
         `<div class="who"><span class="dot${p.present ? " on" : ""}"></span>${esc(mine ? "you" : p.name || "?")}${tag}</div>` +
-        `<div class="slots">${slots}</div></div>`;
+        `<div class="slots${cols > 3 ? " wide" : ""}" style="--cols: ${cols}">${slots}</div></div>`;
     }
 
     function renderTable(g) {
@@ -482,11 +488,14 @@
       let text = "";
       if (g.status === "peeking") {
         const wait = `play starts in ${secondsLeft(g.ready_deadline)}s or when everyone is ready.`;
-        if (!seated) text = `players are memorizing their bottom two cards. ${wait}`;
+        const near = (g.hand_size || 4) - columns(g);
+        const row = near === 2 ? "bottom two cards" : `bottom ${near} cards`;
+        if (!seated) text = `players are memorizing their ${row}. ${wait}`;
         else if (g.seats[g.me].ready) text = `waiting for the others. ${wait}`;
-        else text = `memorize your bottom two cards. ${wait}`;
+        else text = `memorize your ${row}. ${wait}`;
       } else if (inPlay(g)) {
         text = `${turnName} turn`;
+        if (g.turn_deadline) text += ` (${secondsLeft(g.turn_deadline)}s left)`;
         if (g.away_deadline) text += ` (away, skipping in ${secondsLeft(g.away_deadline)}s)`;
         if (myTurn(g)) text += hint(g);
       } else if (g.status === "scoring") {
@@ -561,11 +570,14 @@
           render();
         }));
       }
-      const shown = shownPeeks();
-      if (shown.length) {
+      // a live peek the server still holds shows the button too, so a peek
+      // whose value was lost to a reload can still be ended (SET-12)
+      const held = (g.reveals || []).some((r) => live(r.until));
+      if (held || shownPeeks().length) {
         c.append(button("hide card", () => {
           // forget the values; a peek can't be fetched again
-          for (const k of shown) secrets.delete(k);
+          for (const k of shownPeeks()) secrets.delete(k);
+          if (held) send({ type: "hide" });
           render();
         }));
       }
@@ -620,6 +632,7 @@
         case "komino": return `${who} called KOMINO`;
         case "forfeit": return `${who} left the game`;
         case "away_skip": return `${who} ${e.player === me ? "were" : "was"} away; turn skipped`;
+        case "timeout_skip": return `${who} ran out of time; turn skipped`;
         case "scored": return `game over: ${(p.winners || []).map((w) => (w === me ? "you" : nameOf(w))).join(", ") || "no winner"}`;
       }
       return e.kind;
@@ -627,6 +640,17 @@
 
     function renderLog(g) {
       $("log").innerHTML = (view.events || []).map((e) => `<li>${esc(describe(e, g))}</li>`).join("");
+    }
+
+    // e.g. "6 cards, 60s turns, 30s away grace, peeks until hidden" (SET-4)
+    function settingsText(s) {
+      if (!s) return "";
+      return [
+        `${s.hand_size} cards`,
+        s.turn_limit_secs ? `${s.turn_limit_secs}s turns` : "no turn limit",
+        `${s.away_grace_secs}s away grace`,
+        s.reveal_secs ? `${s.reveal_secs}s peeks` : "peeks until hidden",
+      ].join(", ");
     }
 
     function renderStats() {
@@ -645,6 +669,7 @@
       // every render (each view and each second) drops expired values
       syncSecrets(g);
       $("code").textContent = view.room.code;
+      $("settings").textContent = settingsText(view.room.settings);
       const amHost = !watching && view.room.host === me;
       const canStart = amHost && (!g || g.status === "scored");
       $("start").hidden = !canStart;
@@ -748,8 +773,16 @@
       });
 
       $("create").addEventListener("click", async () => {
+        // an empty choice is off (turn limit) or until hidden (peek time)
+        const secs = (id) => ($(id).value === "" ? null : Number($(id).value));
+        const settings = {
+          hand_size: Number($("set-hand").value),
+          turn_limit_secs: secs("set-turn"),
+          away_grace_secs: Number($("set-away").value),
+          reveal_secs: secs("set-reveal"),
+        };
         try {
-          const v = await api("POST", "/komino/api/rooms");
+          const v = await api("POST", "/komino/api/rooms", settings);
           go(`/komino/r/${v.room.code}`);
         } catch (err) {
           toast(err.message);

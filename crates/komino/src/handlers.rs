@@ -1,6 +1,7 @@
-use crate::game::Secret;
+use crate::game::{Secret, Settings};
 use crate::models::{self, ApiError, ClientAction, Player, Result, Room};
 use crate::{sealed, State};
+use axum::body::Bytes;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -114,9 +115,22 @@ pub async fn rename(
     Ok((jar, Json(json!({ "id": player.id, "name": name }))).into_response())
 }
 
-pub async fn create_room(AxumState(state): AxumState<State>, jar: CookieJar) -> Result<Response> {
+/// The settings for a new room (SET-2): an empty body takes every default.
+fn parse_settings(body: &[u8]) -> Result<Settings> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Settings::default());
+    }
+    serde_json::from_slice(body).map_err(|e| ApiError::invalid(format!("bad settings: {e}")))
+}
+
+pub async fn create_room(
+    AxumState(state): AxumState<State>,
+    jar: CookieJar,
+    body: Bytes,
+) -> Result<Response> {
+    let settings = parse_settings(&body)?;
     let (player, jar) = identify(&state, jar).await?;
-    let room = models::create_room(&state.db, &player.id).await?;
+    let room = models::create_room(&state.db, &player.id, settings).await?;
     let view = room_view(&state, &room, &player.id).await?;
     Ok((jar, Json(view)).into_response())
 }
@@ -468,6 +482,28 @@ mod tests {
         let db = access_error(&ApiError::from(sqlx::Error::PoolTimedOut));
         assert_eq!(db["type"], "error");
         assert_eq!(db["code"], "error");
+    }
+
+    #[test]
+    fn settings_default_per_field_and_reject_bad_json() {
+        assert_eq!(parse_settings(b"").unwrap(), Settings::default());
+        assert_eq!(parse_settings(b" \n").unwrap(), Settings::default());
+        let s = parse_settings(br#"{"hand_size": 6, "turn_limit_secs": 60}"#).unwrap();
+        assert_eq!(
+            s,
+            Settings {
+                hand_size: 6,
+                turn_limit_secs: Some(60),
+                ..Settings::default()
+            }
+        );
+        let s = parse_settings(br#"{"reveal_secs": null}"#).unwrap();
+        assert_eq!(s.reveal_secs, None);
+        assert_eq!(parse_settings(b"{").unwrap_err().code, "invalid");
+        assert_eq!(
+            parse_settings(br#"{"hand_size": -1}"#).unwrap_err().code,
+            "invalid"
+        );
     }
 
     #[test]

@@ -210,6 +210,7 @@ test("the log describes every event kind", async (t) => {
     [{ kind: "forfeit", player: "p9" }, "someone left the game"],
     [{ kind: "away_skip", player: "p1" }, "bob was away; turn skipped"],
     [{ kind: "away_skip", player: "p0" }, "you were away; turn skipped"],
+    [{ kind: "timeout_skip", player: "p1" }, "bob ran out of time; turn skipped"],
     [{ kind: "scored", payload: { winners: ["p0", "p1"] } }, "game over: you, bob"],
     [{ kind: "scored", payload: {} }, "game over: no winner"],
     [{ kind: "mystery" }, "mystery"],
@@ -260,7 +261,7 @@ test("the observer count shows only when someone is watching", async (t) => {
   assert.equal(page.doc.body.classList.contains("watching"), false);
 });
 
-test("a peeked card stays up 5s or until hidden; others see the slot lit", async (t) => {
+test("a peeked card stays up until its deadline or hidden; others see the slot lit", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
   const reveal = { id: "r1", seat: 1, slot: 2, until: 1_005_000 };
   const g = makeGame({ turn: 1, matchable: false, reveals: [reveal], peeked: [reveal, { seat: 0, slot: 0, until: 1_004_000 }] });
@@ -280,14 +281,18 @@ test("a peeked card stays up 5s or until hidden; others see the slot lit", async
   assert.ok(peeked(0, 0), "someone else's peek lights the slot");
   assert.ok(page.control("hide card"));
 
+  page.live();
   page.control("hide card").click();
   assert.equal(page.label(1, 2), "bob's card 3, face down");
   assert.equal(peeked(1, 2), false);
-  assert.equal(page.control("hide card"), undefined);
+  // the server ends the peek for everyone
+  assert.equal(page.socket.sent.at(-1).type, "hide");
   // hidden means forgotten: no second fetch for the same peek
   page.push(makeView(g));
   assert.equal(page.label(1, 2), "bob's card 3, face down");
   assert.equal(page.reveals().length, 1);
+  page.push(makeView(makeGame({ turn: 1, matchable: false })));
+  assert.equal(page.control("hide card"), undefined);
 
   // a fresh peek flips back on its own at the server deadline
   const again = { id: "r2", seat: 1, slot: 1, until: 1_006_000 };

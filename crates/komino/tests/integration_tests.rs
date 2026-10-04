@@ -1184,11 +1184,131 @@ async fn game_with_a_peek(state: &State, host: &TestServer, code: &str) -> Strin
             seat: 1,
             slot: 1,
             value: 9,
-            until: chrono::Utc::now().timestamp_millis() + 60_000,
+            until: Some(chrono::Utc::now().timestamp_millis() + 60_000),
         }];
     })
     .await;
     id
+}
+
+// ---------------------------------------------------------------------------
+// Settings (SET-*)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_rooms_default_their_settings() {
+    let state = get_state().await;
+    let host = client(&state);
+    let view: Value = host.post("/api/rooms").await.json();
+    assert_eq!(
+        view["room"]["settings"],
+        json!({ "hand_size": 4, "away_grace_secs": 30, "turn_limit_secs": null, "reveal_secs": null })
+    );
+}
+
+#[tokio::test]
+async fn test_room_settings_shape_the_game() {
+    let state = get_state().await;
+    let host = client(&state);
+    let guest = client(&state);
+    let settings =
+        json!({ "hand_size": 9, "away_grace_secs": 60, "turn_limit_secs": 90, "reveal_secs": 10 });
+    let resp = host.post("/api/rooms").json(&settings).await;
+    resp.assert_status_ok();
+    let code = resp.json::<Value>()["room"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    guest
+        .post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    // every later read of the room carries the same settings
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["room"]["settings"], settings);
+
+    let game = act(&host, &code, json!({ "type": "start" }))
+        .await
+        .json::<Value>()["game"]
+        .clone();
+    assert_eq!(game["hand_size"], 9);
+    for seat in game["seats"].as_array().unwrap() {
+        assert_eq!(seat["slots"].as_array().unwrap().len(), 9);
+    }
+    // 2 x 9 + 1 leaves 41 of one deck to draw
+    assert_eq!(game["deck_count"], 41);
+    let key = ClientKey::new();
+    let opened = key.open(
+        &state,
+        &code,
+        reveal(&host, &code, &key, "opening", None).await,
+    );
+    let slots: Vec<u64> = opened["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["slot"].as_u64().unwrap())
+        .collect();
+    assert_eq!(slots, vec![5, 6, 7, 8]);
+
+    for player in [&host, &guest] {
+        act(player, &code, json!({ "type": "ready" }))
+            .await
+            .assert_status_ok();
+    }
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    let deadline = view["game"]["turn_deadline"].as_i64().unwrap();
+    let now = view["server_now"].as_i64().unwrap();
+    assert!(
+        (now + 85_000..=now + 90_000).contains(&deadline),
+        "{deadline} vs {now}"
+    );
+}
+
+#[tokio::test]
+async fn test_out_of_range_settings_create_no_room() {
+    let state = get_state().await;
+    let host = client(&state);
+    for bad in [
+        json!({ "hand_size": 11 }),
+        json!({ "hand_size": 3 }),
+        json!({ "away_grace_secs": 5 }),
+        json!({ "turn_limit_secs": 0 }),
+        json!({ "reveal_secs": 61 }),
+        json!({ "hand_size": "six" }),
+    ] {
+        let resp = host.post("/api/rooms").json(&bad).await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(resp.json::<Value>()["code"], "invalid", "{bad}");
+    }
+    let rooms: i64 = sqlx::query_scalar("SELECT count(*) FROM rooms")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(rooms, 0);
+}
+
+#[tokio::test]
+async fn test_hide_ends_a_peek_for_everyone() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    game_with_a_peek(&state, &host, &code).await;
+    set_game(&state, &code, |g| g.reveals[0].until = None).await;
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(
+        view["game"]["peeked"],
+        json!([{ "seat": 1, "slot": 1, "until": null }])
+    );
+    // the guest holds no peek, so hiding changes nothing for the host's
+    act(&guest, &code, json!({ "type": "hide" }))
+        .await
+        .assert_status_ok();
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["game"]["peeked"].as_array().unwrap().len(), 1);
+    let view: Value = act(&host, &code, json!({ "type": "hide" })).await.json();
+    assert_eq!(view["game"]["reveals"], json!([]));
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["game"]["peeked"], json!([]));
 }
 
 #[tokio::test]

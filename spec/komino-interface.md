@@ -43,7 +43,7 @@ are in the center.
 
 ### UI-7
 Whose turn it is, the current phase (dealing, peeking, playing, final turns, scoring), and the
-remaining grace or ready time are always visible.
+remaining grace, turn (SET-10), or ready time are always visible.
 
 ### UI-8
 A log lists recent public events (draws, discards, swaps, peeks, matches with outcome, calls,
@@ -96,8 +96,8 @@ banner naming the caller, and the final-turn countdown of remaining players.
 
 ### UI-17
 A peeked card (RULE-12, RULE-13, RULE-15) stays face up for the peeking player until they
-dismiss it with a `hide card` button or the server's 5 second peek deadline passes, then flips
-back. Other players and observers see the slot highlighted until the same deadline; the view
+dismiss it with a `hide card` button (SET-12) or the room's peek time passes (SET-11), then
+flips back. Other players and observers see the slot highlighted until the peek ends; the view
 carries the peeked slots and deadlines without their values. Deadlines are read against the
 server clock: each view carries `server_now`, and the client corrects for its own clock's
 offset. The opening peek (RULE-7) is not a reveal: it lasts until `ready`. Peeked, drawn,
