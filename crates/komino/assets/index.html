@@ -63,6 +63,7 @@
         <div id="settings" class="room-settings"></div>
       </div>
       <div class="actions">
+        <button id="sound" class="small" aria-pressed="true">sound on</button>
         <button id="copy" class="small player-only">copy link</button>
         <button id="copy-watch" class="small">copy watch link</button>
         <button id="start" class="primary small" hidden>start game</button>
@@ -71,7 +72,10 @@
       </div>
     </section>
     <div id="status" class="status" aria-live="polite"></div>
-    <section id="table" class="table"></section>
+    <div class="table-wrap">
+      <section id="table" class="table"></section>
+      <div id="caption" class="caption" aria-live="polite" hidden></div>
+    </div>
     <section id="controls" class="controls"></section>
     <div id="confirm" class="confirm-backdrop" hidden>
       <div class="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
@@ -107,6 +111,7 @@
   </main>
 
   <div id="toast" class="toast" role="status" hidden></div>
+  <div id="fx" class="fx-layer" aria-hidden="true"></div>
   <script src="/komino/static/app.js"></script>
 </body>
 </html>

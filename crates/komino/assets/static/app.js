@@ -17,6 +17,11 @@
     look_swap: { color: "#d0393b", label: "look and swap" },
   };
   const MAX_BACKOFF = 10000;
+  // how long a card stays marked after an event, and a flying card's trip
+  const FX_MS = 1400;
+  const FLY_MS = 700;
+  const CAPTION_MS = 3000;
+  const SOUND_KEY = "komino.sound";
 
   const esc = (s) =>
     String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -117,6 +122,70 @@
     return JSON.parse(new TextDecoder().decode(plain));
   }
 
+  // ---------------------------------------------------------------- sound
+  //
+  // Cues are synthesized with Web Audio (UI-27): filtered noise for card
+  // snaps and slides, short tones for everything else.
+
+  function envelope(ctx, at, dur, peak) {
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(peak, at + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    return g;
+  }
+  // a burst of noise swept through a band-pass, from f1 to f2 hz
+  function noise(ctx, at, dur, f1, f2, peak) {
+    const len = Math.ceil(ctx.sampleRate * dur);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const band = ctx.createBiquadFilter();
+    band.type = "bandpass";
+    band.Q.value = 1.2;
+    band.frequency.setValueAtTime(f1, at);
+    band.frequency.exponentialRampToValueAtTime(f2, at + dur);
+    src.connect(band).connect(envelope(ctx, at, dur, peak)).connect(ctx.destination);
+    src.start(at);
+    src.stop(at + dur);
+  }
+  function tone(ctx, at, dur, freq, peak, type, to) {
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, at);
+    if (to) osc.frequency.exponentialRampToValueAtTime(to, at + dur);
+    osc.connect(envelope(ctx, at, dur, peak)).connect(ctx.destination);
+    osc.start(at);
+    osc.stop(at + dur);
+  }
+  const SOUNDS = {
+    flip: (ctx, t) => noise(ctx, t, 0.07, 3200, 1400, 0.5),
+    slide: (ctx, t) => noise(ctx, t, 0.18, 600, 2400, 0.3),
+    swap: (ctx, t) => {
+      noise(ctx, t, 0.18, 600, 2400, 0.3);
+      noise(ctx, t + 0.16, 0.18, 2400, 600, 0.3);
+    },
+    peek: (ctx, t) => {
+      noise(ctx, t, 0.05, 2600, 1800, 0.25);
+      tone(ctx, t + 0.03, 0.18, 880, 0.08, "sine");
+    },
+    match: (ctx, t) => {
+      tone(ctx, t, 0.12, 660, 0.15, "sine");
+      tone(ctx, t + 0.1, 0.22, 990, 0.15, "sine");
+    },
+    miss: (ctx, t) => tone(ctx, t, 0.28, 180, 0.12, "sawtooth", 110),
+    komino: (ctx, t) => [523, 659, 784, 1047].forEach((f, i) => tone(ctx, t + i * 0.09, 0.28, f, 0.14, "triangle")),
+    shuffle: (ctx, t) => {
+      for (let i = 0; i < 6; i++) noise(ctx, t + i * 0.06, 0.06, 3000, 1600, 0.3);
+    },
+    turn: (ctx, t) => {
+      tone(ctx, t, 0.35, 880, 0.12, "sine");
+      tone(ctx, t + 0.12, 0.45, 1320, 0.08, "sine");
+    },
+  };
+
   // turn actions carry the turn token they were chosen against, so a stale
   // or repeated confirm is refused instead of applied to a moved-on turn
   const TURN_ACTIONS = ["draw", "take", "swap", "discard", "use_special", "komino", "peek", "blind_swap", "look_swap", "skip"];
@@ -140,6 +209,19 @@
     let closed = false;
     let skew = 0; // server clock minus this clock, from the last view
     let refCounter = 0;
+    // the newest event played, { game, id }; null until the first view (UI-23)
+    let seenEvent = null;
+    // cards and piles marked by recent events: "s:<seat>:<slot>", "deck",
+    // "discard", "status" -> { cls, at }
+    const fx = new Map();
+    // cards flying between two places, launched once the table is drawn
+    let flights = [];
+    let audio = null;
+    let sound = loadSound();
+    // the last markup written per element, so an unchanged render leaves the
+    // buttons in place and a tap that spans it still lands
+    const painted = new Map();
+    let controlHandlers = [];
 
     const subtle = win.crypto.subtle;
     let serverKey = null; // { kid, key }, fetched once per page (SEAL-4)
@@ -309,6 +391,196 @@
       win.location.href = url;
     }
 
+    // write markup only when it changed, so buttons a tap is landing on are
+    // not swapped out from under it; true when it was written
+    function paint(el, html) {
+      if (painted.get(el.id) === html) return false;
+      painted.set(el.id, html);
+      el.innerHTML = html;
+      return true;
+    }
+
+    // ---------------------------------------------------------------- effects
+
+    function loadSound() {
+      try {
+        return win.localStorage.getItem(SOUND_KEY) !== "off";
+      } catch (_) {
+        return true;
+      }
+    }
+    function setSound(on) {
+      sound = on;
+      try {
+        win.localStorage.setItem(SOUND_KEY, on ? "on" : "off");
+      } catch (_) {
+        // sound still follows the button for this page
+      }
+      renderSound();
+      unlock();
+    }
+    function renderSound() {
+      $("sound").textContent = sound ? "sound on" : "sound off";
+      $("sound").setAttribute("aria-pressed", String(sound));
+    }
+    // browsers only start audio after a gesture, so the context is made on
+    // the first tap or key press (UI-27)
+    function unlock() {
+      const AC = win.AudioContext || win.webkitAudioContext;
+      if (!sound || !AC) return;
+      if (!audio) audio = new AC();
+      if (audio.state === "suspended") audio.resume();
+    }
+    function play(name, delay) {
+      if (sound && audio) SOUNDS[name](audio, audio.currentTime + delay);
+    }
+
+    function mark(key, cls) {
+      fx.set(key, { cls, at: Date.now() });
+    }
+    function fxClass(key) {
+      const f = fx.get(key);
+      return f ? ` ${f.cls}` : "";
+    }
+    function fly(from, to, html) {
+      flights.push({ from, to, html });
+    }
+    // a slot "s:<seat>:<slot>", a hand "h:<seat>", or a pile
+    function spot(key) {
+      const [kind, a, b] = key.split(":");
+      if (kind === "h") return doc.querySelector(`#table .hand[data-hand="${a}"]`);
+      if (kind === "s") return doc.querySelector(`#table [data-seat="${a}"][data-slot="${b}"]`);
+      return $(key);
+    }
+    // each flight is a card-sized ghost over the target, started at the
+    // source's offset and animated home by css
+    function launch() {
+      for (const f of flights) {
+        const a = spot(f.from);
+        const b = spot(f.to);
+        if (!a || !b) continue;
+        const from = a.getBoundingClientRect();
+        const to = b.getBoundingClientRect();
+        const size = f.from.startsWith("h:") ? to : from;
+        const el = doc.createElement("div");
+        el.className = "ghost";
+        el.innerHTML = f.html;
+        el.style.left = `${to.left + (to.width - size.width) / 2}px`;
+        el.style.top = `${to.top + (to.height - size.height) / 2}px`;
+        el.style.width = `${size.width}px`;
+        el.style.height = `${size.height}px`;
+        el.style.setProperty("--dx", `${from.left + from.width / 2 - (to.left + to.width / 2)}px`);
+        el.style.setProperty("--dy", `${from.top + from.height / 2 - (to.top + to.height / 2)}px`);
+        $("fx").append(el);
+        win.setTimeout(() => el.remove(), FLY_MS);
+      }
+      flights = [];
+    }
+
+    // marks, flights, and the sound for one new event (UI-24, UI-27); `at`
+    // staggers the sounds of several events arriving in one view
+    function effect(e, g, at) {
+      const p = e.payload || {};
+      const seat = g.seats.findIndex((s) => s.player === e.player);
+      const slot = (s, n) => `s:${s}:${n}`;
+      switch (e.kind) {
+        case "start":
+          return play("shuffle", at);
+        case "draw":
+          mark("deck", "fx-pulse");
+          fly("deck", `h:${seat}`, back());
+          return play("slide", at);
+        case "take":
+          mark("discard", "fx-pulse");
+          fly("discard", `h:${seat}`, face(p.value));
+          return play("slide", at);
+        case "swap":
+          mark(slot(p.seat, p.slot), "fx-flip");
+          fly(slot(p.seat, p.slot), "discard", face(p.discarded));
+          return play("flip", at);
+        case "discard":
+          mark("discard", "fx-land");
+          fly(`h:${seat}`, "discard", face(p.value));
+          return play("flip", at);
+        case "peek":
+          mark(slot(p.seat, p.slot), "fx-peek");
+          return play("peek", at);
+        case "blind_swap":
+        case "look_swap": {
+          const a = slot(p.seat, p.slot);
+          const b = slot(p.target_seat, p.target_slot);
+          mark(a, "fx-swap");
+          mark(b, "fx-swap");
+          fly(a, b, back());
+          fly(b, a, back());
+          return play("swap", at);
+        }
+        case "match": {
+          const target = slot(p.seat, p.slot);
+          if (!p.ok) {
+            mark(target, "fx-miss");
+            if (p.penalty) {
+              const added = slot(seat, g.seats[seat].slots.length - 1);
+              mark(added, "fx-flip");
+              fly("deck", added, back());
+            }
+            return play("miss", at);
+          }
+          mark("discard", "fx-land");
+          fly(target, "discard", face(p.value));
+          if (typeof p.give_slot === "number") {
+            mark(target, "fx-flip");
+            fly(slot(seat, p.give_slot), target, back());
+          }
+          return play("match", at);
+        }
+        case "komino":
+          mark("status", "fx-flash");
+          return play("komino", at);
+        case "scored":
+          g.seats.forEach((s, i) => s.slots.forEach((c, n) => c && mark(slot(i, n), "fx-flip")));
+          return play("shuffle", at);
+      }
+    }
+
+    // whether another player's event touched one of your cards (UI-26)
+    function aboutMe(e, g) {
+      const p = e.payload || {};
+      if (g.me === null) return false;
+      if (e.kind === "blind_swap" || e.kind === "look_swap") return p.target_seat === g.me;
+      return (e.kind === "peek" || e.kind === "match") && p.seat === g.me;
+    }
+
+    function caption(lines) {
+      const c = $("caption");
+      c.innerHTML = lines.map((l) => `<div${l.mine ? ` class="about-you"` : ""}>${esc(l.text)}</div>`).join("");
+      c.hidden = false;
+      win.clearTimeout(caption.timer);
+      caption.timer = win.setTimeout(() => (c.hidden = true), CAPTION_MS);
+    }
+
+    // effects for the events newer than the last one seen in this game; the
+    // first view only records where it starts (UI-23)
+    function playEvents(before, g) {
+      if (!g) return;
+      const events = view.events || [];
+      const last = seenEvent;
+      seenEvent = { game: g.id, id: events.length ? events[0].id : 0 };
+      let at = 0;
+      if (last) {
+        const fresh = events.filter((e) => last.game !== g.id || e.id > last.id).slice(0, 6).reverse();
+        const lines = [];
+        for (const e of fresh) {
+          effect(e, g, at);
+          at += 0.25;
+          if (e.player !== me && e.kind !== "ready") lines.push({ text: describe(e, g), mine: aboutMe(e, g) });
+        }
+        if (lines.length) caption(lines);
+      }
+      // a chime when your turn starts
+      if (before && before.id === g.id && myTurn(g) && !(inPlay(before) && before.turn === g.turn)) play("turn", at);
+    }
+
     // ---------------------------------------------------------------- selection
 
     function setSel(next, text) {
@@ -421,16 +693,28 @@
       return Boolean(p) && live(p.until);
     }
 
+    // someone else is looking at this card right now (UI-25)
+    function othersPeek(g, seat, slot) {
+      const at = (r) => r.seat === seat && r.slot === slot;
+      if ((g.reveals || []).some(at)) return false;
+      const p = (g.peeked || []).find(at);
+      return Boolean(p) && live(p.until);
+    }
+
     function slotButton(g, seat, slot) {
       const s = g.seats[seat].slots[slot];
-      if (s === null) return `<span class="card empty" aria-label="empty slot"></span>`;
+      const fxc = fxClass(`s:${seat}:${slot}`);
+      if (s === null) return `<span class="card empty${fxc}" data-seat="${seat}" data-slot="${slot}" aria-label="empty slot"></span>`;
       const v = visibleValue(g, seat, slot);
       const chosen = isChosen(g, seat, slot);
       const peeked = isPeeked(g, seat, slot, v);
-      const label = v === null ? `${seatOwner(g, seat)} card ${slot + 1}, face down` : `${seatOwner(g, seat)} card ${slot + 1}: ${cardLabel(v)}`;
+      const watched = othersPeek(g, seat, slot);
+      let label = v === null ? `${seatOwner(g, seat)} card ${slot + 1}, face down` : `${seatOwner(g, seat)} card ${slot + 1}: ${cardLabel(v)}`;
+      if (watched) label += ", being peeked at";
       const lock = g.seats[seat].locked ? `<span class="lock">locked</span>` : "";
-      return `<button class="card${chosen ? " sel" : ""}${peeked ? " peeked" : ""}" data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">` +
-        (v === null ? back() : face(v)) + lock + `</button>`;
+      const badge = watched ? `<span class="eye-badge"><svg viewBox="0 0 34 16" aria-hidden="true">${eye(17, 8, "#2f6fd6")}</svg></span>` : "";
+      return `<button class="card${chosen ? " sel" : ""}${peeked ? " peeked" : ""}${fxc}" data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">` +
+        (v === null ? back() : face(v)) + lock + badge + `</button>`;
     }
 
     function hand(g, seat, mine) {
@@ -442,15 +726,17 @@
       if (s.score !== null && s.score !== undefined) tag = ` <span class="score${s.won ? " won" : ""}">${s.score}${s.won ? " won" : ""}</span>`;
       const slots = s.slots.map((_, i) => slotButton(g, seat, i)).join("");
       const cols = columns(g);
-      return `<div class="hand${mine ? " mine" : ""}${g.turn === seat && inPlay(g) ? " turn" : ""}">` +
+      return `<div class="hand${mine ? " mine" : ""}${g.turn === seat && inPlay(g) ? " turn" : ""}" data-hand="${seat}">` +
         `<div class="who"><span class="dot${p.present ? " on" : ""}"></span>${esc(mine ? "you" : p.name || "?")}${tag}</div>` +
         `<div class="slots${cols > 3 ? " wide" : ""}" style="--cols: ${cols}">${slots}</div></div>`;
     }
 
+    // the handlers read the current view, since an unchanged table keeps
+    // the buttons (and their handlers) from an earlier render
     function renderTable(g) {
       const t = $("table");
       if (!g) {
-        t.innerHTML = `<p>No game yet. The host starts one once at least two players are here.</p>`;
+        paint(t, `<p>No game yet. The host starts one once at least two players are here.</p>`);
         return;
       }
       const others = g.seats.map((_, i) => i).filter((i) => i !== g.me).map((i) => hand(g, i, false)).join("");
@@ -458,21 +744,31 @@
       const card = g.stage.kind === "drawn" && myTurn(g) ? drawnCard(g) : null;
       const drawn = card === null ? ""
         : `<div class="pile"><span class="card" id="drawn">${face(card)}</span><span>drawn</span></div>`;
-      t.innerHTML =
+      const fresh = paint(t,
         `<div class="opponents">${others}</div>` +
         `<div class="center">` +
-        `<div class="pile"><button class="card" id="deck" aria-label="draw pile, ${g.deck_count} cards">${back()}</button><span>${g.deck_count} left</span></div>` +
-        `<div class="pile"><button class="card" id="discard" aria-label="discard pile${top === null ? ", empty" : ", " + cardLabel(top)}">${top === null ? "" : face(top)}</button><span>${g.matchable ? "matchable" : "discard"}</span></div>` +
+        `<div class="pile"><button class="card${fxClass("deck")}" id="deck" aria-label="draw pile, ${g.deck_count} cards">${back()}</button><span>${g.deck_count} left</span></div>` +
+        `<div class="pile"><button class="card${fxClass("discard")}" id="discard" aria-label="discard pile${top === null ? ", empty" : ", " + cardLabel(top)}">${top === null ? "" : face(top)}</button><span>${g.matchable ? "matchable" : "discard"}</span></div>` +
         drawn + `</div>` +
-        (g.me !== null ? hand(g, g.me, true) : "");
+        (g.me !== null ? hand(g, g.me, true) : ""));
+      if (!fresh) return;
       t.querySelectorAll("button[data-seat]").forEach((b) =>
         b.addEventListener("click", () => onSlot(Number(b.dataset.seat), Number(b.dataset.slot))));
       $("deck").addEventListener("click", () => {
+        const g = game();
         if (myTurn(g) && g.stage.kind === "start") confirmAction({ type: "draw" }, "draw from the deck?", turnKey(g));
       });
       $("discard").addEventListener("click", () => {
-        if (myTurn(g) && g.stage.kind === "start" && top !== null) confirmAction({ type: "take" }, `take the ${top} from the discard pile?`, turnKey(g));
+        const g = game();
+        if (myTurn(g) && g.stage.kind === "start" && g.discard_top !== null) {
+          confirmAction({ type: "take" }, `take the ${g.discard_top} from the discard pile?`, turnKey(g));
+        }
       });
+      // a mark redrawn mid animation picks up where it was (UI-24)
+      for (const [key, f] of fx) {
+        const el = key === "status" ? null : spot(key);
+        if (el) el.style.animationDelay = `-${Date.now() - f.at}ms`;
+      }
     }
 
     // deadlines are server times, read against the corrected clock
@@ -508,6 +804,7 @@
         ? `<span class="komino">KOMINO called by ${esc(g.caller === g.me ? "you" : nameOf(g.seats[g.caller].player))}, ${g.final_remaining.length} turn(s) left. </span>` : "";
       if (g.calling) banner = `<span class="komino">you called KOMINO; it takes effect when your turn ends. </span>`;
       el.innerHTML = banner + esc(text);
+      el.classList.toggle("fx-flash", fx.has("status"));
     }
 
     function hint(g) {
@@ -539,55 +836,67 @@
       return b;
     }
 
+    // the buttons are rebuilt only when their labels or states change, and
+    // each press runs the handler from the latest render
     function renderControls(g) {
+      const specs = [];
+      const add = (label, onClick, opts) => specs.push({ label, onClick, opts: opts || {} });
+      if (!watching && g && g.me !== null) controlSpecs(g, add);
+      controlHandlers = specs.map((s) => s.onClick);
+      const sig = JSON.stringify(specs.map((s) => [s.label, s.opts]));
+      if (painted.get("controls") === sig) return;
+      painted.set("controls", sig);
       const c = $("controls");
       c.innerHTML = "";
-      if (watching || !g || g.me === null) return;
+      specs.forEach((s, i) => c.append(button(s.label, () => controlHandlers[i](), s.opts)));
+    }
+
+    function controlSpecs(g, add) {
       const seat = g.seats[g.me];
       const k = turnKey(g);
       if (g.status === "peeking" && !seat.ready) {
-        c.append(button("ready", () => confirmAction({ type: "ready" }, "done memorizing your cards?", k), { cls: "primary" }));
+        add("ready", () => confirmAction({ type: "ready" }, "done memorizing your cards?", k), { cls: "primary" });
       }
       if (myTurn(g)) {
         const st = g.stage;
         if (st.kind === "start") {
-          c.append(button("draw", () => confirmAction({ type: "draw" }, "draw from the deck?", k)));
-          if (g.discard_top !== null) c.append(button(`take ${g.discard_top}`, () => confirmAction({ type: "take" }, `take the ${g.discard_top} from the discard pile?`, k)));
+          add("draw", () => confirmAction({ type: "draw" }, "draw from the deck?", k));
+          if (g.discard_top !== null) add(`take ${g.discard_top}`, () => confirmAction({ type: "take" }, `take the ${g.discard_top} from the discard pile?`, k));
         }
         if (st.kind === "drawn") {
           const card = drawnCard(g);
           const move = card !== null && MOVES[card] ? `? you can match first, then use ${MOVE_INFO[MOVES[card]].label}` : "?";
-          c.append(button(card === null ? "discard" : `discard ${card}`,
-            () => confirmAction({ type: "discard" }, `discard ${heldName(g)}${move}`, k)));
+          add(card === null ? "discard" : `discard ${card}`,
+            () => confirmAction({ type: "discard" }, `discard ${heldName(g)}${move}`, k));
         }
         if (st.kind === "earned") {
           const label = MOVE_INFO[st.mv].label;
-          c.append(button(`use ${label}`, () => confirmAction({ type: "use_special" }, `use ${label} now?`, k), { cls: "primary" }));
-          c.append(button("end turn", () => confirmAction({ type: "skip" }, `end your turn without using ${label}?`, k)));
+          add(`use ${label}`, () => confirmAction({ type: "use_special" }, `use ${label} now?`, k), { cls: "primary" });
+          add("end turn", () => confirmAction({ type: "skip" }, `end your turn without using ${label}?`, k));
         }
-        if (st.kind === "special") c.append(button("skip move", () => confirmAction({ type: "skip" }, "skip the special move?", k)));
-        if (st.kind === "looked") c.append(button("keep my cards", () => confirmAction({ type: "look_swap", slot: null }, "keep your cards and end the turn?", k)));
+        if (st.kind === "special") add("skip move", () => confirmAction({ type: "skip" }, "skip the special move?", k));
+        if (st.kind === "looked") add("keep my cards", () => confirmAction({ type: "look_swap", slot: null }, "keep your cards and end the turn?", k));
       }
       // while a move waits to be used, taps on cards already match
       if (canMatch(g) && myTurn(g) && !["start", "earned"].includes(g.stage.kind)) {
-        c.append(button(matchMode ? "cancel match" : `match ${g.discard_top}`, () => {
+        add(matchMode ? "cancel match" : `match ${g.discard_top}`, () => {
           matchMode = !matchMode;
           sel = null;
           hideConfirm();
           if (matchMode) toast(`tap a card you think is a ${g.discard_top}`);
           render();
-        }));
+        });
       }
       // a live peek the server still holds shows the button too, so a peek
       // whose value was lost to a reload can still be ended (SET-12)
       const held = (g.reveals || []).some((r) => live(r.until));
       if (held || shownPeeks().length) {
-        c.append(button("hide card", () => {
+        add("hide card", () => {
           // forget the values; a peek can't be fetched again
           for (const k of shownPeeks()) secrets.delete(k);
           if (held) send({ type: "hide" });
           render();
-        }));
+        });
       }
       // komino can be called any time in your own turn; mid turn it lands
       // when the turn ends (RULE-22)
@@ -595,14 +904,17 @@
         : g.calling ? "called; it takes effect when your turn ends" : "everyone must take a turn first";
       const ask = g.stage.kind === "start" ? "call KOMINO? everyone else gets one more turn."
         : "call KOMINO? it takes effect when this turn ends, then everyone else gets one more turn.";
-      c.append(button(g.calling ? "KOMINO called" : "KOMINO", () => confirmAction({ type: "komino" }, ask, k),
-        { cls: "komino-btn", disabled: !g.can_call, title: g.can_call ? "end the round" : why }));
+      add(g.calling ? "KOMINO called" : "KOMINO", () => confirmAction({ type: "komino" }, ask, k),
+        { cls: "komino-btn", disabled: !g.can_call, title: g.can_call ? "end the round" : why });
     }
 
     function renderMembers() {
       const ul = $("members");
       const host = view.room.host;
       const amHost = !watching && host === me;
+      const sig = JSON.stringify([host, amHost, view.members]);
+      if (painted.get("members") === sig) return;
+      painted.set("members", sig);
       ul.innerHTML = "";
       for (const m of view.members) {
         if (m.left && !m.removed) continue;
@@ -651,7 +963,7 @@
     }
 
     function renderLog(g) {
-      $("log").innerHTML = (view.events || []).map((e) => `<li>${esc(describe(e, g))}</li>`).join("");
+      paint($("log"), (view.events || []).map((e) => `<li>${esc(describe(e, g))}</li>`).join(""));
     }
 
     // e.g. "6 cards, 60s turns, 30s away grace, peeks until hidden" (SET-4)
@@ -669,10 +981,10 @@
       const cols = [["games_played", "games"], ["wins", "wins"], ["komino_calls", "calls"], ["komino_wins", "call wins"],
         ["matches", "matches"], ["failed_matches", "missed"], ["special_moves", "specials"], ["cards_interacted", "cards"], ["forfeits", "forfeits"]];
       const rows = view.stats || [];
-      if (!rows.length) return ($("stats").innerHTML = "<tr><td>no games yet</td></tr>");
+      if (!rows.length) return paint($("stats"), "<tr><td>no games yet</td></tr>");
       const gone = new Set(view.members.filter((m) => m.left || m.removed).map((m) => m.id));
-      $("stats").innerHTML = `<tr><th>player</th>${cols.map((c) => `<th>${c[1]}</th>`).join("")}</tr>` +
-        rows.map((r) => `<tr><td>${esc(r.name)}${gone.has(r.player) ? " (gone)" : ""}</td>${cols.map((c) => `<td>${r[c[0]]}</td>`).join("")}</tr>`).join("");
+      paint($("stats"), `<tr><th>player</th>${cols.map((c) => `<th>${c[1]}</th>`).join("")}</tr>` +
+        rows.map((r) => `<tr><td>${esc(r.name)}${gone.has(r.player) ? " (gone)" : ""}</td>${cols.map((c) => `<td>${r[c[0]]}</td>`).join("")}</tr>`).join(""));
     }
 
     function render() {
@@ -680,6 +992,7 @@
       const g = game();
       // every render (each view and each second) drops expired values
       syncSecrets(g);
+      for (const [k, f] of fx) if (Date.now() - f.at >= FX_MS) fx.delete(k);
       $("code").textContent = view.room.code;
       $("settings").textContent = settingsText(view.room.settings);
       const amHost = !watching && view.room.host === me;
@@ -712,7 +1025,9 @@
           toast(before && before.discard_seq !== g.discard_seq ? "too late: the discard changed" : "that move is no longer available");
         }
       }
+      playEvents(before, g);
       render();
+      launch();
     }
 
     // ---------------------------------------------------------------- socket
@@ -774,6 +1089,10 @@
       doc.addEventListener("keydown", (e) => {
         if (e.key === "Escape") clearSel();
       });
+      doc.addEventListener("pointerdown", unlock, true);
+      doc.addEventListener("keydown", unlock, true);
+      renderSound();
+      $("sound").addEventListener("click", () => setSound(!sound));
 
       $("name").addEventListener("change", async (e) => {
         try {

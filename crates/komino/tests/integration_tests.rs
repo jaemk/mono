@@ -385,6 +385,14 @@ async fn test_turn_flow_over_http_and_stats() {
         .collect();
     assert!(kinds.contains(&"swap"));
     assert!(kinds.contains(&"draw"));
+    // events come newest first, with ids that only grow
+    let ids: Vec<i64> = view["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_i64().unwrap())
+        .collect();
+    assert!(ids.windows(2).all(|w| w[0] > w[1]));
 }
 
 #[tokio::test]

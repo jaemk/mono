@@ -114,6 +114,59 @@ and opening values are fetched sealed (SEAL-6) and dropped once hidden (SEAL-9).
 At scoring, all hands flip face up, each player's total is shown, and the winner(s) are
 highlighted. The host sees a `next game` button.
 
+## Action effects
+
+### UI-23
+Every view's events carry an `id` that only grows. A client plays effects only for events
+newer than the last id it has seen in the same game, at most the six newest. The first view
+after a page load plays nothing, and a repeated view replays nothing. The first view of a new
+game plays its events. Effects are cosmetic: the table always renders from the view alone.
+
+### UI-24
+Each new event marks the cards and piles it touched for a short animation, for every player
+and observer:
+
+| Event | Effect |
+|-------|--------|
+| draw | the deck pulses and a face-down card flies to the player's hand |
+| take | the discard pulses and its card flies to the player's hand |
+| swap | the slot flips in and the replaced card flies face up to the discard |
+| discard | the card flies face up from the player's hand to the discard |
+| peek | the peeked card lifts and tilts, as if being looked at |
+| blind swap, look and swap | both cards pulse and fly past each other between the two slots |
+| match | a hit flies the card to the discard (and the given card to the emptied slot); a miss shakes the card, and a penalty card flies from the deck |
+| komino | the status banner flashes |
+| scored | every card flips face up |
+
+Marks survive the once-a-second re-render without restarting. With `prefers-reduced-motion`,
+cards are outlined instead of moved and no cards fly.
+
+### UI-25
+While another player peeks at a card, the slot shows an eye badge for everyone but the
+peeker, alongside the peek highlight (UI-17).
+
+### UI-26
+Another player's action is also shown as a short caption over the table, worded as in the
+log (UI-8). A caption about one of your own cards is emphasized. Your own actions get the
+animations but no caption.
+
+### UI-27
+Each effect has a sound cue synthesized with Web Audio (no audio files): a card snap for
+flips and discards, a slide for draws, takes and swaps, a soft blip for peeks, a rising pair
+for a match hit, a low buzz for a miss, a fanfare for komino, a shuffle for a new game, and
+a chime when your turn starts. Browsers only allow audio after a gesture, so the audio
+context is made on the first tap or key press.
+
+### UI-28
+A `sound on` / `sound off` button in the room bar mutes the cues. The choice is kept in
+browser storage and defaults to on; storage that is missing or throws leaves sound on.
+
+### UI-29
+The page re-renders on every view and once a second for countdowns. A render rewrites the
+table, controls, players, log, and stats only when their markup changed, so a button stays
+the same element across renders and a tap that spans one still registers. Handlers read the
+current view when pressed, not the view they were built from.
+
 ## Testing
 
 ### UI-21

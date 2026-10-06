@@ -108,6 +108,69 @@ export function makeView(game = makeGame(), extra = {}) {
   };
 }
 
+/** An event as views carry them, newest first. */
+export function ev(id, kind, player = null, payload = {}) {
+  return { id, kind, player, payload };
+}
+
+/**
+ * A Web Audio stand-in. `played` lists every sound source started, as
+ * `{ kind: "noise" | <oscillator type>, at, f }`.
+ */
+export function fakeAudio() {
+  const contexts = [];
+  const param = () => {
+    const p = { value: 0, setValueAtTime: (v) => (p.value = v), exponentialRampToValueAtTime: (v) => (p.to = v) };
+    return p;
+  };
+  class Ctx {
+    constructor() {
+      contexts.push(this);
+      this.state = "suspended";
+      this.sampleRate = 8000;
+      this.currentTime = 10;
+      this.destination = {};
+      this.played = [];
+      this.resumes = 0;
+    }
+    resume() {
+      this.resumes++;
+      this.state = "running";
+      return Promise.resolve();
+    }
+    node(fields, start) {
+      return Object.assign({ connect: (next) => next, start, stop() {} }, fields);
+    }
+    createBuffer(_channels, len) {
+      const data = new Float32Array(len);
+      return { getChannelData: () => data };
+    }
+    createBufferSource() {
+      return this.node({}, (at) => this.played.push({ kind: "noise", at }));
+    }
+    createBiquadFilter() {
+      return this.node({ Q: param(), frequency: param() });
+    }
+    createGain() {
+      return this.node({ gain: param() });
+    }
+    createOscillator() {
+      const osc = this.node({ frequency: param() }, (at) => this.played.push({ kind: osc.type, at, f: osc.frequency.value }));
+      return osc;
+    }
+  }
+  return {
+    Ctx,
+    contexts,
+    get played() {
+      return contexts.flatMap((c) => c.played);
+    },
+    clear() {
+      for (const c of contexts) c.played = [];
+    },
+  };
+}
+
 /** Let pending promise callbacks run. */
 export async function flush() {
   for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
@@ -135,6 +198,10 @@ export async function boot({
   confirmAnswer = true,
   clipboardFails = false,
   subtle = webcrypto.subtle,
+  // a Web Audio constructor, e.g. FakeAudio below; none means no audio
+  AudioContext,
+  // replaces the page's localStorage, e.g. one that throws
+  storage,
 } = {}) {
   const dom = new JSDOM(html, { url: "https://kominick.com" + path });
   const w = dom.window;
@@ -215,6 +282,8 @@ export async function boot({
       return t;
     },
     clearInterval: (t) => globalThis.clearInterval(t),
+    AudioContext,
+    localStorage: storage === undefined ? w.localStorage : storage,
     confirm: (msg) => {
       confirms.push(msg);
       return confirmAnswer;

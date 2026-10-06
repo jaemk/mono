@@ -166,3 +166,64 @@ button.card:disabled { opacity: 1; cursor: default; }
 }
 .score { font-weight: 700; }
 .won { color: var(--select); }
+
+/* action effects (UI-24 - UI-26) */
+.table-wrap { position: relative; }
+.caption {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 5;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  width: max-content; max-width: calc(100% - 24px); pointer-events: none;
+}
+.caption div {
+  background: rgba(0,0,0,.78); color: #fff; padding: 6px 14px; border-radius: 999px;
+  font-size: 14px; font-weight: 600; text-align: center; animation: caption-in .2s ease-out;
+}
+.caption div.about-you { background: var(--accent); box-shadow: 0 0 0 3px var(--select); }
+@keyframes caption-in { from { opacity: 0; transform: translateY(-8px); } }
+
+.fx-layer { position: fixed; inset: 0; pointer-events: none; z-index: 8; }
+.ghost {
+  position: fixed; animation: fly .7s cubic-bezier(.3,.7,.3,1) both;
+  filter: drop-shadow(0 8px 10px rgba(0,0,0,.45));
+}
+.ghost svg { width: 100%; height: 100%; display: block; }
+@keyframes fly {
+  from { transform: translate(var(--dx), var(--dy)); }
+  45% { transform: translate(calc(var(--dx) * .5), calc(var(--dy) * .5 - 28px)) scale(1.15); }
+  85% { transform: none; opacity: 1; }
+  to { transform: none; opacity: 0; }
+}
+
+.card.fx-flip { animation: fx-flip .5s ease-out; }
+@keyframes fx-flip { from { transform: perspective(400px) rotateY(90deg); } }
+.card.fx-peek { animation: fx-peek 1.3s ease-in-out; transform-origin: 50% 100%; }
+@keyframes fx-peek {
+  25%, 70% { transform: perspective(300px) translateY(-10px) rotateX(35deg); box-shadow: 0 0 0 4px #8fd3ff; }
+}
+.card.fx-swap { animation: fx-swap 1s ease-in-out; }
+@keyframes fx-swap {
+  30% { transform: scale(1.18); box-shadow: 0 0 0 4px #c9a4ff; }
+  60% { transform: scale(.94); box-shadow: 0 0 0 4px #c9a4ff; }
+}
+.card.fx-pulse, .card.fx-land { animation: fx-pulse .6s ease-out; }
+@keyframes fx-pulse { 40% { transform: scale(1.12); box-shadow: 0 0 0 4px var(--select); } }
+.card.fx-miss { animation: fx-miss .5s; }
+@keyframes fx-miss {
+  20%, 60% { transform: translateX(-6px); box-shadow: 0 0 0 4px var(--accent); }
+  40%, 80% { transform: translateX(6px); box-shadow: 0 0 0 4px var(--accent); }
+}
+.status.fx-flash { animation: fx-flash 1.4s ease-out; border-radius: 8px; }
+@keyframes fx-flash { 0%, 40% { background: var(--accent); color: #fff; } }
+.eye-badge {
+  position: absolute; bottom: -7px; left: 50%; transform: translateX(-50%);
+  width: 30px; height: 16px; background: #fff; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.4); animation: blink 1.6s ease-in-out infinite;
+}
+.eye-badge svg { width: 100%; height: 100%; display: block; }
+@keyframes blink { 50% { transform: translateX(-50%) scale(1.15); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .card[class*="fx-"], .status.fx-flash { animation: none; outline: 3px solid var(--select); outline-offset: 2px; }
+  .ghost { display: none; }
+  .caption div, .eye-badge { animation: none; }
+}

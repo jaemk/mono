@@ -63,7 +63,8 @@ decrypt once with it; if that fails too, it shows an error.
 ### SEAL-9
 The client keeps a decrypted value only while it is shown: a peek until its deadline or `hide
 card`, the drawn card until the turn moves on, the opening cards until play starts or `ready`.
-Then the value is deleted. Nothing is written to cookies or browser storage.
+Then the value is deleted. No card value or key is written to cookies or browser storage; the
+only stored item is the sound preference (UI-28).
 
 ### SEAL-10
 Sealing protects what is logged, not what is on screen. While a value is shown, or while the

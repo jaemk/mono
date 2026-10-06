@@ -327,6 +327,8 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   const watcher = new Client();
   const page = await expectStatus(await host.get("/komino"), 200, "komino page");
   assert.match(page, /<html/i);
+  // the deployed page carries the sound toggle and the effect layers
+  for (const id of ["sound", "caption", "fx"]) assert.match(page, new RegExp(`id="${id}"`), `komino page #${id}`);
   assert.ok(host.cookies.has("komino_player"), "the page should issue a player cookie");
   await expectStatus(await guest.get("/komino"), 200, "komino page");
   await expectStatus(await host.get("/komino/static/app.js"), 200, "komino app.js");
@@ -524,6 +526,10 @@ test("komino holds a discarded special move for matches and takes komino mid tur
   assert.equal(view.game.status, "final");
   assert.equal(seated[view.game.seats[view.game.caller].player], caller);
   assert.ok(view.events.some((e) => e.kind === "komino"));
+  // clients play effects for events newer than the last id they saw
+  const ids = view.events.map((e) => e.id);
+  assert.ok(ids.every((id) => Number.isInteger(id)), "every event carries an id");
+  assert.ok(ids.every((id, i) => i === 0 || ids[i - 1] > id), "events come newest first by id");
 });
 
 test("komino rejects unknown rooms", async () => {

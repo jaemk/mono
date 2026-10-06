@@ -910,7 +910,7 @@ pub async fn view(db: &DbPool, room: &Room, viewer: Option<&str>, base_url: &str
             view["id"] = json!(game_id);
             view["version"] = json!(row.get::<i64, _>("version"));
             let events: Vec<Value> = sqlx::query(
-                "SELECT player_id, kind, payload FROM game_events
+                "SELECT id, player_id, kind, payload FROM game_events
                  WHERE game_id = $1 ORDER BY id DESC LIMIT 40",
             )
             .bind(game_id)
@@ -918,7 +918,9 @@ pub async fn view(db: &DbPool, room: &Room, viewer: Option<&str>, base_url: &str
             .await?
             .iter()
             .map(|r| {
+                // ids only grow, so a client can tell which events are new
                 json!({
+                    "id": r.get::<i64, _>("id"),
                     "player": r.get::<Option<String>, _>("player_id"),
                     "kind": r.get::<String, _>("kind"),
                     "payload": r.get::<Value, _>("payload"),
