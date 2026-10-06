@@ -2,7 +2,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use sqlx::postgres::PgListener;
+use sqlx::postgres::{PgConnection, PgListener};
+use sqlx::Connection;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::services::ServeDir;
@@ -37,12 +38,17 @@ where
         .nest_service("/static", ServeDir::new("crates/komino/assets/static"))
 }
 
+/// Pool size: every socket's view load, action, and heartbeat draws from it.
+/// The listener and the sweeper's leader lock hold their own connections.
+const POOL_SIZE: u32 = 20;
+
 /// Relay room notifications from postgres to this machine's sockets, so a
-/// change made through any machine reaches every connected player.
+/// change made through any machine reaches every connected player. Listens
+/// on its own connection, outside the pool.
 pub fn init_listener(state: State) {
     tokio::spawn(async move {
         loop {
-            match PgListener::connect_with(&state.db).await {
+            match PgListener::connect(&state.config.database_url).await {
                 Ok(mut listener) => {
                     if let Err(e) = listener.listen(models::NOTIFY_CHANNEL).await {
                         error!("komino listen failed: {e}");
@@ -72,59 +78,69 @@ pub fn init_listener(state: State) {
 /// Advisory-lock id for the timer sweeper: "komino_t" as big-endian bytes.
 const KOMINO_TICK_LOCK_ID: i64 = 0x6b6f6d696e6f5f74_u64 as i64;
 
-/// Fire ready, away, and scoring deadlines, and drop rooms idle for 30 days.
-/// One machine at a time holds the lock; each game is still re-checked under
-/// its row lock so a deadline applies once.
+/// How often a machine that isn't the sweeper tries to become it.
+const LEADER_RETRY: Duration = Duration::from_secs(5);
+/// How often the sweeper checks that its lock connection is still alive.
+const LEADER_CHECK_TICKS: u64 = 15;
+
+/// Fire ready, away, scoring, and match window deadlines, and drop rooms
+/// idle for 30 days. One machine at a time sweeps: it takes the advisory
+/// lock once on a dedicated connection and keeps it while that connection
+/// lives. Each due game is still re-checked under its row lock, so a deadline
+/// applies once even if two machines briefly both sweep.
 pub fn init_sweeper(state: State) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        let mut ticks: u64 = 0;
         loop {
-            interval.tick().await;
-            ticks += 1;
-            let mut conn = match state.db.acquire().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("komino sweeper connection error: {e}");
-                    continue;
-                }
-            };
-            let locked: bool = match sqlx::query_scalar("select pg_try_advisory_lock($1)")
-                .bind(KOMINO_TICK_LOCK_ID)
-                .fetch_one(&mut *conn)
-                .await
-            {
-                Ok(locked) => locked,
-                Err(e) => {
-                    error!("komino sweeper lock error: {e}");
-                    continue;
-                }
-            };
-            if !locked {
-                debug!("komino sweeper lock held elsewhere, skipping tick");
-                continue;
+            if let Err(e) = lead(&state).await {
+                error!("komino sweeper error: {e}");
             }
-            if let Err(e) = models::tick_all(&state.db).await {
-                error!("komino tick error: {e:?}");
-            }
-            if ticks % 3600 == 1 {
-                match models::delete_stale_rooms(&state.db).await {
-                    Ok(0) => {}
-                    Ok(n) => info!("deleted {n} idle komino rooms"),
-                    Err(e) => error!("komino room cleanup error: {e:?}"),
-                }
-            }
-            let _ = sqlx::query("select pg_advisory_unlock($1)")
-                .bind(KOMINO_TICK_LOCK_ID)
-                .execute(&mut *conn)
-                .await;
+            tokio::time::sleep(LEADER_RETRY).await;
         }
     });
 }
 
+/// Wait to hold the sweeper lock, then sweep until the lock connection
+/// fails.
+async fn lead(state: &State) -> Result<(), sqlx::Error> {
+    let opts = common::db::connect_options(&state.config.database_url)?;
+    let mut conn = PgConnection::connect_with(&opts).await?;
+    loop {
+        let locked: bool = sqlx::query_scalar("select pg_try_advisory_lock($1)")
+            .bind(KOMINO_TICK_LOCK_ID)
+            .fetch_one(&mut conn)
+            .await?;
+        if locked {
+            break;
+        }
+        debug!("komino sweeper lock held elsewhere");
+        tokio::time::sleep(LEADER_RETRY).await;
+    }
+    info!("komino sweeper lock taken");
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut ticks: u64 = 0;
+    loop {
+        interval.tick().await;
+        ticks += 1;
+        if ticks.is_multiple_of(LEADER_CHECK_TICKS) {
+            // the lock dies with its connection; stop sweeping if it did
+            sqlx::query("select 1").execute(&mut conn).await?;
+        }
+        if let Err(e) = models::tick_all(&state.db).await {
+            error!("komino tick error: {e:?}");
+        }
+        if ticks % 3600 == 1 {
+            match models::delete_stale_rooms(&state.db).await {
+                Ok(0) => {}
+                Ok(n) => info!("deleted {n} idle komino rooms"),
+                Err(e) => error!("komino room cleanup error: {e:?}"),
+            }
+        }
+    }
+}
+
 pub async fn init(config: crate::Config) -> anyhow::Result<State> {
     let server_key = crate::sealed::ServerKey::from_hex(&config.ecdh_key)?;
-    let db = common::db::init_pool(&config.database_url).await?;
+    let db = common::db::init_pool_sized(&config.database_url, POOL_SIZE).await?;
     info!(" ** Established komino database connection pool **");
     let state = Arc::new(crate::Resources {
         db,

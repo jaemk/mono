@@ -567,6 +567,84 @@ async fn test_tick_settles_an_abandoned_claim() {
     assert_eq!(view["events"][0]["payload"]["ok"], true);
 }
 
+/// The game row's version, which every save bumps.
+async fn game_version(state: &State, code: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT g.version FROM games g JOIN rooms r ON r.id = g.room_id
+         WHERE r.code = $1 ORDER BY g.id DESC LIMIT 1",
+    )
+    .bind(code)
+    .fetch_one(&state.db)
+    .await
+    .unwrap()
+}
+
+/// The sweep reads every unfinished game but locks and saves only those with
+/// something due (RT-14).
+#[tokio::test]
+async fn test_tick_saves_only_games_with_something_due() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    // a peek phase whose deadline is far off: nothing to do
+    let before = game_version(&state, &code).await;
+    komino::models::tick_all(&state.db).await.unwrap();
+    assert_eq!(game_version(&state, &code).await, before);
+
+    set_game(&state, &code, |g| g.ready_deadline = Some(0)).await;
+    komino::models::tick_all(&state.db).await.unwrap();
+    assert_eq!(game_version(&state, &code).await, before + 1);
+    assert_eq!(game_state(&state, &code).await.status, Status::Playing);
+}
+
+/// After a ping, a room's sockets on one machine share one snapshot load;
+/// the next ping starts a fresh one (RT-21).
+#[tokio::test]
+async fn test_sockets_share_one_snapshot_per_change() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    let room = komino::models::room_by_code(&state.db, &code)
+        .await
+        .unwrap();
+    let _rx = state.hub.subscribe(room.id);
+    // let the listener relay the join's notify first, so it can't land
+    // between the two loads below
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    state.hub.ping(room.id);
+    let a = state.hub.snapshot(&state.db, room.id).await.unwrap();
+    let b = state.hub.snapshot(&state.db, room.id).await.unwrap();
+    assert!(std::sync::Arc::ptr_eq(&a, &b));
+
+    // a change after the load is not in it, until the next ping
+    host.post("/api/me")
+        .json(&json!({ "name": "renamed" }))
+        .await
+        .assert_status_ok();
+    let stale = a.render(None, "");
+    assert!(stale["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["name"] != "renamed"));
+    state.hub.ping(room.id);
+    let c = state.hub.snapshot(&state.db, room.id).await.unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&a, &c));
+    let fresh = c.render(None, "");
+    assert!(fresh["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["name"] == "renamed"));
+
+    // membership checks come from the same load
+    let host_id = me(&host).await;
+    assert!(c.require_member(&host_id).is_ok());
+    assert_eq!(c.require_member("nobody").unwrap_err().code, "forbidden");
+    assert!(c.require_not_removed("nobody").is_ok());
+}
+
 /// Member sockets ping to measure their round trip (RT-18).
 #[tokio::test]
 async fn test_member_sockets_ping() {

@@ -12,6 +12,7 @@ use common::db::DbPool;
 use rand::RngExt;
 use serde_json::{json, Value};
 use sqlx::{Postgres, Row, Transaction};
+use std::sync::LazyLock;
 
 /// Postgres notify channel; the payload is the room id.
 pub const NOTIFY_CHANNEL: &str = "komino";
@@ -314,6 +315,34 @@ async fn lock_room(tx: &mut Tx<'_>, room_id: i64) -> Result<Room> {
     Ok(room_from_row(&row))
 }
 
+/// Lock the room row and read `player`'s membership in the same round trip,
+/// then require them to be a current member.
+async fn lock_room_as(tx: &mut Tx<'_>, room_id: i64, player: &str) -> Result<Room> {
+    let row = sqlx::query(
+        "SELECT r.id, r.code, r.host_player_id, r.last_winner, r.hand_size, r.away_grace_secs,
+                r.turn_limit_secs, r.reveal_secs, m.removed, m.left_at IS NOT NULL AS gone
+         FROM rooms r LEFT JOIN room_members m ON m.room_id = r.id AND m.player_id = $2
+         WHERE r.id = $1 FOR UPDATE OF r",
+    )
+    .bind(room_id)
+    .bind(player)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let removed: Option<bool> = row.get("removed");
+    check_member(removed.map(|r| (r, row.get("gone"))))?;
+    Ok(room_from_row(&row))
+}
+
+/// Membership as `(removed, left)`, `None` for someone who never joined.
+fn check_member(membership: Option<(bool, bool)>) -> Result<()> {
+    match membership {
+        Some((true, _)) => Err(ApiError::removed()),
+        Some((false, false)) => Ok(()),
+        _ => Err(ApiError::forbidden("join the room first")),
+    }
+}
+
 /// A current member: joined, not left, not removed.
 pub async fn require_member(db: &DbPool, room_id: i64, player: &str) -> Result<()> {
     let row = sqlx::query(
@@ -324,11 +353,7 @@ pub async fn require_member(db: &DbPool, room_id: i64, player: &str) -> Result<(
     .bind(player)
     .fetch_optional(db)
     .await?;
-    match row {
-        Some(r) if r.get::<bool, _>("removed") => Err(ApiError::removed()),
-        Some(r) if !r.get::<bool, _>("gone") => Ok(()),
-        _ => Err(ApiError::forbidden("join the room first")),
-    }
+    check_member(row.map(|r| (r.get("removed"), r.get("gone"))))
 }
 
 /// Anyone but a player the host removed may watch a room.
@@ -397,74 +422,68 @@ pub async fn refresh_observer(db: &DbPool, id: &str) -> Result<bool> {
 }
 
 pub async fn release_observer(db: &DbPool, room_id: i64, id: &str) -> Result<()> {
-    let mut tx = db.begin().await?;
-    sqlx::query("DELETE FROM room_observers WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    notify(&mut tx, room_id).await?;
-    tx.commit().await?;
+    sqlx::query(
+        "WITH d AS (DELETE FROM room_observers WHERE id = $1)
+         SELECT pg_notify($3, $2::text)",
+    )
+    .bind(id)
+    .bind(room_id)
+    .bind(NOTIFY_CHANNEL)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
 /// Add a member, or bring a returning one back. Removed players stay out.
+/// One statement: the upsert skips a removed member, and only a join touches
+/// the room and notifies.
 pub async fn join(db: &DbPool, room: &Room, player: &str) -> Result<()> {
-    let mut tx = db.begin().await?;
-    let removed: Option<bool> = sqlx::query_scalar(
-        "SELECT removed FROM room_members WHERE room_id = $1 AND player_id = $2",
-    )
-    .bind(room.id)
-    .bind(player)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if removed == Some(true) {
-        return Err(ApiError::removed());
-    }
-    sqlx::query(
-        "INSERT INTO room_members (room_id, player_id, present_until)
-         VALUES ($1, $2, now() + make_interval(secs => $3))
-         ON CONFLICT (room_id, player_id)
-         DO UPDATE SET left_at = NULL, present_until = excluded.present_until",
+    let joined = sqlx::query(
+        "WITH j AS (
+             INSERT INTO room_members (room_id, player_id, present_until)
+             VALUES ($1, $2, now() + make_interval(secs => $3))
+             ON CONFLICT (room_id, player_id)
+             DO UPDATE SET left_at = NULL, present_until = excluded.present_until
+             WHERE NOT room_members.removed
+             RETURNING room_id
+         ), r AS (
+             UPDATE rooms SET last_active = now() WHERE id IN (SELECT room_id FROM j)
+         )
+         SELECT pg_notify($4, $1::text) FROM j",
     )
     .bind(room.id)
     .bind(player)
     .bind(PRESENCE_SECS as f64)
-    .execute(&mut *tx)
+    .bind(NOTIFY_CHANNEL)
+    .fetch_optional(db)
     .await?;
-    sqlx::query("UPDATE rooms SET last_active = now() WHERE id = $1")
-        .bind(room.id)
-        .execute(&mut *tx)
-        .await?;
-    notify(&mut tx, room.id).await?;
-    tx.commit().await?;
-    Ok(())
+    match joined {
+        Some(_) => Ok(()),
+        None => Err(ApiError::removed()),
+    }
 }
 
-/// Count a member present for another [`PRESENCE_SECS`], or away now.
+/// Count a member present for another [`PRESENCE_SECS`], or away now, in one
+/// statement that notifies only when presence flips.
 pub async fn set_presence(db: &DbPool, room_id: i64, player: &str, present: bool) -> Result<()> {
     let secs = if present { PRESENCE_SECS } else { 0 };
-    let mut tx = db.begin().await?;
-    let was: Option<bool> = sqlx::query_scalar(
-        "SELECT coalesce(present_until > now(), false) FROM room_members
-         WHERE room_id = $1 AND player_id = $2",
-    )
-    .bind(room_id)
-    .bind(player)
-    .fetch_optional(&mut *tx)
-    .await?;
     sqlx::query(
-        "UPDATE room_members SET present_until = now() + make_interval(secs => $3)
-         WHERE room_id = $1 AND player_id = $2",
+        "WITH old AS (
+             SELECT coalesce(present_until > now(), false) AS was FROM room_members
+             WHERE room_id = $1 AND player_id = $2
+         ), u AS (
+             UPDATE room_members SET present_until = now() + make_interval(secs => $3)
+             WHERE room_id = $1 AND player_id = $2
+         )
+         SELECT pg_notify($5, $1::text) FROM old WHERE old.was <> $4",
     )
     .bind(room_id)
     .bind(player)
     .bind(secs as f64)
-    .execute(&mut *tx)
+    .bind(present)
+    .bind(NOTIFY_CHANNEL)
+    .execute(db)
     .await?;
-    if was.is_some_and(|was| was != present) {
-        notify(&mut tx, room_id).await?;
-    }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -582,8 +601,81 @@ async fn lock_game(tx: &mut Tx<'_>, room_id: i64) -> Result<Option<(i64, Game)>>
     }
 }
 
-/// Persist a game change: state, events, stats, and a notify, all inside the
-/// caller's transaction.
+/// The single statement behind [`save`]: game state, its events, the stat
+/// deltas, the room's activity, and the notify. The stat columns come from
+/// a fixed enum, never from input.
+static SAVE_SQL: LazyLock<String> = LazyLock::new(|| {
+    let cols: Vec<&str> = Stat::ALL.iter().map(Stat::column).collect();
+    let list = cols.join(", ");
+    let typed = cols
+        .iter()
+        .map(|c| format!("{c} int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let from_s = cols
+        .iter()
+        .map(|c| format!("s.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sums = cols
+        .iter()
+        .map(|c| format!("{c} = room_stats.{c} + excluded.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "WITH g AS (
+             UPDATE games SET state = $1, status = $2, version = version + 1,
+                 ended = CASE WHEN $2 = 'scored' THEN now() ELSE ended END
+             WHERE id = $3 RETURNING version
+         ), ev AS (
+             INSERT INTO game_events (game_id, version, player_id, kind, payload)
+             SELECT $3, g.version, e.player, e.kind, e.payload
+             FROM g, ROWS FROM (jsonb_to_recordset($4) AS (player text, kind text, payload jsonb))
+                 WITH ORDINALITY AS e(player, kind, payload, n)
+             ORDER BY e.n
+         ), st AS (
+             INSERT INTO room_stats (room_id, player_id, {list})
+             SELECT $5, s.player, {from_s}
+             FROM jsonb_to_recordset($6) AS s(player text, {typed})
+             ON CONFLICT (room_id, player_id) DO UPDATE SET {sums}
+         ), r AS (
+             UPDATE rooms SET last_active = now(), last_winner = coalesce($7, last_winner)
+             WHERE id = $5
+         )
+         SELECT pg_notify($8, $5::text) FROM g"
+    )
+});
+
+/// One row per player with every stat column, for [`SAVE_SQL`].
+fn stat_rows(stats: &[(String, Stat, i32)]) -> Value {
+    let mut rows: Vec<(String, serde_json::Map<String, Value>)> = Vec::new();
+    for (player, stat, n) in stats {
+        let i = match rows.iter().position(|(p, _)| p == player) {
+            Some(i) => i,
+            None => {
+                let zero = Stat::ALL
+                    .iter()
+                    .map(|s| (s.column().to_string(), json!(0)))
+                    .collect();
+                rows.push((player.clone(), zero));
+                rows.len() - 1
+            }
+        };
+        let cell = rows[i].1.get_mut(stat.column()).expect("every stat column");
+        *cell = json!(cell.as_i64().unwrap_or(0) + i64::from(*n));
+    }
+    Value::Array(
+        rows.into_iter()
+            .map(|(player, mut cols)| {
+                cols.insert("player".into(), json!(player));
+                Value::Object(cols)
+            })
+            .collect(),
+    )
+}
+
+/// Persist a game change: state, events, stats, and a notify, in one
+/// statement inside the caller's transaction.
 async fn save(
     tx: &mut Tx<'_>,
     room: &Room,
@@ -591,52 +683,24 @@ async fn save(
     game: &Game,
     out: &Outcome,
 ) -> Result<()> {
-    let status = game.status.as_str();
-    let version: i64 = sqlx::query_scalar(
-        "UPDATE games SET state = $1, status = $2, version = version + 1,
-             ended = CASE WHEN $2 = 'scored' THEN now() ELSE ended END
-         WHERE id = $3 RETURNING version",
-    )
-    .bind(serde_json::to_value(game)?)
-    .bind(status)
-    .bind(game_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    for e in &out.events {
-        sqlx::query(
-            "INSERT INTO game_events (game_id, version, player_id, kind, payload)
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(game_id)
-        .bind(version)
-        .bind(&e.player)
-        .bind(e.kind)
-        .bind(&e.payload)
-        .execute(&mut **tx)
-        .await?;
-    }
-    for (player, stat, n) in &out.stats {
-        // the column comes from a fixed enum, never from input
-        let col = stat.column();
-        sqlx::query(&format!(
-            "INSERT INTO room_stats (room_id, player_id, {col}) VALUES ($1, $2, $3)
-             ON CONFLICT (room_id, player_id) DO UPDATE SET {col} = room_stats.{col} + excluded.{col}"
-        ))
-        .bind(room.id)
-        .bind(player)
-        .bind(n)
-        .execute(&mut **tx)
-        .await?;
-    }
+    let events: Vec<Value> = out
+        .events
+        .iter()
+        .map(|e| json!({ "player": e.player, "kind": e.kind, "payload": e.payload }))
+        .collect();
     let winner = game.winners().first().map(|w| w.to_string());
-    sqlx::query(
-        "UPDATE rooms SET last_active = now(), last_winner = coalesce($2, last_winner) WHERE id = $1",
-    )
-    .bind(room.id)
-    .bind(winner)
-    .execute(&mut **tx)
-    .await?;
-    notify(tx, room.id).await
+    sqlx::query(&SAVE_SQL)
+        .bind(serde_json::to_value(game)?)
+        .bind(game.status.as_str())
+        .bind(game_id)
+        .bind(Value::Array(events))
+        .bind(room.id)
+        .bind(stat_rows(&out.stats))
+        .bind(winner)
+        .bind(NOTIFY_CHANNEL)
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn start_game(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<()> {
@@ -753,10 +817,9 @@ pub async fn act(
     action: ClientAction,
     reaction_ms: Option<i64>,
 ) -> Result<Acted> {
-    require_member(db, room.id, player).await?;
     let mut tx = db.begin().await?;
     // always room then game, so concurrent paths lock in the same order
-    let room = lock_room(&mut tx, room.id).await?;
+    let room = lock_room_as(&mut tx, room.id, player).await?;
     let mut acted = Acted::Done;
     match action {
         ClientAction::Start => start_game(&mut tx, &room, player).await?,
@@ -789,13 +852,19 @@ pub async fn act(
 pub async fn claim_result(db: &DbPool, room_id: i64, id: &str, deadline: i64) -> Result<()> {
     let wait = (deadline - now_ms()).max(0) as u64;
     tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-    tick_room(db, room_id).await?;
-    let state: Option<Value> =
-        sqlx::query_scalar("SELECT state FROM games WHERE room_id = $1 ORDER BY id DESC LIMIT 1")
+    let game = match tick_room(db, room_id).await? {
+        Some(game) => Some(game),
+        // the game finished before this waiter woke
+        None => {
+            let state: Option<Value> = sqlx::query_scalar(
+                "SELECT state FROM games WHERE room_id = $1 ORDER BY id DESC LIMIT 1",
+            )
             .bind(room_id)
             .fetch_optional(db)
             .await?;
-    let game: Option<Game> = state.map(serde_json::from_value).transpose()?;
+            state.map(serde_json::from_value).transpose()?
+        }
+    };
     match game.and_then(|g| g.claim_result(id)) {
         Some(result) => Ok(result?),
         None => Err(ApiError::from(Reject::new(
@@ -805,39 +874,70 @@ pub async fn claim_result(db: &DbPool, room_id: i64, id: &str, deadline: i64) ->
     }
 }
 
-/// Advance timers on every unfinished game.
+/// Advance timers on every unfinished game that has something due. One
+/// read, without locks, tries each game's tick on a copy; only the games it
+/// would change are locked and ticked for real (RT-14).
 pub async fn tick_all(db: &DbPool) -> Result<()> {
-    let ids: Vec<i64> = sqlx::query_scalar("SELECT room_id FROM games WHERE status <> 'scored'")
-        .fetch_all(db)
-        .await?;
-    for room_id in ids {
+    let rows = sqlx::query(
+        "SELECT g.room_id, g.state,
+                coalesce(array(SELECT m.player_id FROM room_members m
+                               WHERE m.room_id = g.room_id AND m.present_until > now()),
+                         '{}') AS present
+         FROM games g WHERE g.status <> 'scored'",
+    )
+    .fetch_all(db)
+    .await?;
+    let now = now_ms();
+    let mut due = vec![];
+    for row in rows {
+        let mut game: Game = serde_json::from_value(row.get::<Value, _>("state"))?;
+        let present: Vec<String> = row.get("present");
+        let changed = {
+            let mut rng = rand::rng();
+            game.tick(now, &|p| present.iter().any(|x| x == p), &mut rng)
+                .changed
+        };
+        if changed {
+            due.push(row.get::<i64, _>("room_id"));
+        }
+    }
+    for room_id in due {
         tick_room(db, room_id).await?;
     }
     Ok(())
 }
 
-/// Advance the timers of one room's unfinished game, if it has one.
-pub async fn tick_room(db: &DbPool, room_id: i64) -> Result<()> {
+/// Advance the timers of one room's unfinished game, if it has one, and
+/// return the game as it stands after.
+pub async fn tick_room(db: &DbPool, room_id: i64) -> Result<Option<Game>> {
     let mut tx = db.begin().await?;
     let room = lock_room(&mut tx, room_id).await?;
-    let Some((game_id, mut game)) = lock_game(&mut tx, room_id).await? else {
-        return Ok(());
-    };
-    let present: Vec<String> = sqlx::query_scalar(
-        "SELECT player_id FROM room_members WHERE room_id = $1 AND present_until > now()",
+    // the game row and who is present, in one round trip
+    let row = sqlx::query(
+        "SELECT id, state,
+                coalesce(array(SELECT m.player_id FROM room_members m
+                               WHERE m.room_id = $1 AND m.present_until > now()),
+                         '{}') AS present
+         FROM games WHERE room_id = $1 AND status <> 'scored' FOR UPDATE",
     )
     .bind(room_id)
-    .fetch_all(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let game_id: i64 = row.get("id");
+    let mut game: Game = serde_json::from_value(row.get::<Value, _>("state"))?;
+    let present: Vec<String> = row.get("present");
     let out = {
         let mut rng = rand::rng();
         game.tick(now_ms(), &|p| present.iter().any(|x| x == p), &mut rng)
     };
     if out.changed {
         save(&mut tx, &room, game_id, &game, &out).await?;
+        tx.commit().await?;
     }
-    tx.commit().await?;
-    Ok(())
+    Ok(Some(game))
 }
 
 // ---------------------------------------------------------------------------
@@ -845,21 +945,22 @@ pub async fn tick_room(db: &DbPool, room_id: i64) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Bind a client key to `player` on first use and refuse it once its window
-/// has passed or when another player bound it first.
+/// has passed or when another player bound it first. One statement: a fresh
+/// key comes back from the insert, a known one from the table.
 async fn check_client_key(tx: &mut Tx<'_>, player: &str, key_hash: &str) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO client_keys (key_hash, player_id) VALUES ($1, $2)
-         ON CONFLICT (key_hash) DO NOTHING",
+    let row = sqlx::query(
+        "WITH ins AS (
+             INSERT INTO client_keys (key_hash, player_id) VALUES ($1, $2)
+             ON CONFLICT (key_hash) DO NOTHING
+             RETURNING player_id, false AS expired
+         )
+         SELECT player_id, expired FROM ins
+         UNION ALL
+         SELECT player_id, first_seen < now() - make_interval(secs => $3)
+         FROM client_keys WHERE key_hash = $1 AND NOT EXISTS (SELECT 1 FROM ins)",
     )
     .bind(key_hash)
     .bind(player)
-    .execute(&mut **tx)
-    .await?;
-    let row = sqlx::query(
-        "SELECT player_id, first_seen < now() - make_interval(secs => $2) AS expired
-         FROM client_keys WHERE key_hash = $1",
-    )
-    .bind(key_hash)
     .bind(CLIENT_KEY_SECS as f64)
     .fetch_one(&mut **tx)
     .await?;
@@ -885,12 +986,11 @@ pub async fn reveal(
     what: &Secret,
     key_hash: &str,
 ) -> Result<Value> {
-    require_member(db, room.id, player).await?;
     let mut tx = db.begin().await?;
-    check_client_key(&mut tx, player, key_hash).await?;
     // lock room then game like every action, so a concurrent swap, ready, or
     // discard can't commit between this check and the reveal
-    lock_room(&mut tx, room.id).await?;
+    lock_room_as(&mut tx, room.id, player).await?;
+    check_client_key(&mut tx, player, key_hash).await?;
     let (game_id, game) = lock_game(&mut tx, room.id)
         .await?
         .ok_or_else(|| ApiError::forbidden("no game is in progress"))?;
@@ -937,112 +1037,205 @@ pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
 // Views
 // ---------------------------------------------------------------------------
 
+/// Everything a room's pages show, before redaction, loaded in one query.
+/// A machine loads it once per change and renders it for each of its
+/// sockets (RT-21).
+pub struct Snapshot {
+    room: Room,
+    observers: i64,
+    /// `{id, name, removed, left, present}` in join order.
+    members: Vec<Value>,
+    /// The newest game: id, version, and state.
+    game: Option<(i64, i64, Game)>,
+    /// The newest 40 events, newest first.
+    events: Value,
+    stats: Vec<Value>,
+}
+
+/// The single query behind [`Snapshot::load`]. The stat columns come from a
+/// fixed enum, never from input.
+static SNAPSHOT_SQL: LazyLock<String> = LazyLock::new(|| {
+    let stats = Stat::ALL
+        .iter()
+        .map(|s| format!("'{0}', s.{0}", s.column()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT r.id, r.code, r.host_player_id, r.last_winner, r.hand_size, r.away_grace_secs,
+                r.turn_limit_secs, r.reveal_secs,
+                (SELECT count(*) FROM room_observers o
+                 WHERE o.room_id = r.id AND o.until > now()) AS observers,
+                (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                     'id', m.player_id, 'name', p.name, 'removed', m.removed,
+                     'left', m.left_at IS NOT NULL,
+                     'present', coalesce(m.present_until > now(), false)
+                 ) ORDER BY m.joined), '[]')
+                 FROM room_members m JOIN players p ON p.id = m.player_id
+                 WHERE m.room_id = r.id) AS members,
+                g.id AS game_id, g.version, g.state,
+                (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                     'id', e.id, 'player', e.player_id, 'kind', e.kind, 'payload', e.payload
+                 ) ORDER BY e.id DESC), '[]')
+                 FROM (SELECT * FROM game_events WHERE game_id = g.id
+                       ORDER BY id DESC LIMIT 40) e) AS events,
+                (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                     'player', s.player_id, 'name', p.name, {stats}
+                 ) ORDER BY s.wins DESC, s.games_played DESC, p.name), '[]')
+                 FROM room_stats s JOIN players p ON p.id = s.player_id
+                 WHERE s.room_id = r.id) AS stats
+         FROM rooms r
+         LEFT JOIN LATERAL (
+             SELECT id, version, state FROM games WHERE room_id = r.id ORDER BY id DESC LIMIT 1
+         ) g ON true
+         WHERE r.id = $1"
+    )
+});
+
+fn json_array(v: Value) -> Vec<Value> {
+    match v {
+        Value::Array(items) => items,
+        _ => vec![],
+    }
+}
+
+impl Snapshot {
+    pub async fn load(db: &DbPool, room_id: i64) -> Result<Self> {
+        let row = sqlx::query(&SNAPSHOT_SQL)
+            .bind(room_id)
+            .fetch_optional(db)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let game = match row.get::<Option<i64>, _>("game_id") {
+            Some(id) => Some((
+                id,
+                row.get::<i64, _>("version"),
+                serde_json::from_value(row.get::<Value, _>("state"))?,
+            )),
+            None => None,
+        };
+        Ok(Self {
+            room: room_from_row(&row),
+            observers: row.get("observers"),
+            members: json_array(row.get("members")),
+            game,
+            events: row.get("events"),
+            stats: json_array(row.get("stats")),
+        })
+    }
+
+    fn membership(&self, player: &str) -> Option<(bool, bool)> {
+        self.members
+            .iter()
+            .find(|m| m["id"] == player)
+            .map(|m| (m["removed"] == true, m["left"] == true))
+    }
+
+    /// [`require_member`] against this snapshot.
+    pub fn require_member(&self, player: &str) -> Result<()> {
+        check_member(self.membership(player))
+    }
+
+    /// [`require_not_removed`] against this snapshot.
+    pub fn require_not_removed(&self, player: &str) -> Result<()> {
+        match self.membership(player) {
+            Some((true, _)) => Err(ApiError::removed()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The view for `viewer`, redacted for them. A `None` viewer is an
+    /// observer, who sees only public state.
+    pub fn render(&self, viewer: Option<&str>, base_url: &str) -> Value {
+        let room = &self.room;
+        let now = now_ms();
+        let game = match &self.game {
+            Some((id, version, state)) => {
+                let mut view = match viewer {
+                    Some(viewer) => state.view(viewer, now),
+                    None => state.observer_view(now),
+                };
+                view["id"] = json!(id);
+                view["version"] = json!(version);
+                view
+            }
+            None => Value::Null,
+        };
+        // ids only grow, so a client can tell which events are new
+        let events = if self.game.is_some() {
+            self.events.clone()
+        } else {
+            json!([])
+        };
+        json!({
+            "room": {
+                "code": room.code,
+                "host": room.host,
+                "url": format!("{base_url}/komino/r/{}", room.code),
+                "watch_url": format!("{base_url}/komino/r/{}/watch", room.code),
+                "settings": room.settings,
+            },
+            "me": viewer,
+            "observer": viewer.is_none(),
+            // lets the client read deadlines against the server clock
+            "server_now": now,
+            "observers": self.observers,
+            "members": self.members,
+            "game": game,
+            "events": events,
+            "stats": self.stats,
+        })
+    }
+}
+
 /// Everything a member's page shows, redacted for that member. A `None`
 /// viewer is an observer, who sees only public state.
 pub async fn view(db: &DbPool, room: &Room, viewer: Option<&str>, base_url: &str) -> Result<Value> {
-    let room = room_by_code(db, &room.code).await?;
-    let observers: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM room_observers WHERE room_id = $1 AND until > now()",
-    )
-    .bind(room.id)
-    .fetch_one(db)
-    .await?;
-    let members: Vec<Value> = sqlx::query(
-        "SELECT m.player_id, p.name, m.removed, m.left_at IS NOT NULL AS gone,
-                coalesce(m.present_until > now(), false) AS present
-         FROM room_members m JOIN players p ON p.id = m.player_id
-         WHERE m.room_id = $1 ORDER BY m.joined",
-    )
-    .bind(room.id)
-    .fetch_all(db)
-    .await?
-    .iter()
-    .map(|r| {
-        json!({
-            "id": r.get::<String, _>("player_id"),
-            "name": r.get::<String, _>("name"),
-            "removed": r.get::<bool, _>("removed"),
-            "left": r.get::<bool, _>("gone"),
-            "present": r.get::<bool, _>("present"),
-        })
-    })
-    .collect();
+    Ok(Snapshot::load(db, room.id).await?.render(viewer, base_url))
+}
 
-    let game_row = sqlx::query(
-        "SELECT id, version, state FROM games WHERE room_id = $1 ORDER BY id DESC LIMIT 1",
-    )
-    .bind(room.id)
-    .fetch_optional(db)
-    .await?;
-    let (game, events) = match game_row {
-        Some(row) => {
-            let game_id: i64 = row.get("id");
-            let state: Game = serde_json::from_value(row.get::<Value, _>("state"))?;
-            let mut view = match viewer {
-                Some(viewer) => state.view(viewer, now_ms()),
-                None => state.observer_view(now_ms()),
-            };
-            view["id"] = json!(game_id);
-            view["version"] = json!(row.get::<i64, _>("version"));
-            let events: Vec<Value> = sqlx::query(
-                "SELECT id, player_id, kind, payload FROM game_events
-                 WHERE game_id = $1 ORDER BY id DESC LIMIT 40",
-            )
-            .bind(game_id)
-            .fetch_all(db)
-            .await?
-            .iter()
-            .map(|r| {
-                // ids only grow, so a client can tell which events are new
-                json!({
-                    "id": r.get::<i64, _>("id"),
-                    "player": r.get::<Option<String>, _>("player_id"),
-                    "kind": r.get::<String, _>("kind"),
-                    "payload": r.get::<Value, _>("payload"),
-                })
-            })
-            .collect();
-            (view, events)
-        }
-        None => (Value::Null, vec![]),
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let stats: Vec<Value> = sqlx::query(
-        "SELECT s.*, p.name FROM room_stats s JOIN players p ON p.id = s.player_id
-         WHERE s.room_id = $1 ORDER BY s.wins DESC, s.games_played DESC, p.name",
-    )
-    .bind(room.id)
-    .fetch_all(db)
-    .await?
-    .iter()
-    .map(|r| {
-        let mut row = json!({
-            "player": r.get::<String, _>("player_id"),
-            "name": r.get::<String, _>("name"),
-        });
+    #[test]
+    fn stat_deltas_fold_into_one_row_per_player() {
+        let stats = vec![
+            ("a".to_string(), Stat::CardsInteracted, 1),
+            ("b".to_string(), Stat::Matches, 1),
+            ("a".to_string(), Stat::CardsInteracted, 2),
+            ("a".to_string(), Stat::Wins, 1),
+        ];
+        let rows = stat_rows(&stats);
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["player"], "a");
+        assert_eq!(rows[0]["cards_interacted"], 3);
+        assert_eq!(rows[0]["wins"], 1);
+        assert_eq!(rows[0]["matches"], 0);
+        assert_eq!(rows[1]["player"], "b");
+        assert_eq!(rows[1]["matches"], 1);
+        // every column is present, so the insert can name them all
         for stat in Stat::ALL {
-            row[stat.column()] = json!(r.get::<i32, _>(stat.column()));
+            assert!(rows[1].get(stat.column()).is_some());
         }
-        row
-    })
-    .collect();
+        assert_eq!(stat_rows(&[]), json!([]));
+    }
 
-    Ok(json!({
-        "room": {
-            "code": room.code,
-            "host": room.host,
-            "url": format!("{base_url}/komino/r/{}", room.code),
-            "watch_url": format!("{base_url}/komino/r/{}/watch", room.code),
-            "settings": room.settings,
-        },
-        "me": viewer,
-        "observer": viewer.is_none(),
-        // lets the client read deadlines against the server clock
-        "server_now": now_ms(),
-        "observers": observers,
-        "members": members,
-        "game": game,
-        "events": events,
-        "stats": stats,
-    }))
+    #[test]
+    fn membership_is_checked_the_same_from_either_source() {
+        assert!(check_member(Some((false, false))).is_ok());
+        assert_eq!(
+            check_member(Some((true, false))).unwrap_err().code,
+            "removed"
+        );
+        assert_eq!(
+            check_member(Some((true, true))).unwrap_err().code,
+            "removed"
+        );
+        assert_eq!(
+            check_member(Some((false, true))).unwrap_err().code,
+            "forbidden"
+        );
+        assert_eq!(check_member(None).unwrap_err().code, "forbidden");
+    }
 }

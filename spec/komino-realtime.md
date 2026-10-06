@@ -43,6 +43,13 @@ room id; each machine then loads and redacts state for its own sockets.
 On connect, reconnect, and every update, the client receives the full redacted view. Events
 are never replayed.
 
+### RT-21
+Everything a view shows (room, observer count, members, newest game, its newest 40 events,
+stats) loads in one query. Each ping (RT-6) starts a new snapshot for the room on that machine;
+the first of the room's sockets to need it loads it, the rest reuse it, and each renders and
+redacts its own view in memory. A socket's membership check reads the same snapshot. A socket's
+first view on connect loads its own.
+
 ### RT-8
 The client reconnects with backoff after a dropped socket and shows a `reconnecting` state
 while disconnected.
@@ -78,7 +85,11 @@ reported to their sender.
 ### RT-14
 Ready (RULE-7), turn grace (ROOM-14), and scoring delay (RT-12) deadlines are stored on the
 game row. Any machine handling the room can fire them; firing re-checks the deadline under the
-row lock so a timer applies once.
+row lock so a timer applies once. One machine sweeps at a time: it takes a postgres advisory
+lock once, on a connection of its own, and keeps it while that connection lives; the others
+retry every 5 seconds. Each second the sweep reads every unfinished game with its present
+players in one query, without locks, runs each game's tick on a copy, and locks and ticks for
+real only the games whose copy changed.
 
 ## Turn token
 

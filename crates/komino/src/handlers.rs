@@ -1,6 +1,6 @@
 use crate::game::{Action, Secret, Settings};
 use crate::lag::{self, Rtt, Seen};
-use crate::models::{self, Acted, ApiError, ClientAction, Player, Result, Room};
+use crate::models::{self, Acted, ApiError, ClientAction, Player, Result, Room, Snapshot};
 use crate::{sealed, State};
 use axum::body::Bytes;
 use axum::{
@@ -15,6 +15,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
@@ -67,10 +68,6 @@ async fn identify(state: &State, jar: CookieJar) -> Result<(Player, CookieJar)> 
 
 async fn room_view(state: &State, room: &Room, player: &str) -> Result<Value> {
     models::view(&state.db, room, Some(player), &state.config.real_hostname).await
-}
-
-async fn observer_view(state: &State, room: &Room) -> Result<Value> {
-    models::view(&state.db, room, None, &state.config.real_hostname).await
 }
 
 // ---------------------------------------------------------------------------
@@ -156,8 +153,10 @@ pub async fn get_room(
 ) -> Result<Response> {
     let (player, jar) = identify(&state, jar).await?;
     let room = models::room_by_code(&state.db, &code).await?;
-    models::require_member(&state.db, room.id, &player.id).await?;
-    let view = room_view(&state, &room, &player.id).await?;
+    // membership is checked against the same load the view comes from
+    let snap = Snapshot::load(&state.db, room.id).await?;
+    snap.require_member(&player.id)?;
+    let view = snap.render(Some(&player.id), &state.config.real_hostname);
     Ok((jar, Json(view)).into_response())
 }
 
@@ -213,8 +212,9 @@ pub async fn watch_room(
 ) -> Result<Response> {
     let (player, jar) = identify(&state, jar).await?;
     let room = models::room_by_code(&state.db, &code).await?;
-    models::require_not_removed(&state.db, room.id, &player.id).await?;
-    let view = observer_view(&state, &room).await?;
+    let snap = Snapshot::load(&state.db, room.id).await?;
+    snap.require_not_removed(&player.id)?;
+    let view = snap.render(None, &state.config.real_hostname);
     Ok((jar, Json(view)).into_response())
 }
 
@@ -359,32 +359,39 @@ fn access_error(e: &ApiError) -> Value {
     }
 }
 
+/// The socket's view rendered from `snap`, or why it can't have one.
+fn view_msg(state: &State, who: &Who, snap: &Snapshot) -> Value {
+    let base = &state.config.real_hostname;
+    let (access, viewer) = match who {
+        Who::Member(player) => (snap.require_member(player), Some(player.as_str())),
+        Who::Observer { player, .. } => (snap.require_not_removed(player), None),
+    };
+    match access {
+        Err(e) => access_error(&e),
+        Ok(()) => json!({ "type": "view", "view": snap.render(viewer, base) }),
+    }
+}
+
 /// Send the socket's current view, noting when it first carried each
-/// discard (RT-18). False when the socket should close.
+/// discard (RT-18). After a ping the room's sockets on this machine share one
+/// snapshot load (RT-21); otherwise this socket loads its own. False when the
+/// socket should close.
 async fn send_view(
     state: &State,
     room: &Room,
     who: &Who,
     socket: &mut WebSocket,
     seen: &mut Seen,
+    shared: bool,
 ) -> bool {
-    let msg = match who {
-        Who::Member(player) => match models::require_member(&state.db, room.id, player).await {
-            Err(e) => access_error(&e),
-            Ok(()) => match room_view(state, room, player).await {
-                Ok(view) => json!({ "type": "view", "view": view }),
-                Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
-            },
-        },
-        Who::Observer { player, .. } => {
-            match models::require_not_removed(&state.db, room.id, player).await {
-                Err(e) => access_error(&e),
-                Ok(()) => match observer_view(state, room).await {
-                    Ok(view) => json!({ "type": "view", "view": view }),
-                    Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
-                },
-            }
-        }
+    let snap = if shared {
+        state.hub.snapshot(&state.db, room.id).await
+    } else {
+        Snapshot::load(&state.db, room.id).await.map(Arc::new)
+    };
+    let msg = match snap {
+        Ok(snap) => view_msg(state, who, &snap),
+        Err(e) => json!({ "type": "error", "code": e.code, "message": e.message }),
     };
     let closing = msg["type"] == "removed";
     let seq = msg["view"]["game"]["discard_seq"].as_u64();
@@ -496,7 +503,7 @@ async fn socket_loop(state: State, room: Room, who: Who, mut socket: WebSocket) 
     let mut rtt = Rtt::default();
     let mut seen = Seen::default();
     let (later, mut settled) = mpsc::unbounded_channel::<Value>();
-    if send_view(&state, &room, &who, &mut socket, &mut seen).await {
+    if send_view(&state, &room, &who, &mut socket, &mut seen, false).await {
         loop {
             tokio::select! {
                 msg = socket.recv() => match msg {
@@ -535,7 +542,7 @@ async fn socket_loop(state: State, room: Room, who: Who, mut socket: WebSocket) 
                 }
                 ping = pings.recv() => match ping {
                     Ok(()) | Err(RecvError::Lagged(_)) => {
-                        if !send_view(&state, &room, &who, &mut socket, &mut seen).await {
+                        if !send_view(&state, &room, &who, &mut socket, &mut seen, true).await {
                             break;
                         }
                     }
@@ -553,6 +560,16 @@ async fn socket_loop(state: State, room: Room, who: Who, mut socket: WebSocket) 
     }
     // a clean close, whichever side ended it; ignored if the peer is gone
     let _ = socket.send(Message::Close(None)).await;
+    // read until the peer's close, so a frame it sent meanwhile (a pong) is
+    // consumed instead of resetting the connection
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
     if let Who::Member(player) = &who {
         if state.hub.disconnect(room.id, player) == 0 {
             let _ = models::set_presence(&state.db, room.id, player, false).await;

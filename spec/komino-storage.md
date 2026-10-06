@@ -65,6 +65,22 @@ status != `scored`).
 ### STORE-8
 Use `sqlx::query()` / `sqlx::query_as()` with `.bind()`, never the `query!` macros (AI.md).
 
+## Connections and queries
+
+### STORE-12
+The komino pool holds 20 connections. The notify listener (RT-6) and the sweeper's advisory
+lock (RT-14) each hold a dedicated connection outside the pool.
+
+### STORE-13
+Hot paths keep database round trips to a minimum:
+- an action is `BEGIN`, the room lock with the actor's membership, the game lock, one save,
+  `COMMIT`;
+- a save writes the game, its events, the stat deltas (one row per player), the room's activity,
+  and the notify in one statement;
+- a reveal is `BEGIN`, the room lock with membership, the client key check (one statement), the
+  game lock, the fetch record for a peek, `COMMIT`;
+- a view is one query (RT-21); heartbeats, joins, and observer releases are one statement each.
+
 ## Testing
 
 ### STORE-9
