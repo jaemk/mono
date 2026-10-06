@@ -1,6 +1,7 @@
 pub mod config;
 pub mod game;
 pub mod handlers;
+pub mod lag;
 pub mod models;
 pub mod sealed;
 pub mod service;

@@ -209,6 +209,12 @@
     let closed = false;
     let skew = 0; // server clock minus this clock, from the last view
     let refCounter = 0;
+    // when this page first showed the current discard, to report a match's
+    // reaction time (RT-18): { game, seq, at }
+    let shown = null;
+    // a sent match waiting for its window to settle (RT-16): { ref, seq, seat, slot }
+    let claiming = null;
+    const clock = () => (win.performance ? win.performance.now() : Date.now());
     // the newest event played, { game, id }; null until the first view (UI-23)
     let seenEvent = null;
     // cards and piles marked by recent events: "s:<seat>:<slot>", "deck",
@@ -613,7 +619,22 @@
         toast("reconnecting, try again in a moment");
         return;
       }
-      ws.send(JSON.stringify(Object.assign({ ref: ++refCounter }, action)));
+      const msg = Object.assign({ ref: ++refCounter }, action);
+      if (action.type === "match") {
+        // the server bounds this by what it saw, so it only helps an honest page
+        if (shown && shown.seq === action.seq) msg.reaction_ms = Math.max(0, Math.round(clock() - shown.at));
+        claiming = { ref: msg.ref, seq: action.seq, seat: action.seat, slot: action.slot };
+      }
+      ws.send(JSON.stringify(msg));
+    }
+
+    function onResult(data) {
+      if (claiming && data.ref === claiming.ref) {
+        claiming = null;
+        render();
+      }
+      if (!data.ok) toast(data.code === "too_late" ? "too late, someone matched first"
+        : data.code === "stale" ? "the turn moved on; check the table and choose again" : data.message);
     }
 
     function onSlot(seat, slot) {
@@ -712,11 +733,13 @@
       const chosen = isChosen(g, seat, slot);
       const peeked = isPeeked(g, seat, slot, v);
       const watched = othersPeek(g, seat, slot);
+      const pending = Boolean(claiming) && claiming.seat === seat && claiming.slot === slot;
       let label = v === null ? `${seatOwner(g, seat)} card ${slot + 1}, face down` : `${seatOwner(g, seat)} card ${slot + 1}: ${cardLabel(v)}`;
       if (watched) label += ", being peeked at";
+      if (pending) label += ", matching";
       const lock = g.seats[seat].locked ? `<span class="lock">locked</span>` : "";
       const badge = watched ? `<span class="eye-badge"><svg viewBox="0 0 34 16" aria-hidden="true">${eye(17, 8, "#2f6fd6")}</svg></span>` : "";
-      return `<button class="card${v === null ? " down" : ""}${chosen ? " sel" : ""}${peeked ? " peeked" : ""}${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">` +
+      return `<button class="card${v === null ? " down" : ""}${chosen ? " sel" : ""}${pending ? " claiming" : ""}${peeked ? " peeked" : ""}${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">` +
         (v === null ? back() : face(v)) + no + lock + badge + `</button>`;
     }
 
@@ -1032,6 +1055,11 @@
       view = v;
       if (typeof v.server_now === "number") skew = v.server_now - Date.now();
       const g = game();
+      if (g && (!shown || shown.game !== g.id || shown.seq !== g.discard_seq)) {
+        shown = { game: g.id, seq: g.discard_seq, at: clock() };
+      }
+      // a pending match ends with its result, or once its discard is gone
+      if (claiming && (!g || g.discard_seq !== claiming.seq)) claiming = null;
       // a pending action that no longer applies is dropped, with the reason
       if (sel && g) {
         const now = sel.key.startsWith("m:") ? matchKey(g) : turnKey(g);
@@ -1061,8 +1089,7 @@
         if (data.type === "view") applyView(data.view);
         else if (data.type === "removed") gone("removed", "The host removed you from this room.");
         else if (data.type === "full") gone("room is full", `${data.message}. Try again later.`);
-        else if (data.type === "result" && !data.ok) toast(data.code === "too_late" ? "too late, someone matched first"
-          : data.code === "stale" ? "the turn moved on; check the table and choose again" : data.message);
+        else if (data.type === "result") onResult(data);
         else if (data.type === "error") toast(data.message);
       };
       ws.onclose = () => {

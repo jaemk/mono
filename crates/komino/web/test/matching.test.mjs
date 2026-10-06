@@ -17,8 +17,51 @@ test("matching your own card takes two taps and carries the discard sequence", a
   page.slot(0, 2).click();
   assert.equal(page.confirmText(), "match your card 3 with the 4?");
   assert.ok(page.slot(0, 2).classList.contains("sel"));
+  page.tick(420);
   page.ok();
-  assert.deepEqual(page.socket.sent, [{ ref: 1, type: "match", seq: 2, seat: 0, slot: 2 }]);
+  assert.deepEqual(page.socket.sent, [{ ref: 1, type: "match", seq: 2, seat: 0, slot: 2, reaction_ms: 420 }]);
+});
+
+test("a match reports how long since this page first showed its discard", async (t) => {
+  const page = await waiting(t);
+  page.tick(300);
+  // a later view of the same discard doesn't restart the clock
+  page.push(makeView(makeGame({ turn: 1 })));
+  page.tick(200);
+  page.slot(0, 0).click();
+  page.ok();
+  assert.equal(page.socket.sent[0].reaction_ms, 500);
+  // a new discard does
+  page.push(makeView(makeGame({ turn: 1, discard_seq: 3 })));
+  page.tick(150);
+  page.slot(0, 1).click();
+  page.ok();
+  assert.equal(page.socket.sent[1].reaction_ms, 150);
+});
+
+test("a sent match is marked until its result arrives", async (t) => {
+  const page = await waiting(t);
+  page.slot(0, 2).click();
+  page.ok();
+  assert.ok(page.slot(0, 2).classList.contains("claiming"));
+  assert.match(page.label(0, 2), /, matching$/);
+  assert.ok(!page.slot(0, 1).classList.contains("claiming"));
+  // another view while the window is open keeps the mark
+  page.push(makeView(makeGame({ turn: 1 })));
+  assert.ok(page.slot(0, 2).classList.contains("claiming"));
+  page.socket.receive({ type: "result", ref: 1, ok: false, code: "too_late", message: "that discard was already matched or covered" });
+  assert.ok(!page.slot(0, 2).classList.contains("claiming"));
+  assert.equal(page.toast(), "too late, someone matched first");
+});
+
+test("a pending match mark clears when its discard changes", async (t) => {
+  const page = await waiting(t);
+  page.slot(0, 2).click();
+  page.ok();
+  page.socket.receive({ type: "result", ref: 99, ok: true });
+  assert.ok(page.slot(0, 2).classList.contains("claiming"), "another action's result leaves it");
+  page.push(makeView(makeGame({ turn: 1, discard_seq: 3 })));
+  assert.ok(!page.slot(0, 2).classList.contains("claiming"));
 });
 
 test("matching another player's card asks which of yours to give", async (t) => {
@@ -33,7 +76,7 @@ test("matching another player's card asks which of yours to give", async (t) => 
   assert.equal(page.confirmText(), "match bob's card 2 with the 4, giving your card 4?");
   assert.ok(page.slot(0, 3).classList.contains("sel"));
   page.ok();
-  assert.deepEqual(page.socket.sent, [{ ref: 1, type: "match", seq: 2, seat: 1, slot: 1, give_slot: 3 }]);
+  assert.deepEqual(page.socket.sent, [{ ref: 1, type: "match", seq: 2, seat: 1, slot: 1, give_slot: 3, reaction_ms: 0 }]);
 });
 
 test("an empty slot can't be given", async (t) => {

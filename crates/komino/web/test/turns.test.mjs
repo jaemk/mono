@@ -227,7 +227,7 @@ test("a discarded special card waits: taps match, and the move is a button", asy
   assert.equal(page.confirmText(), "end your turn without using peek other?");
   page.ok();
   assert.deepEqual(page.socket.sent, [
-    { ref: 1, type: "match", seq: 2, seat: 1, slot: 2, give_slot: 0 },
+    { ref: 1, type: "match", seq: 2, seat: 1, slot: 2, give_slot: 0, reaction_ms: 0 },
     { ref: 2, type: "use_special", turn_seq: 5 },
     { ref: 3, type: "skip", turn_seq: 5 },
   ]);

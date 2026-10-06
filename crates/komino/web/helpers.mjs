@@ -266,6 +266,8 @@ export async function boot({
   FakeSocket.OPEN = 1;
 
   const location = { pathname: path, protocol: "https:", host: "kominick.com", href: "https://kominick.com" + path };
+  // the page's monotonic clock, moved by hand
+  const clock = { ms: 1000 };
   const confirms = [];
   const clipboard = [];
   const env = {
@@ -282,6 +284,7 @@ export async function boot({
       return t;
     },
     clearInterval: (t) => globalThis.clearInterval(t),
+    performance: { now: () => clock.ms },
     AudioContext,
     localStorage: storage === undefined ? w.localStorage : storage,
     confirm: (msg) => {
@@ -313,6 +316,10 @@ export async function boot({
     location,
     confirms,
     clipboard,
+    /** Move the page's monotonic clock forward. */
+    tick(ms) {
+      clock.ms += ms;
+    },
     get socket() {
       return sockets[sockets.length - 1];
     },

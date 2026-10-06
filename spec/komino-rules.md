@@ -111,8 +111,9 @@ An incorrect match leaves the selected card where it was and adds the top card o
 face down to the matcher's hand as a penalty, in a new slot they have not seen.
 
 ### RULE-21
-Only one match succeeds per discard. Once a card is matched onto the pile, later attempts
-against that same discard are rejected as `too late` with no penalty. The matched card itself
+Only one match succeeds per discard, decided by reaction time (RT-17). Once a card is matched
+onto the pile, later attempts against that same discard are rejected as `too late` with no
+penalty. The matched card itself
 becomes the new top discard and can be matched in turn.
 
 ## Calling komino

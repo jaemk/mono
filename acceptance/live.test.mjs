@@ -335,6 +335,7 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   // other hands turned toward their owners, slot numbers on every card
   assert.match(script, /grid-area/, "komino app.js turns other players' hands");
   assert.match(script, /slot-no/, "komino app.js numbers the cards");
+  assert.match(script, /reaction_ms/, "komino app.js reports match reaction times");
 
   const server = await host.json("GET", "/komino/api/key");
   assert.match(server.kid, /^[0-9a-f]{16}$/);
@@ -509,6 +510,26 @@ test("komino holds a discarded special move for matches and takes komino mid tur
   assert.equal(seen.game.turn, view.game.turn);
   assert.equal(seen.game.stage.kind, "earned");
   assert.equal(seen.game.matchable, true);
+
+  // the other player matches over their socket with a reported reaction; the
+  // result waits for the match window, then lands right or wrong (RT-16)
+  const matcher = other(view);
+  const ws = socket(matcher.c, `/komino/r/${code}/ws`);
+  t.after(() => ws.close());
+  const opened = await nextMessage(ws, (m) => m.type === "view");
+  assert.equal(opened.view.game.discard_seq, seen.game.discard_seq);
+  const sentAt = Date.now();
+  ws.send(JSON.stringify({
+    type: "match", ref: 1, seq: seen.game.discard_seq, seat: 1 - view.game.turn, slot: 1, reaction_ms: 300,
+  }));
+  const matched = await nextMessage(ws, (m) => m.type === "result" && m.ref === 1);
+  assert.equal(matched.ok, true, JSON.stringify(matched));
+  assert.ok(Date.now() - sentAt >= 200, "a match should settle after its window");
+  view = await matcher.c.json("GET", `/komino/api/rooms/${code}`);
+  assert.equal(view.events[0].kind, "match");
+  assert.equal(view.game.stage.kind, "earned", "a match leaves the special move waiting");
+  ws.close();
+
   const special = mover(view);
   view = await act(special.c, { type: "use_special", turn_seq: view.game.turn_seq });
   assert.equal(view.game.stage.kind, "special");

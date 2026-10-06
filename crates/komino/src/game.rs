@@ -10,6 +10,12 @@ use serde_json::{json, Value};
 pub const MAX_SEATS: usize = 8;
 pub const READY_MS: i64 = 30_000;
 pub const SCORE_DELAY_MS: i64 = 2_000;
+/// How long the first match on a discard waits for faster reactions from
+/// slower connections (RT-17). Covers the most latency credit a claim can
+/// carry (`lag::MAX_CREDIT`) plus some jitter.
+pub const MATCH_WINDOW_MS: i64 = 250;
+/// Settled claim results kept for the claimers waiting on them.
+const SETTLED_KEPT: usize = 32;
 
 /// A deal that leaves fewer cards than this to draw is played with two decks
 /// (SET-7).
@@ -203,6 +209,54 @@ impl Reveal {
     }
 }
 
+/// A match waiting for its window to close (RT-16). Claims settle in order
+/// of the claimer's reaction time, not arrival.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Claim {
+    pub id: String,
+    pub player: String,
+    /// The discard sequence number the match targets.
+    pub seq: u64,
+    pub seat: usize,
+    pub slot: usize,
+    pub give_slot: Option<usize>,
+    /// How long the claimer took to react to the discard (RT-18).
+    pub reaction_ms: i64,
+    /// Server arrival, which breaks ties.
+    pub at: i64,
+}
+
+/// How a settled claim ended, read back by the claimer waiting on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Settled {
+    pub id: String,
+    /// The rejection's code and message; `None` when the match was applied,
+    /// right or wrong.
+    pub rejected: Option<(String, String)>,
+}
+
+impl Settled {
+    fn new(id: String, result: Result<(), Reject>) -> Self {
+        let rejected = result.err().map(|r| (r.code.to_string(), r.message));
+        Self { id, rejected }
+    }
+
+    pub fn result(&self) -> Result<(), Reject> {
+        match &self.rejected {
+            None => Ok(()),
+            Some((code, message)) => {
+                // only these come out of settling a claim
+                let code = match code.as_str() {
+                    "too_late" => "too_late",
+                    "not_seated" => "not_seated",
+                    _ => "invalid",
+                };
+                Err(Reject::new(code, message.clone()))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
     pub status: Status,
@@ -235,6 +289,18 @@ pub struct Game {
     /// the turn ends (RULE-22).
     #[serde(default)]
     pub calling: bool,
+    /// When the top discard was put there, for timing matches that carry no
+    /// measured reaction (RT-18).
+    #[serde(default)]
+    pub discard_at: Option<i64>,
+    /// Matches on the top discard waiting for `claim_deadline` (RT-16).
+    #[serde(default)]
+    pub claims: Vec<Claim>,
+    #[serde(default)]
+    pub claim_deadline: Option<i64>,
+    /// The newest settled claims, oldest first.
+    #[serde(default)]
+    pub settled: Vec<Settled>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -285,6 +351,20 @@ impl Action {
     /// Actions that only the turn player takes, guarded by `turn_seq`.
     pub fn is_turn_action(&self) -> bool {
         !matches!(self, Action::Ready | Action::Match { .. } | Action::Hide)
+    }
+
+    /// Actions that can change the top discard or a card a pending claim
+    /// names, so the claims settle first (RT-19).
+    fn disturbs_claims(&self) -> bool {
+        matches!(
+            self,
+            Action::Take
+                | Action::Swap { .. }
+                | Action::Discard
+                | Action::BlindSwap { .. }
+                | Action::LookSwap { .. }
+                | Action::Komino
+        )
     }
 }
 
@@ -362,6 +442,8 @@ pub struct Outcome {
     pub stats: Vec<(String, Stat, i32)>,
     /// True when state changed even if nothing public happened.
     pub changed: bool,
+    /// A match claimed by this action: its id and when its window closes.
+    pub claim: Option<(String, i64)>,
 }
 
 impl Outcome {
@@ -426,6 +508,10 @@ impl Game {
             turn_deadline: None,
             settings,
             calling: false,
+            discard_at: None,
+            claims: vec![],
+            claim_deadline: None,
+            settled: vec![],
         }
     }
 
@@ -470,10 +556,11 @@ impl Game {
         self.deck.pop()
     }
 
-    fn push_discard(&mut self, card: i8) {
+    fn push_discard(&mut self, card: i8, now: i64) {
         self.discard.push(card);
         self.discard_seq += 1;
         self.matchable = true;
+        self.discard_at = Some(now);
     }
 
     fn require_turn(&self, seat: usize) -> Result<(), Reject> {
@@ -620,6 +707,20 @@ impl Game {
         now: i64,
         rng: &mut impl rand::Rng,
     ) -> Result<Outcome, Reject> {
+        self.apply_timed(player, action, turn_seq, None, now, rng)
+    }
+
+    /// [`Game::apply`] with the claimer's measured reaction time for a match
+    /// (RT-18). Without one, a match is timed from when the discard landed.
+    pub fn apply_timed(
+        &mut self,
+        player: &str,
+        action: Action,
+        turn_seq: Option<u64>,
+        reaction_ms: Option<i64>,
+        now: i64,
+        rng: &mut impl rand::Rng,
+    ) -> Result<Outcome, Reject> {
         if action.is_turn_action()
             && self.status.in_play()
             && self.seat_of(player) == Some(self.turn)
@@ -631,7 +732,7 @@ impl Game {
             ));
         }
         let before = self.turn_marker();
-        let out = self.apply_inner(player, action, now, rng)?;
+        let out = self.apply_inner(player, action, reaction_ms, now, rng)?;
         self.bump_turn_seq(before);
         Ok(out)
     }
@@ -640,6 +741,7 @@ impl Game {
         &mut self,
         player: &str,
         action: Action,
+        reaction_ms: Option<i64>,
         now: i64,
         rng: &mut impl rand::Rng,
     ) -> Result<Outcome, Reject> {
@@ -649,6 +751,10 @@ impl Game {
             .ok_or_else(|| Reject::new("not_seated", "you are not playing in this game"))?;
         self.reveals.retain(|r| r.live(now));
         let mut out = Outcome::default();
+        if action.disturbs_claims() {
+            // claims made before this action land before it (RT-19)
+            self.settle_claims(now, rng, &mut out);
+        }
         match action {
             Action::Ready => {
                 if self.status != Status::Peeking {
@@ -702,7 +808,7 @@ impl Game {
                 let old = self.require_filled(me, slot)?;
                 self.seats[me].slots[slot] = Some(card);
                 self.touch(me, slot);
-                self.push_discard(old);
+                self.push_discard(old, now);
                 out.stat(player, Stat::CardsInteracted, 2);
                 out.event(
                     Some(player),
@@ -718,7 +824,7 @@ impl Game {
                         "only a card drawn from the deck can be discarded",
                     ));
                 };
-                self.push_discard(card);
+                self.push_discard(card, now);
                 out.stat(player, Stat::CardsInteracted, 1);
                 out.event(Some(player), "discard", json!({ "value": card }));
                 match special(card) {
@@ -843,9 +949,105 @@ impl Game {
                 seat,
                 slot,
                 give_slot,
-            } => self.do_match(me, player, seq, seat, slot, give_slot, rng, &mut out)?,
+            } => {
+                self.check_match(me, seq, seat, slot, give_slot)?;
+                if self.claims.iter().any(|c| c.player == player) {
+                    return Err(Reject::invalid(
+                        "your match on this discard is still being decided",
+                    ));
+                }
+                let id = uuid::Uuid::new_v4().simple().to_string();
+                // untimed claims count from when the discard landed
+                let reaction_ms = reaction_ms
+                    .unwrap_or_else(|| now - self.discard_at.unwrap_or(now))
+                    .max(0);
+                self.claims.push(Claim {
+                    id: id.clone(),
+                    player: player.to_string(),
+                    seq,
+                    seat,
+                    slot,
+                    give_slot,
+                    reaction_ms,
+                    at: now,
+                });
+                let deadline = *self.claim_deadline.get_or_insert(now + MATCH_WINDOW_MS);
+                out.claim = Some((id, deadline));
+                out.changed = true;
+            }
         }
         Ok(out)
+    }
+
+    /// Settle every pending claim now, fastest reaction first (RT-17). Each
+    /// is checked against the table as the ones before it left it, so after
+    /// a correct match the rest are too late, and a wrong one leaves the
+    /// discard open to the next.
+    fn settle_claims(&mut self, now: i64, rng: &mut impl rand::Rng, out: &mut Outcome) {
+        self.claim_deadline = None;
+        if self.claims.is_empty() {
+            return;
+        }
+        let mut claims = std::mem::take(&mut self.claims);
+        claims.sort_by_key(|c| (c.reaction_ms, c.at));
+        for c in claims {
+            let result = match self.seat_of(&c.player).filter(|&s| self.active(s)) {
+                None => Err(Reject::new(
+                    "not_seated",
+                    "you are not playing in this game",
+                )),
+                Some(me) => self.do_match(
+                    me,
+                    &c.player,
+                    c.seq,
+                    c.seat,
+                    c.slot,
+                    c.give_slot,
+                    now,
+                    rng,
+                    out,
+                ),
+            };
+            self.record(Settled::new(c.id, result));
+        }
+        out.changed = true;
+    }
+
+    /// Settle the pending claims once their window has closed.
+    pub fn settle(&mut self, now: i64, rng: &mut impl rand::Rng) -> Outcome {
+        let mut out = Outcome::default();
+        if self.claim_deadline.is_some_and(|d| now >= d) {
+            self.settle_claims(now, rng, &mut out);
+        }
+        out
+    }
+
+    /// Reject pending claims that can no longer apply, as when the game ends.
+    fn drop_claims(&mut self, keep: impl Fn(&Claim) -> bool, why: Reject) {
+        let (kept, dropped): (Vec<Claim>, Vec<Claim>) =
+            std::mem::take(&mut self.claims).into_iter().partition(keep);
+        self.claims = kept;
+        if self.claims.is_empty() {
+            self.claim_deadline = None;
+        }
+        for c in dropped {
+            self.record(Settled::new(c.id, Err(why.clone())));
+        }
+    }
+
+    fn record(&mut self, settled: Settled) {
+        self.settled.push(settled);
+        let extra = self.settled.len().saturating_sub(SETTLED_KEPT);
+        self.settled.drain(..extra);
+    }
+
+    /// How the claim `id` settled; `None` while it is pending or once it is
+    /// too old to be kept.
+    pub fn claim_result(&self, id: &str) -> Option<Result<(), Reject>> {
+        self.settled
+            .iter()
+            .find(|s| s.id == id)
+            .map(Settled::result)
     }
 
     fn exchange(&mut self, a: (usize, usize, i8), b: (usize, usize, i8)) {
@@ -855,18 +1057,16 @@ impl Game {
         self.touch(b.0, b.1);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn do_match(
-        &mut self,
+    /// Whether the player at `me` may match `seat`'s `slot` against discard
+    /// `seq` now. Returns the card and the slot `me` gives in its place.
+    fn check_match(
+        &self,
         me: usize,
-        player: &str,
         seq: u64,
         seat: usize,
         slot: usize,
         give_slot: Option<usize>,
-        rng: &mut impl rand::Rng,
-        out: &mut Outcome,
-    ) -> Result<(), Reject> {
+    ) -> Result<(i8, Option<usize>), Reject> {
         if !matches!(
             self.status,
             Status::Playing | Status::Final | Status::Scoring
@@ -894,12 +1094,29 @@ impl Game {
         } else {
             None
         };
+        Ok((card, give))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn do_match(
+        &mut self,
+        me: usize,
+        player: &str,
+        seq: u64,
+        seat: usize,
+        slot: usize,
+        give_slot: Option<usize>,
+        now: i64,
+        rng: &mut impl rand::Rng,
+        out: &mut Outcome,
+    ) -> Result<(), Reject> {
+        let (card, give) = self.check_match(me, seq, seat, slot, give_slot)?;
         out.stat(player, Stat::CardsInteracted, 1);
         let top = *self.discard.last().expect("matchable implies a discard");
         if card == top {
             self.seats[seat].slots[slot] = None;
             self.touch(seat, slot);
-            self.push_discard(card);
+            self.push_discard(card, now);
             if let Some(give) = give {
                 let given = self.seats[me].slots[give].take();
                 self.touch(me, give);
@@ -945,6 +1162,10 @@ impl Game {
         }
         self.seats[seat].forfeited = true;
         self.seats[seat].slots.clear();
+        self.drop_claims(
+            |c| c.player != player,
+            Reject::new("not_seated", "you left the game"),
+        );
         self.reveals
             .retain(|r| r.seat != seat && r.player != player);
         self.final_remaining.retain(|&s| s != seat);
@@ -980,17 +1201,27 @@ impl Game {
         out
     }
 
-    /// Advance timers: the ready deadline, away turns, turn limits, and
-    /// scoring.
-    pub fn tick(&mut self, now: i64, present: &dyn Fn(&str) -> bool) -> Outcome {
+    /// Advance timers: match claims, the ready deadline, away turns, turn
+    /// limits, and scoring.
+    pub fn tick(
+        &mut self,
+        now: i64,
+        present: &dyn Fn(&str) -> bool,
+        rng: &mut impl rand::Rng,
+    ) -> Outcome {
         let before = self.turn_marker();
-        let out = self.tick_inner(now, present);
+        let out = self.tick_inner(now, present, rng);
         self.bump_turn_seq(before);
         out
     }
 
-    fn tick_inner(&mut self, now: i64, present: &dyn Fn(&str) -> bool) -> Outcome {
-        let mut out = Outcome::default();
+    fn tick_inner(
+        &mut self,
+        now: i64,
+        present: &dyn Fn(&str) -> bool,
+        rng: &mut impl rand::Rng,
+    ) -> Outcome {
+        let mut out = self.settle(now, rng);
         match self.status {
             Status::Peeking => {
                 if self.ready_deadline.is_some_and(|d| now >= d) {
@@ -1000,6 +1231,7 @@ impl Game {
             Status::Playing | Status::Final => {
                 let player = self.seats[self.turn].player.clone();
                 if self.turn_deadline.is_some_and(|d| now >= d) {
+                    self.settle_claims(now, rng, &mut out);
                     self.skip_turn(&player, "timeout_skip", now, &mut out);
                 } else if present(&player) {
                     if self.away_since.take().is_some() {
@@ -1012,6 +1244,7 @@ impl Game {
                             out.changed = true;
                         }
                         Some(since) if now - since >= self.settings.away_grace_ms() => {
+                            self.settle_claims(now, rng, &mut out);
                             self.skip_turn(&player, "away_skip", now, &mut out);
                         }
                         Some(_) => {}
@@ -1020,6 +1253,7 @@ impl Game {
             }
             Status::Scoring => {
                 if self.score_at.is_some_and(|d| now >= d) {
+                    self.settle_claims(now, rng, &mut out);
                     self.finish(&mut out);
                 }
             }
@@ -1032,7 +1266,7 @@ impl Game {
     /// pile and a pending special move is lost.
     fn skip_turn(&mut self, player: &str, kind: &'static str, now: i64, out: &mut Outcome) {
         if let Stage::Drawn { card } | Stage::Taken { card } = self.stage {
-            self.push_discard(card);
+            self.push_discard(card, now);
         }
         out.event(Some(player), kind, json!({}));
         self.end_turn(now, out);
@@ -1040,6 +1274,8 @@ impl Game {
 
     /// Reveal and score every hand.
     fn finish(&mut self, out: &mut Outcome) {
+        // only a forfeit ends a game with claims still pending
+        self.drop_claims(|_| false, Reject::new("too_late", "the game is over"));
         for seat in self.seats.iter_mut().filter(|s| !s.forfeited) {
             seat.score = Some(seat.slots.iter().flatten().map(|&v| i32::from(v)).sum());
         }
@@ -1263,15 +1499,51 @@ mod tests {
     }
 
     /// Act with the current turn token, as a client looking at the latest
-    /// view would.
+    /// view would. A match settles at once, as when nobody else claims in
+    /// its window.
     fn act(g: &mut Game, p: &str, a: Action) -> Outcome {
-        let seq = g.turn_seq;
-        g.apply(p, a, Some(seq), 0, &mut rng()).unwrap()
+        try_act(g, p, a).unwrap()
     }
 
     fn reject(g: &mut Game, p: &str, a: Action) -> &'static str {
+        try_act(g, p, a).unwrap_err().code
+    }
+
+    fn try_act(g: &mut Game, p: &str, a: Action) -> Result<Outcome, Reject> {
         let seq = g.turn_seq;
-        g.apply(p, a, Some(seq), 0, &mut rng()).unwrap_err().code
+        let mut out = g.apply(p, a, Some(seq), 0, &mut rng())?;
+        if let Some((id, deadline)) = out.claim.take() {
+            let settled = g.settle(deadline, &mut rng());
+            out.events.extend(settled.events);
+            out.stats.extend(settled.stats);
+            g.claim_result(&id).expect("the claim settled")?;
+        }
+        Ok(out)
+    }
+
+    /// Claim a match timed at `reaction_ms`, arriving at `now`.
+    fn claim(
+        g: &mut Game,
+        p: &str,
+        reaction_ms: i64,
+        now: i64,
+        seat: usize,
+        slot: usize,
+    ) -> String {
+        let a = Action::Match {
+            seq: g.discard_seq,
+            seat,
+            slot,
+            give_slot: None,
+        };
+        let out = g
+            .apply_timed(p, a, None, Some(reaction_ms), now, &mut rng())
+            .unwrap();
+        out.claim.expect("a match is claimed").0
+    }
+
+    fn present(_: &str) -> bool {
+        true
     }
 
     #[test]
@@ -1320,8 +1592,8 @@ mod tests {
         g.forfeit("p0", 0);
         assert!(g.turn_seq > seq);
         let seq = g.turn_seq;
-        g.tick(0, &|p| p != "p1");
-        g.tick(GRACE_MS, &|p| p != "p1");
+        g.tick(0, &|p| p != "p1", &mut rng());
+        g.tick(GRACE_MS, &|p| p != "p1", &mut rng());
         assert_eq!(g.turn, 2);
         assert!(g.turn_seq > seq);
     }
@@ -1394,8 +1666,8 @@ mod tests {
     #[test]
     fn ready_deadline_starts_play() {
         let mut g = deal(players(2), stacked(&[[1; 4], [2; 4]], 9, &[]));
-        assert!(!g.tick(READY_MS - 1, &|_| true).changed);
-        assert!(g.tick(READY_MS, &|_| true).changed);
+        assert!(!g.tick(READY_MS - 1, &|_| true, &mut rng()).changed);
+        assert!(g.tick(READY_MS, &|_| true, &mut rng()).changed);
         assert_eq!(g.status, Status::Playing);
     }
 
@@ -1763,6 +2035,190 @@ mod tests {
         assert_eq!(reject(&mut g, "p0", late), "too_late");
     }
 
+    /// p0 has discarded a 5; both players hold a 5 in slot 0.
+    fn fives() -> Game {
+        let mut g = playing(&[[5, 2, 3, 4], [5, 6, 7, 8]], 0, &[5, 9]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        g
+    }
+
+    #[test]
+    fn the_fastest_reaction_wins_not_the_first_arrival() {
+        let mut g = fives();
+        let near = claim(&mut g, "p0", 300, 10, 0, 0);
+        let far = claim(&mut g, "p1", 200, 100, 1, 0);
+        // the window opens with the first claim and later ones join it
+        assert_eq!(g.claim_deadline, Some(10 + MATCH_WINDOW_MS));
+        let early = g.settle(10 + MATCH_WINDOW_MS - 1, &mut rng());
+        assert!(!early.changed);
+        assert_eq!(g.claim_result(&far), None);
+        assert_eq!(g.seats[1].slots[0], Some(5));
+
+        let out = g.settle(10 + MATCH_WINDOW_MS, &mut rng());
+        assert_eq!(g.claim_result(&far), Some(Ok(())));
+        assert_eq!(g.claim_result(&near).unwrap().unwrap_err().code, "too_late");
+        assert_eq!(g.seats[1].slots[0], None);
+        assert_eq!(g.seats[0].slots[0], Some(5));
+        assert!(g.claims.is_empty());
+        assert_eq!(g.claim_deadline, None);
+        let matches: Vec<_> = out.events.iter().filter(|e| e.kind == "match").collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].player.as_deref(), Some("p1"));
+        assert!(out.stats.contains(&("p1".into(), Stat::Matches, 1)));
+    }
+
+    #[test]
+    fn equal_reactions_go_to_the_first_arrival() {
+        let mut g = fives();
+        let first = claim(&mut g, "p1", 200, 20, 1, 0);
+        let second = claim(&mut g, "p0", 200, 30, 0, 0);
+        g.settle(i64::MAX, &mut rng());
+        assert_eq!(g.claim_result(&first), Some(Ok(())));
+        assert_eq!(
+            g.claim_result(&second).unwrap().unwrap_err().code,
+            "too_late"
+        );
+    }
+
+    #[test]
+    fn a_wrong_fastest_claim_pays_and_leaves_the_discard_open() {
+        let mut g = fives();
+        // p0 guesses their 2 is a 5
+        let wrong = claim(&mut g, "p0", 100, 10, 0, 1);
+        let right = claim(&mut g, "p1", 250, 20, 1, 0);
+        let out = g.settle(i64::MAX, &mut rng());
+        assert_eq!(g.claim_result(&wrong), Some(Ok(())));
+        assert_eq!(g.claim_result(&right), Some(Ok(())));
+        assert!(out.stats.contains(&("p0".into(), Stat::FailedMatches, 1)));
+        assert_eq!(g.seats[0].slots.len(), 5);
+        assert_eq!(g.seats[0].slots[4], Some(9));
+        assert_eq!(g.seats[1].slots[0], None);
+    }
+
+    #[test]
+    fn a_claim_is_checked_when_made_and_once_per_player() {
+        let mut g = fives();
+        let stale = Action::Match {
+            seq: g.discard_seq - 1,
+            seat: 0,
+            slot: 0,
+            give_slot: None,
+        };
+        assert_eq!(reject(&mut g, "p0", stale), "too_late");
+        let no_give = Action::Match {
+            seq: g.discard_seq,
+            seat: 1,
+            slot: 0,
+            give_slot: None,
+        };
+        assert_eq!(reject(&mut g, "p0", no_give), "invalid");
+        assert!(g.claims.is_empty());
+
+        claim(&mut g, "p0", 100, 10, 0, 0);
+        let again = Action::Match {
+            seq: g.discard_seq,
+            seat: 0,
+            slot: 1,
+            give_slot: None,
+        };
+        let err = g.apply("p0", again, None, 20, &mut rng()).unwrap_err();
+        assert_eq!(err.code, "invalid");
+        assert_eq!(g.claims.len(), 1);
+    }
+
+    #[test]
+    fn an_untimed_claim_counts_from_when_the_discard_landed() {
+        let mut g = playing(&[[5, 2, 3, 4], [5, 6, 7, 8]], 0, &[5]);
+        let seq = g.turn_seq;
+        g.apply("p0", Action::Draw, Some(seq), 900, &mut rng())
+            .unwrap();
+        let seq = g.turn_seq;
+        g.apply("p0", Action::Discard, Some(seq), 1_000, &mut rng())
+            .unwrap();
+        assert_eq!(g.discard_at, Some(1_000));
+        let m = Action::Match {
+            seq: g.discard_seq,
+            seat: 1,
+            slot: 0,
+            give_slot: None,
+        };
+        g.apply("p1", m, None, 1_400, &mut rng()).unwrap();
+        assert_eq!(g.claims[0].reaction_ms, 400);
+    }
+
+    #[test]
+    fn a_take_settles_pending_claims_first_and_a_draw_does_not() {
+        let mut g = fives();
+        let id = claim(&mut g, "p0", 100, 10, 0, 0);
+        // p1 is to move; drawing leaves the discard alone
+        let seq = g.turn_seq;
+        g.apply("p1", Action::Draw, Some(seq), 20, &mut rng())
+            .unwrap();
+        assert_eq!(g.claim_result(&id), None);
+        assert_eq!(g.claims.len(), 1);
+
+        let mut g = fives();
+        let id = claim(&mut g, "p0", 100, 10, 0, 0);
+        let seq = g.turn_seq;
+        let out = g
+            .apply("p1", Action::Take, Some(seq), 20, &mut rng())
+            .unwrap();
+        assert_eq!(g.claim_result(&id), Some(Ok(())));
+        assert_eq!(g.seats[0].slots[0], None);
+        // the matched card took the discard's place, so the take gets a 5
+        assert_eq!(g.stage, Stage::Taken { card: 5 });
+        let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, ["match", "take"]);
+    }
+
+    #[test]
+    fn forfeits_and_the_end_of_the_game_reject_pending_claims() {
+        let mut g = playing(&[[5, 2, 3, 4], [5, 6, 7, 8], [5, 1, 1, 1]], 0, &[5]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        let gone = claim(&mut g, "p1", 100, 10, 1, 0);
+        let stays = claim(&mut g, "p2", 200, 20, 2, 0);
+        g.forfeit("p1", 30);
+        assert_eq!(
+            g.claim_result(&gone).unwrap().unwrap_err().code,
+            "not_seated"
+        );
+        assert_eq!(g.claim_result(&stays), None);
+        // p0 leaving too ends the game before p2's claim settles
+        g.forfeit("p0", 40);
+        assert_eq!(g.status, Status::Scored);
+        assert_eq!(
+            g.claim_result(&stays).unwrap().unwrap_err().code,
+            "too_late"
+        );
+        assert!(g.claims.is_empty());
+    }
+
+    #[test]
+    fn scoring_settles_pending_claims_before_revealing() {
+        let mut g = fives();
+        let id = claim(&mut g, "p1", 100, 10, 1, 0);
+        g.status = Status::Scoring;
+        g.score_at = Some(20);
+        g.tick(20, &present, &mut rng());
+        assert_eq!(g.status, Status::Scored);
+        assert_eq!(g.claim_result(&id), Some(Ok(())));
+        assert_eq!(g.seats[1].score, Some(6 + 7 + 8));
+    }
+
+    #[test]
+    fn settled_results_are_kept_for_a_while() {
+        let mut g = fives();
+        let first = claim(&mut g, "p0", 100, 10, 0, 1); // wrong, so the 5 stays up
+        g.settle(i64::MAX, &mut rng());
+        for _ in 0..SETTLED_KEPT {
+            g.record(Settled::new("x".into(), Ok(())));
+        }
+        assert_eq!(g.settled.len(), SETTLED_KEPT);
+        assert_eq!(g.claim_result(&first), None);
+    }
+
     #[test]
     fn komino_requires_a_full_round_then_gives_everyone_one_turn() {
         let mut g = playing(&[[0; 4], [5; 4], [6; 4]], 1, &[9, 9, 9, 9, 9]);
@@ -1789,7 +2245,7 @@ mod tests {
         act(&mut g, "p2", Action::Discard);
         act(&mut g, "p2", Action::Skip);
         assert_eq!(g.status, Status::Scoring);
-        let out = g.tick(SCORE_DELAY_MS, &|_| true);
+        let out = g.tick(SCORE_DELAY_MS, &|_| true, &mut rng());
         assert_eq!(g.status, Status::Scored);
         assert_eq!(g.winners(), vec!["p0"]);
         assert!(out.stats.contains(&("p0".into(), Stat::KominoWins, 1)));
@@ -1818,7 +2274,7 @@ mod tests {
             act(&mut g, p, Action::Discard);
             act(&mut g, p, Action::Skip);
         }
-        g.tick(SCORE_DELAY_MS, &|_| true);
+        g.tick(SCORE_DELAY_MS, &|_| true, &mut rng());
         assert_eq!(g.winners(), vec!["p1"]);
     }
 
@@ -1836,7 +2292,7 @@ mod tests {
             act(&mut g, p, Action::Discard);
             act(&mut g, p, Action::Skip);
         }
-        g.tick(SCORE_DELAY_MS, &|_| true);
+        g.tick(SCORE_DELAY_MS, &|_| true, &mut rng());
         assert_eq!(g.winners(), vec!["p1", "p2"]);
     }
 
@@ -1905,7 +2361,7 @@ mod tests {
         }
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Komino);
-        let out = g.tick(60_000, &|_| true);
+        let out = g.tick(60_000, &|_| true, &mut rng());
         let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
         assert_eq!(kinds, vec!["timeout_skip", "komino"]);
         assert_eq!(g.caller, Some(0));
@@ -1932,10 +2388,13 @@ mod tests {
     fn away_player_is_skipped_after_the_grace_period() {
         let mut g = playing(&[[1; 4], [2; 4]], 5, &[9]);
         let away = |p: &str| p != "p0";
-        assert!(g.tick(100, &away).changed);
+        assert!(g.tick(100, &away, &mut rng()).changed);
         assert_eq!(g.away_since, Some(100));
-        assert!(g.tick(100 + GRACE_MS - 1, &away).events.is_empty());
-        let out = g.tick(100 + GRACE_MS, &away);
+        assert!(g
+            .tick(100 + GRACE_MS - 1, &away, &mut rng())
+            .events
+            .is_empty());
+        let out = g.tick(100 + GRACE_MS, &away, &mut rng());
         assert_eq!(out.events[0].kind, "away_skip");
         assert_eq!(g.turn, 1);
         assert_eq!(g.seats[0].turns, 1);
@@ -2207,9 +2666,9 @@ mod tests {
         assert_eq!(g.turn_deadline, Some(60_000));
         assert_eq!(g.view("p1", 0)["turn_deadline"], 60_000);
         act(&mut g, "p0", Action::Draw);
-        assert!(!g.tick(59_999, &|_| true).changed);
+        assert!(!g.tick(59_999, &|_| true, &mut rng()).changed);
         let seq = g.turn_seq;
-        let out = g.tick(60_000, &|_| true);
+        let out = g.tick(60_000, &|_| true, &mut rng());
         assert_eq!(out.events[0].kind, "timeout_skip");
         // the held card goes face up and the next turn gets a fresh limit
         assert_eq!(g.discard.last(), Some(&9));
@@ -2231,7 +2690,7 @@ mod tests {
     fn without_a_turn_limit_turns_never_time_out() {
         let mut g = with(Settings::default(), &[[1; 4], [2; 4]], 5, &[9]);
         assert_eq!(g.turn_deadline, None);
-        assert!(!g.tick(i64::MAX / 2, &|_| true).changed);
+        assert!(!g.tick(i64::MAX / 2, &|_| true, &mut rng()).changed);
         assert_eq!(g.turn, 0);
     }
 
@@ -2262,10 +2721,13 @@ mod tests {
         };
         let mut g = with(settings, &[[1; 4], [2; 4]], 5, &[]);
         let away = |p: &str| p != "p0";
-        g.tick(0, &away);
+        g.tick(0, &away, &mut rng());
         assert_eq!(g.view("p1", 0)["away_deadline"], 15_000);
-        assert!(g.tick(14_999, &away).events.is_empty());
-        assert_eq!(g.tick(15_000, &away).events[0].kind, "away_skip");
+        assert!(g.tick(14_999, &away, &mut rng()).events.is_empty());
+        assert_eq!(
+            g.tick(15_000, &away, &mut rng()).events[0].kind,
+            "away_skip"
+        );
     }
 
     #[test]

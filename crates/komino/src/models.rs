@@ -692,10 +692,26 @@ async fn start_game(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<()> {
 }
 
 /// What a client can send: starting a game, or a move in it with the
-/// `turn_seq` it was chosen against (see [`Game::apply`]).
+/// `turn_seq` it was chosen against (see [`Game::apply`]) and, for a match,
+/// the reaction time the client measured (RT-18).
 pub enum ClientAction {
     Start,
-    Game(Action, Option<u64>),
+    Game {
+        action: Action,
+        turn_seq: Option<u64>,
+        reaction_ms: Option<u64>,
+    },
+}
+
+/// Take a whole number field out of an action body.
+fn take_whole(value: &mut Value, field: &str) -> Result<Option<u64>> {
+    match value.as_object_mut().and_then(|o| o.remove(field)) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| ApiError::invalid(format!("{field} must be a whole number"))),
+    }
 }
 
 impl ClientAction {
@@ -703,40 +719,90 @@ impl ClientAction {
         if value.get("type").and_then(Value::as_str) == Some("start") {
             return Ok(Self::Start);
         }
-        let turn_seq = match value.as_object_mut().and_then(|o| o.remove("turn_seq")) {
-            None | Some(Value::Null) => None,
-            Some(v) => Some(
-                v.as_u64()
-                    .ok_or_else(|| ApiError::invalid("turn_seq must be a whole number"))?,
-            ),
-        };
+        let turn_seq = take_whole(&mut value, "turn_seq")?;
+        let reaction_ms = take_whole(&mut value, "reaction_ms")?;
         serde_json::from_value(value)
-            .map(|action| Self::Game(action, turn_seq))
+            .map(|action| Self::Game {
+                action,
+                turn_seq,
+                reaction_ms,
+            })
             .map_err(|e| ApiError::invalid(format!("unknown action: {e}")))
     }
 }
 
-/// Apply one client action for a member of the room.
-pub async fn act(db: &DbPool, room: &Room, player: &str, action: ClientAction) -> Result<()> {
+/// What an applied action left to wait for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Acted {
+    Done,
+    /// A match was claimed; it settles when its window closes at `deadline`
+    /// (RT-16), see [`claim_result`].
+    Claimed {
+        id: String,
+        deadline: i64,
+    },
+}
+
+/// Apply one client action for a member of the room. `reaction_ms` is a
+/// match's reaction time as the server measured and bounded it (RT-18);
+/// `None` times it from when the discard landed.
+pub async fn act(
+    db: &DbPool,
+    room: &Room,
+    player: &str,
+    action: ClientAction,
+    reaction_ms: Option<i64>,
+) -> Result<Acted> {
     require_member(db, room.id, player).await?;
     let mut tx = db.begin().await?;
     // always room then game, so concurrent paths lock in the same order
     let room = lock_room(&mut tx, room.id).await?;
+    let mut acted = Acted::Done;
     match action {
         ClientAction::Start => start_game(&mut tx, &room, player).await?,
-        ClientAction::Game(action, turn_seq) => {
+        ClientAction::Game {
+            action, turn_seq, ..
+        } => {
             let (game_id, mut game) = lock_game(&mut tx, room.id)
                 .await?
                 .ok_or_else(|| ApiError::invalid("no game is in progress"))?;
             let out = {
                 let mut rng = rand::rng();
-                game.apply(player, action, turn_seq, now_ms(), &mut rng)?
+                game.apply_timed(player, action, turn_seq, reaction_ms, now_ms(), &mut rng)?
             };
+            if let Some((id, deadline)) = &out.claim {
+                acted = Acted::Claimed {
+                    id: id.clone(),
+                    deadline: *deadline,
+                };
+            }
             save(&mut tx, &room, game_id, &game, &out).await?;
         }
     }
     tx.commit().await?;
-    Ok(())
+    Ok(acted)
+}
+
+/// Wait for a claimed match's window to close, settle it, and return how it
+/// ended (RT-16). Every claimer in a window wakes at the same deadline; the
+/// first to lock the game settles all of them.
+pub async fn claim_result(db: &DbPool, room_id: i64, id: &str, deadline: i64) -> Result<()> {
+    let wait = (deadline - now_ms()).max(0) as u64;
+    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+    tick_room(db, room_id).await?;
+    let state: Option<Value> =
+        sqlx::query_scalar("SELECT state FROM games WHERE room_id = $1 ORDER BY id DESC LIMIT 1")
+            .bind(room_id)
+            .fetch_optional(db)
+            .await?;
+    let game: Option<Game> = state.map(serde_json::from_value).transpose()?;
+    match game.and_then(|g| g.claim_result(id)) {
+        Some(result) => Ok(result?),
+        None => Err(ApiError::from(Reject::new(
+            "too_late",
+            "that match could not be settled",
+        ))),
+    }
 }
 
 /// Advance timers on every unfinished game.
@@ -745,23 +811,32 @@ pub async fn tick_all(db: &DbPool) -> Result<()> {
         .fetch_all(db)
         .await?;
     for room_id in ids {
-        let mut tx = db.begin().await?;
-        let room = lock_room(&mut tx, room_id).await?;
-        let Some((game_id, mut game)) = lock_game(&mut tx, room_id).await? else {
-            continue;
-        };
-        let present: Vec<String> = sqlx::query_scalar(
-            "SELECT player_id FROM room_members WHERE room_id = $1 AND present_until > now()",
-        )
-        .bind(room_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        let out = game.tick(now_ms(), &|p| present.iter().any(|x| x == p));
-        if out.changed {
-            save(&mut tx, &room, game_id, &game, &out).await?;
-        }
-        tx.commit().await?;
+        tick_room(db, room_id).await?;
     }
+    Ok(())
+}
+
+/// Advance the timers of one room's unfinished game, if it has one.
+pub async fn tick_room(db: &DbPool, room_id: i64) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let room = lock_room(&mut tx, room_id).await?;
+    let Some((game_id, mut game)) = lock_game(&mut tx, room_id).await? else {
+        return Ok(());
+    };
+    let present: Vec<String> = sqlx::query_scalar(
+        "SELECT player_id FROM room_members WHERE room_id = $1 AND present_until > now()",
+    )
+    .bind(room_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let out = {
+        let mut rng = rand::rng();
+        game.tick(now_ms(), &|p| present.iter().any(|x| x == p), &mut rng)
+    };
+    if out.changed {
+        save(&mut tx, &room, game_id, &game, &out).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

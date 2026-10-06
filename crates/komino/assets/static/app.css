@@ -122,6 +122,9 @@ main { max-width: 980px; margin: 0 auto; padding: 12px 16px 120px; }
 .card.empty { border: 2px dashed rgba(255,255,255,.25); border-radius: 7px; }
 .card.sel { outline: 3px solid var(--select); outline-offset: 2px; }
 .card.peeked { outline: 3px solid #8fd3ff; outline-offset: 2px; }
+/* a sent match waiting for its window to settle */
+.card.claiming { outline: 3px dashed var(--select); outline-offset: 2px; animation: claiming .5s ease-in-out infinite alternate; }
+@keyframes claiming { to { outline-offset: 5px; } }
 .card .lock {
   position: absolute; top: -6px; right: -6px; background: var(--accent); color: #fff;
   font-size: 10px; border-radius: 6px; padding: 1px 4px;
@@ -236,5 +239,5 @@ button.card:disabled { opacity: 1; cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .card[class*="fx-"], .status.fx-flash { animation: none; outline: 3px solid var(--select); outline-offset: 2px; }
   .ghost { display: none; }
-  .caption div, .eye-badge { animation: none; }
+  .caption div, .eye-badge, .card.claiming { animation: none; }
 }

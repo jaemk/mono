@@ -1,5 +1,6 @@
-use crate::game::{Secret, Settings};
-use crate::models::{self, ApiError, ClientAction, Player, Result, Room};
+use crate::game::{Action, Secret, Settings};
+use crate::lag::{self, Rtt, Seen};
+use crate::models::{self, Acted, ApiError, ClientAction, Player, Result, Room};
 use crate::{sealed, State};
 use axum::body::Bytes;
 use axum::{
@@ -16,6 +17,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
 
 pub const PLAYER_COOKIE: &str = "komino_player";
 const COOKIE_DAYS: i64 = 365;
@@ -267,7 +269,19 @@ pub async fn action(
 ) -> Result<Response> {
     let (player, jar) = identify(&state, jar).await?;
     let room = models::room_by_code(&state.db, &code).await?;
-    models::act(&state.db, &room, &player.id, ClientAction::parse(body)?).await?;
+    // over http nothing bounds a reported reaction, so a match is timed from
+    // when its discard landed
+    let acted = models::act(
+        &state.db,
+        &room,
+        &player.id,
+        ClientAction::parse(body)?,
+        None,
+    )
+    .await?;
+    if let Acted::Claimed { id, deadline } = acted {
+        models::claim_result(&state.db, room.id, &id, deadline).await?;
+    }
     let view = room_view(&state, &room, &player.id).await?;
     Ok((jar, Json(view)).into_response())
 }
@@ -345,8 +359,15 @@ fn access_error(e: &ApiError) -> Value {
     }
 }
 
-/// Send the socket's current view. False when the socket should close.
-async fn send_view(state: &State, room: &Room, who: &Who, socket: &mut WebSocket) -> bool {
+/// Send the socket's current view, noting when it first carried each
+/// discard (RT-18). False when the socket should close.
+async fn send_view(
+    state: &State,
+    room: &Room,
+    who: &Who,
+    socket: &mut WebSocket,
+    seen: &mut Seen,
+) -> bool {
     let msg = match who {
         Who::Member(player) => match models::require_member(&state.db, room.id, player).await {
             Err(e) => access_error(&e),
@@ -366,14 +387,59 @@ async fn send_view(state: &State, room: &Room, who: &Who, socket: &mut WebSocket
         }
     };
     let closing = msg["type"] == "removed";
-    socket
+    let seq = msg["view"]["game"]["discard_seq"].as_u64();
+    let ok = socket
         .send(Message::Text(msg.to_string().into()))
         .await
-        .is_ok()
-        && !closing
+        .is_ok();
+    if let Some(seq) = seq {
+        seen.sent(seq, std::time::Instant::now());
+    }
+    ok && !closing
 }
 
-async fn handle_text(state: &State, room: &Room, who: &Who, text: &str) -> Value {
+fn result_msg(reference: Option<Value>, result: Result<()>) -> Value {
+    match result {
+        Ok(()) => json!({ "type": "result", "ref": reference, "ok": true }),
+        Err(e) => json!({
+            "type": "result", "ref": reference, "ok": false, "code": e.code, "message": e.message,
+        }),
+    }
+}
+
+/// What a socket knows about its own latency when a message arrives.
+struct Timing<'a> {
+    received: std::time::Instant,
+    rtt: Option<lag::RoundTrip>,
+    seen: &'a Seen,
+}
+
+impl Timing<'_> {
+    /// A match's reaction time, when this socket sent its discard (RT-18).
+    fn reaction_ms(&self, action: &ClientAction) -> Option<i64> {
+        let ClientAction::Game {
+            action: Action::Match { seq, .. },
+            reaction_ms,
+            ..
+        } = action
+        else {
+            return None;
+        };
+        let elapsed = self.seen.since(*seq, self.received)?;
+        Some(lag::reaction_ms(*reaction_ms, elapsed, self.rtt))
+    }
+}
+
+/// Apply a socket message. The reply comes back at once, or for a claimed
+/// match through `later` once the claim settles.
+async fn handle_text(
+    state: &State,
+    room: &Room,
+    who: &Who,
+    text: &str,
+    timing: Timing<'_>,
+    later: &mpsc::UnboundedSender<Value>,
+) -> Option<Value> {
     let parsed: std::result::Result<Value, _> = serde_json::from_str(text);
     let (reference, result) = match parsed {
         Ok(mut body) => {
@@ -381,7 +447,8 @@ async fn handle_text(state: &State, room: &Room, who: &Who, text: &str) -> Value
             let result = match (who, ClientAction::parse(body)) {
                 (Who::Observer { .. }, _) => Err(ApiError::forbidden("observers cannot act")),
                 (Who::Member(player), Ok(action)) => {
-                    models::act(&state.db, room, player, action).await
+                    let reaction = timing.reaction_ms(&action);
+                    models::act(&state.db, room, player, action, reaction).await
                 }
                 (Who::Member(_), Err(e)) => Err(e),
             };
@@ -390,10 +457,17 @@ async fn handle_text(state: &State, room: &Room, who: &Who, text: &str) -> Value
         Err(_) => (None, Err(ApiError::invalid("messages must be json"))),
     };
     match result {
-        Ok(()) => json!({ "type": "result", "ref": reference, "ok": true }),
-        Err(e) => json!({
-            "type": "result", "ref": reference, "ok": false, "code": e.code, "message": e.message,
-        }),
+        Ok(Acted::Claimed { id, deadline }) => {
+            // wait off the socket loop so views keep flowing meanwhile
+            let (db, room_id, later) = (state.db.clone(), room.id, later.clone());
+            tokio::spawn(async move {
+                let result = models::claim_result(&db, room_id, &id, deadline).await;
+                let _ = later.send(result_msg(reference, result));
+            });
+            None
+        }
+        Ok(Acted::Done) => Some(result_msg(reference, Ok(()))),
+        Err(e) => Some(result_msg(reference, Err(e))),
     }
 }
 
@@ -418,22 +492,50 @@ async fn socket_loop(state: State, room: Room, who: Who, mut socket: WebSocket) 
         tracing::warn!("komino presence error: {e:?}");
     }
     let mut beat = tokio::time::interval(HEARTBEAT);
-    if send_view(&state, &room, &who, &mut socket).await {
+    let mut probe = tokio::time::interval(lag::PING_EVERY);
+    let mut rtt = Rtt::default();
+    let mut seen = Seen::default();
+    let (later, mut settled) = mpsc::unbounded_channel::<Value>();
+    if send_view(&state, &room, &who, &mut socket, &mut seen).await {
         loop {
             tokio::select! {
                 msg = socket.recv() => match msg {
                     Some(Ok(Message::Text(text))) => {
-                        let reply = handle_text(&state, &room, &who, text.as_str()).await;
-                        if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
-                            break;
+                        let timing = Timing {
+                            received: std::time::Instant::now(),
+                            rtt: rtt.estimate(),
+                            seen: &seen,
+                        };
+                        let reply =
+                            handle_text(&state, &room, &who, text.as_str(), timing, &later).await;
+                        if let Some(reply) = reply {
+                            if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
+                                break;
+                            }
                         }
+                    }
+                    Some(Ok(Message::Pong(payload))) => {
+                        rtt.pong(&payload, std::time::Instant::now());
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_)) => {}
                 },
+                reply = settled.recv() => {
+                    let Some(reply) = reply else { break };
+                    if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = probe.tick() => {
+                    // browsers answer pings on their own, no page code involved
+                    let payload = rtt.ping(std::time::Instant::now());
+                    if socket.send(Message::Ping(payload.into())).await.is_err() {
+                        break;
+                    }
+                }
                 ping = pings.recv() => match ping {
                     Ok(()) | Err(RecvError::Lagged(_)) => {
-                        if !send_view(&state, &room, &who, &mut socket).await {
+                        if !send_view(&state, &room, &who, &mut socket, &mut seen).await {
                             break;
                         }
                     }

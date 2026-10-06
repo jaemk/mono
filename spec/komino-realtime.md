@@ -54,21 +54,24 @@ A match message names the discard it targets by its discard sequence number, not
 so a match is not rejected as `stale` because an unrelated action landed first.
 
 ### RT-10
-The first match transaction to commit against a discard sequence number wins. Any later match
-against the same sequence number is rejected as `too_late` (RULE-21), with no penalty.
+Among the matches settled against a discard sequence number, the first to apply correctly
+wins, in the order of RT-17. Any later match against the same sequence number is rejected as
+`too_late` (RULE-21), with no penalty.
 
 ### RT-11
-The turn player's next action (draw, take, call) and a match can race. Whichever commits first
-applies; the other is re-checked against the new state and either applied or rejected. A
-discard stays matchable while a later turn proceeds until a newer card covers it.
+The turn player's next action and a match can race. Pending matches settle before any action
+that changes the top discard or a hand (RT-19); a match that arrives after such an action is
+checked against the new state and either claimed or rejected. A discard stays matchable while
+a later turn proceeds until a newer card covers it.
 
 ### RT-12
 At the end of the last final turn, scoring waits 2 seconds so match attempts against the last
 discard can land before cards are revealed (RULE-24).
 
 ### RT-13
-Every match attempt, successful or not, is broadcast with the matcher, the targeted slot, and
-the outcome, so all players see who got there first.
+Every match that settles, right or wrong, is broadcast with the matcher, the targeted slot, and
+the outcome, so all players see who got there first. Matches rejected as `too_late` are only
+reported to their sender.
 
 ## Timers
 
@@ -86,3 +89,46 @@ blind swap, look and swap, skip) must carry the `turn_seq` from the view it was 
 missing, spent, or outdated token is rejected as `stale` (http 409), so a repeated or outdated
 confirm never applies. Matches carry the discard sequence number instead (RT-9) and do not move
 `turn_seq`; ready and start carry no token.
+
+## Lag compensation
+
+A match is won by the fastest reaction to the discard, not the shortest network path to the
+server.
+
+### RT-16
+A match is checked when it arrives (RT-9, RULE-19) and stored on the game as a pending claim;
+it changes nothing yet and nobody else sees it. A player holds at most one pending claim. The
+sender's `result` (RT-4) comes once the claim settles: ok when the match applied, right or
+wrong, or `too_late` when another claim got the discard first. Over http the request waits
+for the same result.
+
+### RT-17
+The first claim against a discard opens a 250ms window; claims arriving within it join it.
+When it closes, the claims settle in order of reaction time (RT-18), ties going to the
+earliest arrival, each checked against the table as the ones before it left it. A wrong match
+takes its penalty and leaves the discard open to the next claim; after a correct one the rest
+are `too_late`.
+
+### RT-18
+A member socket pings every 2 seconds with websocket ping frames, which browsers answer on
+their own, and keeps its last 10 round trips. It notes when it first sent a view carrying each
+`discard_seq`. A match over the socket may report `reaction_ms`, the time the page measured
+from showing the discard to sending the match (UI-32). With `elapsed` the time from sending
+the discard to receiving the match, the reaction used is the report bounded to between
+`elapsed` less the slowest recent round trip and `elapsed`; without a report it is `elapsed`
+less the fastest. Either credit is capped at 200ms, so a client that delays its pongs or
+underreports gains at most that. A match over http, or for a discard the socket never sent,
+is timed from when the discard landed.
+
+### RT-19
+Pending claims settle before a take, swap, discard, blind swap, look and swap, or komino call
+is applied, before a turn is skipped by its limit or by absence, and before scoring, since
+each can change the discard or a targeted card. A draw, peek, or other match leaves them
+waiting. A forfeiting player's claims are rejected as `not_seated`; claims pending when a game
+ends by forfeit are rejected as `too_late`.
+
+### RT-20
+Every claimer waits for its window's deadline, then runs the room's timers (RT-14), so the
+first to lock the game settles all of the window's claims. The timer pass also settles a
+window whose waiters are gone. Settled results are kept on the game for the waiters, newest
+32.

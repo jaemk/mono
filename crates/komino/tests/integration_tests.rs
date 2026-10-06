@@ -71,11 +71,21 @@ fn ws_client(state: &State) -> TestServer {
         .build(router)
 }
 
-/// The next json message on a socket, failing if none arrives in 5s.
+/// The next json message on a socket, failing if none arrives in 5s. The
+/// server's latency pings (RT-18) are skipped; the client answers them.
 async fn next(socket: &mut axum_test::TestWebSocket) -> Value {
-    tokio::time::timeout(std::time::Duration::from_secs(5), socket.receive_json())
-        .await
-        .expect("socket went quiet")
+    use axum_test::WsMessage;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match socket.receive_message().await {
+                WsMessage::Text(text) => return serde_json::from_str(&text).unwrap(),
+                WsMessage::Ping(_) | WsMessage::Pong(_) => {}
+                other => panic!("unexpected socket message {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("socket went quiet")
 }
 
 /// Read socket messages until one matches.
@@ -159,6 +169,19 @@ async fn reveal(
         .post(&format!("/api/rooms/{code}/reveal"))
         .json(&json!({ "client_key": key.public_b64, "what": what, "id": id }))
         .await
+}
+
+/// The running game's state.
+async fn game_state(state: &State, code: &str) -> Game {
+    let row: Value = sqlx::query_scalar(
+        "SELECT g.state FROM games g JOIN rooms r ON r.id = g.room_id
+         WHERE r.code = $1 ORDER BY g.id DESC LIMIT 1",
+    )
+    .bind(code)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    serde_json::from_value(row).unwrap()
 }
 
 /// Replace the running game's state wholesale.
@@ -442,6 +465,132 @@ async fn test_concurrent_matches_exactly_one_wins() {
     assert_eq!(total_matches, 1);
 }
 
+/// A match that reacted faster wins even when it arrives second (RT-17): an
+/// untimed http match counts from when the discard landed, long ago, while
+/// the socket's counts from when its view carried the discard.
+#[tokio::test]
+async fn test_a_faster_reaction_beats_an_earlier_arrival() {
+    let state = get_state().await;
+    let host = ws_client(&state);
+    let guest = client(&state);
+    let code = create_room(&host).await;
+    guest
+        .post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    set_game(&state, &code, |g| {
+        g.status = Status::Playing;
+        g.stage = Stage::Start;
+        g.ready_deadline = None;
+        g.discard = vec![5];
+        g.discard_seq = 3;
+        g.matchable = true;
+        g.discard_at = Some(komino::models::now_ms() - 10_000);
+        g.seats[0].slots = vec![Some(5), Some(1), Some(1), Some(1)];
+        g.seats[1].slots = vec![Some(5), Some(2), Some(2), Some(2)];
+    })
+    .await;
+    let mut socket = host
+        .get_websocket(&format!("/r/{code}/ws"))
+        .await
+        .into_websocket()
+        .await;
+    let view = next(&mut socket).await;
+    assert_eq!(view["view"]["game"]["discard_seq"], 3);
+
+    let m = |seat: usize| json!({ "type": "match", "seq": 3, "seat": seat, "slot": 0 });
+    let socket_match = async {
+        // the http match claims first and opens the window
+        for _ in 0..100 {
+            if !game_state(&state, &code).await.claims.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut msg = m(0);
+        msg["ref"] = json!(7);
+        msg["reaction_ms"] = json!(400);
+        socket.send_json(&msg).await;
+        next_matching(&mut socket, |m| m["type"] == "result").await
+    };
+    let (http, result) = tokio::join!(act(&guest, &code, m(1)), socket_match);
+    http.assert_status(StatusCode::CONFLICT);
+    assert_eq!(http.json::<Value>()["code"], "too_late");
+    assert_eq!(result["ref"], 7);
+    assert_eq!(result["ok"], true);
+
+    let g = game_state(&state, &code).await;
+    assert_eq!(g.seats[0].slots[0], None);
+    assert_eq!(g.seats[1].slots[0], Some(5));
+    assert!(g.claims.is_empty());
+}
+
+/// A claim whose waiter is gone still settles on the next timer pass.
+#[tokio::test]
+async fn test_tick_settles_an_abandoned_claim() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let host_id = me(&host).await;
+    set_game(&state, &code, |g| {
+        g.status = Status::Playing;
+        g.ready_deadline = None;
+        g.discard = vec![5];
+        g.discard_seq = 3;
+        g.matchable = true;
+        let seat = g.seat_of(&host_id).unwrap();
+        g.seats[seat].slots[0] = Some(5);
+        g.claims = vec![komino::game::Claim {
+            id: "abandoned".into(),
+            player: host_id.clone(),
+            seq: 3,
+            seat,
+            slot: 0,
+            give_slot: None,
+            reaction_ms: 100,
+            at: 0,
+        }];
+        g.claim_deadline = Some(0);
+    })
+    .await;
+    komino::models::tick_all(&state.db).await.unwrap();
+    let g = game_state(&state, &code).await;
+    assert_eq!(g.claim_result("abandoned"), Some(Ok(())));
+    assert_eq!(g.discard_seq, 4);
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["events"][0]["kind"], "match");
+    assert_eq!(view["events"][0]["payload"]["ok"], true);
+}
+
+/// Member sockets ping to measure their round trip (RT-18).
+#[tokio::test]
+async fn test_member_sockets_ping() {
+    use axum_test::WsMessage;
+    let state = get_state().await;
+    let host = ws_client(&state);
+    let code = create_room(&host).await;
+    let mut socket = host
+        .get_websocket(&format!("/r/{code}/ws"))
+        .await
+        .into_websocket()
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let WsMessage::Ping(payload) = socket.receive_message().await {
+                assert_eq!(payload.len(), 8);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("no ping");
+}
+
 #[tokio::test]
 async fn test_host_removes_a_player_who_forfeits_and_cannot_rejoin() {
     let state = get_state().await;
@@ -557,7 +706,7 @@ async fn test_websocket_pushes_views_and_takes_actions() {
         .await
         .into_websocket()
         .await;
-    let first: Value = socket.receive_json().await;
+    let first = next(&mut socket).await;
     assert_eq!(first["type"], "view");
     assert_eq!(first["view"]["room"]["code"], code);
 
@@ -567,10 +716,7 @@ async fn test_websocket_pushes_views_and_takes_actions() {
     let mut saw_result = false;
     let mut saw_game = false;
     for _ in 0..6 {
-        let msg: Value =
-            tokio::time::timeout(std::time::Duration::from_secs(5), socket.receive_json())
-                .await
-                .expect("socket went quiet");
+        let msg = next(&mut socket).await;
         if msg["type"] == "result" {
             assert_eq!(msg["ok"], true);
             assert_eq!(msg["ref"], 1);
@@ -592,10 +738,7 @@ async fn test_websocket_pushes_views_and_takes_actions() {
     let guest_id = me(&guest).await;
     let mut heard = false;
     for _ in 0..6 {
-        let msg: Value =
-            tokio::time::timeout(std::time::Duration::from_secs(5), socket.receive_json())
-                .await
-                .expect("socket went quiet");
+        let msg = next(&mut socket).await;
         let seats = msg["view"]["game"]["seats"]
             .as_array()
             .cloned()
@@ -613,10 +756,7 @@ async fn test_websocket_pushes_views_and_takes_actions() {
     // a bad action gets a typed rejection, not a dropped socket
     socket.send_json(&json!({ "type": "draw", "ref": 2 })).await;
     loop {
-        let msg: Value =
-            tokio::time::timeout(std::time::Duration::from_secs(5), socket.receive_json())
-                .await
-                .expect("socket went quiet");
+        let msg = next(&mut socket).await;
         if msg["type"] == "result" {
             assert_eq!(msg["ok"], false);
             assert_eq!(msg["ref"], 2);

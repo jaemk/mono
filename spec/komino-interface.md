@@ -93,6 +93,12 @@ two taps total.
 If the action becomes invalid while its confirm bar is open (e.g. the discard was already
 matched, or the turn changed), the bar closes and shows why.
 
+### UI-32
+A sent match carries how long the page had shown its discard, from the first view carrying
+that `discard_seq` to the confirm, on the page's monotonic clock (RT-18). The targeted card
+shows a pulsing dashed outline, and its label ends in `matching`, until the match's result
+arrives or the discard changes (RT-16).
+
 ### UI-19
 The confirm dialog is centered on the screen over a dimmed backdrop, with full-width confirm
 and cancel buttons at least 48px tall. Confirm takes focus when the dialog opens, so Enter
