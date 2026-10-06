@@ -701,10 +701,13 @@
       return Boolean(p) && live(p.until);
     }
 
-    function slotButton(g, seat, slot) {
+    // `pos` places the card in its hand's grid; every card shows its slot
+    // number, the one the log and confirms use (UI-31)
+    function slotButton(g, seat, slot, pos) {
       const s = g.seats[seat].slots[slot];
       const fxc = fxClass(`s:${seat}:${slot}`);
-      if (s === null) return `<span class="card empty${fxc}" data-seat="${seat}" data-slot="${slot}" aria-label="empty slot"></span>`;
+      const no = `<span class="slot-no">${slot + 1}</span>`;
+      if (s === null) return `<span class="card empty${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="empty slot">${no}</span>`;
       const v = visibleValue(g, seat, slot);
       const chosen = isChosen(g, seat, slot);
       const peeked = isPeeked(g, seat, slot, v);
@@ -713,8 +716,20 @@
       if (watched) label += ", being peeked at";
       const lock = g.seats[seat].locked ? `<span class="lock">locked</span>` : "";
       const badge = watched ? `<span class="eye-badge"><svg viewBox="0 0 34 16" aria-hidden="true">${eye(17, 8, "#2f6fd6")}</svg></span>` : "";
-      return `<button class="card${chosen ? " sel" : ""}${peeked ? " peeked" : ""}${fxc}" data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">` +
-        (v === null ? back() : face(v)) + lock + badge + `</button>`;
+      return `<button class="card${v === null ? " down" : ""}${chosen ? " sel" : ""}${peeked ? " peeked" : ""}${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">` +
+        (v === null ? back() : face(v)) + no + lock + badge + `</button>`;
+    }
+
+    // other players sit across the table, so a seated viewer sees their hand
+    // turned 180 degrees: their near row farthest away, slot 1 bottom right
+    // (UI-30). Observers see every hand as its owner does.
+    function slotPos(g, seat, slot, count) {
+      if (seat === g.me || g.me === null) return "";
+      const cols = columns(g);
+      const rows = Math.ceil(count / cols);
+      const row = rows - Math.floor(slot / cols);
+      const col = cols - (slot % cols);
+      return ` style="grid-area: ${row} / ${col}"`;
     }
 
     function hand(g, seat, mine) {
@@ -724,7 +739,7 @@
       if (s.forfeited) tag = " (out)";
       else if (g.status === "peeking") tag = s.ready ? " (ready)" : " (peeking)";
       if (s.score !== null && s.score !== undefined) tag = ` <span class="score${s.won ? " won" : ""}">${s.score}${s.won ? " won" : ""}</span>`;
-      const slots = s.slots.map((_, i) => slotButton(g, seat, i)).join("");
+      const slots = s.slots.map((_, i) => slotButton(g, seat, i, slotPos(g, seat, i, s.slots.length))).join("");
       const cols = columns(g);
       return `<div class="hand${mine ? " mine" : ""}${g.turn === seat && inPlay(g) ? " turn" : ""}" data-hand="${seat}">` +
         `<div class="who"><span class="dot${p.present ? " on" : ""}"></span>${esc(mine ? "you" : p.name || "?")}${tag}</div>` +

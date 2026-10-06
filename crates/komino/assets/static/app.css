@@ -126,6 +126,17 @@ main { max-width: 980px; margin: 0 auto; padding: 12px 16px 120px; }
   position: absolute; top: -6px; right: -6px; background: var(--accent); color: #fff;
   font-size: 10px; border-radius: 6px; padding: 1px 4px;
 }
+/* slot numbers (UI-31): centered on a back or an empty slot, a tab above a face */
+.card .slot-no {
+  position: absolute; top: -7px; left: 50%; transform: translateX(-50%);
+  min-width: 16px; padding: 0 4px; border-radius: 6px; pointer-events: none;
+  background: var(--ink); color: var(--bg); font-size: 11px; font-weight: 700; line-height: 15px; text-align: center;
+}
+.card.down .slot-no, .card.empty .slot-no {
+  top: 50%; transform: translate(-50%, -50%); min-width: 0; padding: 0;
+  background: none; color: #fff; font-size: 18px; line-height: 1;
+}
+.card.empty .slot-no { color: rgba(255,255,255,.35); }
 button.card:not(:disabled):hover { transform: translateY(-2px); }
 button.card:disabled { opacity: 1; cursor: default; }
 

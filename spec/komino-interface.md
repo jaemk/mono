@@ -52,6 +52,16 @@ forfeits) with player names.
 ### UI-9
 The layout works on a phone in portrait at 360px wide without horizontal scrolling.
 
+### UI-30
+A seated player sees the other players' hands as if sitting across from them: turned 180
+degrees, so each owner's near row (SET-5) is farthest away and their slot 1 is bottom right.
+Observers see every hand as its owner does, near row at the bottom.
+
+### UI-31
+Every card in a hand shows its slot number (1 through the hand's size, then penalty slots),
+the same for every viewer and the same number the log and confirms use (`bob's card 3`). It
+sits in the center of a card back or an empty slot, and in a tab above a face-up card.
+
 ## Confirmation
 
 ### UI-10

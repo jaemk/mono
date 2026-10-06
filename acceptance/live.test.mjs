@@ -331,7 +331,10 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   for (const id of ["sound", "caption", "fx"]) assert.match(page, new RegExp(`id="${id}"`), `komino page #${id}`);
   assert.ok(host.cookies.has("komino_player"), "the page should issue a player cookie");
   await expectStatus(await guest.get("/komino"), 200, "komino page");
-  await expectStatus(await host.get("/komino/static/app.js"), 200, "komino app.js");
+  const script = await expectStatus(await host.get("/komino/static/app.js"), 200, "komino app.js");
+  // other hands turned toward their owners, slot numbers on every card
+  assert.match(script, /grid-area/, "komino app.js turns other players' hands");
+  assert.match(script, /slot-no/, "komino app.js numbers the cards");
 
   const server = await host.json("GET", "/komino/api/key");
   assert.match(server.kid, /^[0-9a-f]{16}$/);

@@ -62,6 +62,38 @@ test("hands lay out in two rows, wide ones marked to shrink", async (t) => {
   assert.equal(grid.classList.contains("wide"), false);
 });
 
+test("other players' hands are turned toward them; yours and an observer's are not (UI-30)", async (t) => {
+  const at = (page, s, n) => page.slot(s, n).getAttribute("style");
+  const page = await boot();
+  t.after(page.stop);
+  // bob's near row (cards 3 and 4) is farthest away, his card 1 bottom right
+  assert.deepEqual([0, 1, 2, 3].map((n) => at(page, 1, n)), ["grid-area: 2 / 2", "grid-area: 2 / 1", "grid-area: 1 / 2", "grid-area: 1 / 1"]);
+  assert.deepEqual([0, 1, 2, 3].map((n) => at(page, 0, n)), [null, null, null, null]);
+  // an odd hand leaves its gap at the far left
+  page.push(makeView(makeGame({ hand_size: 5, seats: [seat("p0", Array(5).fill("x")), seat("p1", Array(5).fill("x"))] })));
+  assert.deepEqual([0, 2, 3, 4].map((n) => at(page, 1, n)), ["grid-area: 2 / 3", "grid-area: 2 / 1", "grid-area: 1 / 3", "grid-area: 1 / 2"]);
+  // a penalty card adds a row on bob's side, farthest away
+  page.push(makeView(makeGame({ seats: [seat("p0"), seat("p1", ["x", "x", "x", "x", "x"])] })));
+  assert.equal(at(page, 1, 4), "grid-area: 1 / 2");
+  assert.equal(at(page, 1, 0), "grid-area: 3 / 2");
+
+  const watch = await boot({ path: "/komino/r/ABCDEF/watch", view: makeView(makeGame({ me: null }), { me: null, observer: true }) });
+  t.after(watch.stop);
+  assert.deepEqual([0, 1].map((s) => at(watch, s, 0)), [null, null]);
+});
+
+test("every card shows its slot number, face up, face down, or empty (UI-31)", async (t) => {
+  const page = await boot({ view: makeView(makeGame({ seats: [seat("p0", [5, "x", null, "x"]), seat("p1")] })) });
+  t.after(page.stop);
+  const no = (el) => el.querySelector(".slot-no").textContent;
+  assert.deepEqual([0, 1, 3].map((n) => no(page.slot(0, n))), ["1", "2", "4"]);
+  assert.equal(no(page.doc.querySelector("[data-seat='0'][data-slot='2']")), "3");
+  assert.deepEqual([0, 1, 2, 3].map((n) => no(page.slot(1, n))), ["1", "2", "3", "4"]);
+  assert.equal(page.slot(0, 0).classList.contains("down"), false);
+  assert.ok(page.slot(0, 1).classList.contains("down"));
+  assert.equal(page.$("deck").querySelector(".slot-no"), null);
+});
+
 test("the opening peek names the near row's size", async (t) => {
   const ten = Array(10).fill("x");
   const g = makeGame({ status: "peeking", hand_size: 10, ready_deadline: Date.now() + 30_000, seats: [seat("p0", ten), seat("p1", ten)] });
