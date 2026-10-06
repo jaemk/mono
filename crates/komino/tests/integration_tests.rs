@@ -1210,7 +1210,7 @@ async fn test_rooms_default_their_settings() {
     let view: Value = host.post("/api/rooms").await.json();
     assert_eq!(
         view["room"]["settings"],
-        json!({ "hand_size": 4, "away_grace_secs": 30, "turn_limit_secs": null, "reveal_secs": null })
+        json!({ "hand_size": 4, "away_grace_secs": 30, "turn_limit_secs": null, "reveal_secs": 15 })
     );
 }
 

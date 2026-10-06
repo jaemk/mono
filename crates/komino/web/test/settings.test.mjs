@@ -10,7 +10,7 @@ test("create sends the default settings", async (t) => {
   page.$("create").click();
   await flush();
   assert.deepEqual(page.callsTo("POST /komino/api/rooms")[0].body,
-    { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: null });
+    { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15 });
   assert.equal(page.location.href, "/komino/r/QWERTY");
 });
 

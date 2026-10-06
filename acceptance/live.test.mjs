@@ -346,7 +346,7 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   const code = room.room.code;
   assert.match(code, /^[A-Z0-9]{6}$/);
   // no body takes every default setting
-  assert.deepEqual(room.room.settings, { hand_size: 4, away_grace_secs: 30, turn_limit_secs: null, reveal_secs: null });
+  assert.deepEqual(room.room.settings, { hand_size: 4, away_grace_secs: 30, turn_limit_secs: null, reveal_secs: 15 });
   t.after(async () => {
     // leaving as host ends the game; the empty room is swept later
     await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());

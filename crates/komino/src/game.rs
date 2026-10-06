@@ -55,7 +55,7 @@ impl Default for Settings {
             hand_size: 4,
             away_grace_secs: 30,
             turn_limit_secs: None,
-            reveal_secs: None,
+            reveal_secs: Some(15),
         }
     }
 }
@@ -2116,9 +2116,16 @@ mod tests {
         }
     }
 
+    fn untimed() -> Settings {
+        Settings {
+            reveal_secs: None,
+            ..Settings::default()
+        }
+    }
+
     #[test]
     fn an_untimed_peek_lasts_until_hidden() {
-        let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
+        let mut g = with(untimed(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
         act(&mut g, "p0", Action::UseSpecial);
@@ -2145,7 +2152,7 @@ mod tests {
 
     #[test]
     fn hiding_ends_only_the_hiders_peeks() {
-        let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
+        let mut g = with(untimed(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 7]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
         act(&mut g, "p0", Action::UseSpecial);
@@ -2161,7 +2168,7 @@ mod tests {
 
     #[test]
     fn an_untimed_peek_ends_when_the_slot_changes() {
-        let mut g = with(Settings::default(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 6]);
+        let mut g = with(untimed(), &[[1, 2, 3, 4], [5; 4]], 0, &[7, 6]);
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Discard);
         act(&mut g, "p0", Action::UseSpecial);

@@ -13,10 +13,10 @@ The lobby's `create a room` form has four settings, each preset to its default:
 | cards in hand | `hand_size` | 4-10 | 4 |
 | away grace | `away_grace_secs` | 10-600 seconds | 30 |
 | turn limit | `turn_limit_secs` | off, or 10-600 seconds | off |
-| peek time | `reveal_secs` | until hidden, or 1-60 seconds | until hidden |
+| peek time | `reveal_secs` | until hidden, or 1-60 seconds | 15 |
 
 The form offers a select for each (away grace 15, 30, 60, 120 seconds; turn limit off, 30,
-60, 90, 120, 300 seconds; peek time until hidden, 3, 5, 10, 30 seconds). The api accepts any
+60, 90, 120, 300 seconds; peek time until hidden, 3, 5, 10, 15, 30 seconds). The api accepts any
 value in the allowed range.
 
 ### SET-2
