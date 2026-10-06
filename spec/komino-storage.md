@@ -46,7 +46,7 @@ Tables:
 - `players`: id, name, created, last_seen.
 - `rooms`: id, code (unique), host_player_id, last_winner, created, last_active, and the
   settings (SET-3): hand_size, away_grace_secs, turn_limit_secs (nullable), reveal_secs
-  (nullable).
+  (nullable), show_misses.
 - `room_members`: room_id, player_id, joined, left_at (nullable), removed (bool),
   present_until (presence heartbeat, ROOM-12), primary key (room_id, player_id).
 - `games`: id, room_id, status (`peeking`, `playing`, `final`, `scoring`, `scored`), version,

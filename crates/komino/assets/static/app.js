@@ -21,6 +21,8 @@
   const FX_MS = 1400;
   const FLY_MS = 700;
   const CAPTION_MS = 3000;
+  // how long a missed card shows its value, in rooms that show misses
+  const MISS_SHOW_MS = 3000;
   const SOUND_KEY = "komino.sound";
 
   const esc = (s) =>
@@ -441,8 +443,13 @@
       if (sound && audio) SOUNDS[name](audio, audio.currentTime + delay);
     }
 
-    function mark(key, cls) {
-      fx.set(key, { cls, at: Date.now() });
+    // `shown` is a value the slot shows face up while marked
+    function mark(key, cls, shown = null, ms = FX_MS) {
+      fx.set(key, { cls, at: Date.now(), shown, ms });
+    }
+    function fxShown(key) {
+      const f = fx.get(key);
+      return f ? f.shown : null;
     }
     function fxClass(key) {
       const f = fx.get(key);
@@ -524,7 +531,9 @@
         case "match": {
           const target = slot(p.seat, p.slot);
           if (!p.ok) {
-            mark(target, "fx-miss");
+            // a room that shows misses names the card's value (SET-13)
+            if (typeof p.value === "number") mark(target, "fx-miss", p.value, MISS_SHOW_MS);
+            else mark(target, "fx-miss");
             if (p.penalty) {
               const added = slot(seat, g.seats[seat].slots.length - 1);
               mark(added, "fx-flip");
@@ -729,12 +738,15 @@
       const fxc = fxClass(`s:${seat}:${slot}`);
       const no = `<span class="slot-no">${slot + 1}</span>`;
       if (s === null) return `<span class="card empty${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="empty slot">${no}</span>`;
-      const v = visibleValue(g, seat, slot);
+      const own = visibleValue(g, seat, slot);
+      const missed = own === null ? fxShown(`s:${seat}:${slot}`) : null;
+      const v = own === null ? missed : own;
       const chosen = isChosen(g, seat, slot);
       const peeked = isPeeked(g, seat, slot, v);
       const watched = othersPeek(g, seat, slot);
       const pending = Boolean(claiming) && claiming.seat === seat && claiming.slot === slot;
       let label = v === null ? `${seatOwner(g, seat)} card ${slot + 1}, face down` : `${seatOwner(g, seat)} card ${slot + 1}: ${cardLabel(v)}`;
+      if (missed !== null) label += ", missed match";
       if (watched) label += ", being peeked at";
       if (pending) label += ", matching";
       const lock = g.seats[seat].locked ? `<span class="lock">locked</span>` : "";
@@ -992,7 +1004,11 @@
         case "blind_swap": return `${who} blind swapped with ${owner(p.target_seat)} card ${p.target_slot + 1}`;
         case "look_swap": return `${who} swapped with ${owner(p.target_seat)} card ${p.target_slot + 1}`;
         case "skip": return `${who} skipped the move`;
-        case "match": return p.ok ? `${who} matched ${owner(p.seat)} ${p.value}` : `${who} missed a match on ${owner(p.seat)} card ${p.slot + 1} and took a penalty`;
+        case "match": {
+          if (p.ok) return `${who} matched ${owner(p.seat)} ${p.value}`;
+          const value = typeof p.value === "number" ? `, a ${p.value},` : "";
+          return `${who} missed a match on ${owner(p.seat)} card ${p.slot + 1}${value} and took a penalty`;
+        }
         case "komino": return `${who} called KOMINO`;
         case "forfeit": return `${who} left the game`;
         case "away_skip": return `${who} ${e.player === me ? "were" : "was"} away; turn skipped`;
@@ -1014,6 +1030,7 @@
         s.turn_limit_secs ? `${s.turn_limit_secs}s turns` : "no turn limit",
         `${s.away_grace_secs}s away grace`,
         s.reveal_secs ? `${s.reveal_secs}s peeks` : "peeks until hidden",
+        s.show_misses === false ? "misses hidden" : "misses shown",
       ].join(", ");
     }
 
@@ -1032,7 +1049,7 @@
       const g = game();
       // every render (each view and each second) drops expired values
       syncSecrets(g);
-      for (const [k, f] of fx) if (Date.now() - f.at >= FX_MS) fx.delete(k);
+      for (const [k, f] of fx) if (Date.now() - f.at >= f.ms) fx.delete(k);
       $("code").textContent = view.room.code;
       $("settings").textContent = settingsText(view.room.settings);
       const amHost = !watching && view.room.host === me;
@@ -1155,6 +1172,7 @@
           turn_limit_secs: secs("set-turn"),
           away_grace_secs: Number($("set-away").value),
           reveal_secs: secs("set-reveal"),
+          show_misses: $("set-misses").value === "shown",
         };
         try {
           const v = await api("POST", "/komino/api/rooms", settings);

@@ -10,7 +10,7 @@ test("create sends the default settings", async (t) => {
   page.$("create").click();
   await flush();
   assert.deepEqual(page.callsTo("POST /komino/api/rooms")[0].body,
-    { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15 });
+    { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15, show_misses: true });
   assert.equal(page.location.href, "/komino/r/QWERTY");
 });
 
@@ -21,23 +21,24 @@ test("create sends the chosen settings", async (t) => {
   page.$("set-turn").value = "90";
   page.$("set-away").value = "120";
   page.$("set-reveal").value = "5";
+  page.$("set-misses").value = "hidden";
   page.$("create").click();
   await flush();
   assert.deepEqual(page.callsTo("POST /komino/api/rooms")[0].body,
-    { hand_size: 9, turn_limit_secs: 90, away_grace_secs: 120, reveal_secs: 5 });
+    { hand_size: 9, turn_limit_secs: 90, away_grace_secs: 120, reveal_secs: 5, show_misses: false });
 });
 
 test("the room shows its settings", async (t) => {
-  const settings = { hand_size: 6, away_grace_secs: 30, turn_limit_secs: 60, reveal_secs: null };
+  const settings = { hand_size: 6, away_grace_secs: 30, turn_limit_secs: 60, reveal_secs: null, show_misses: true };
   const view = makeView();
   view.room.settings = settings;
   const page = await boot({ view });
   t.after(page.stop);
-  assert.equal(page.$("settings").textContent, "6 cards, 60s turns, 30s away grace, peeks until hidden");
+  assert.equal(page.$("settings").textContent, "6 cards, 60s turns, 30s away grace, peeks until hidden, misses shown");
   const other = makeView();
-  other.room.settings = { hand_size: 4, away_grace_secs: 15, turn_limit_secs: null, reveal_secs: 10 };
+  other.room.settings = { hand_size: 4, away_grace_secs: 15, turn_limit_secs: null, reveal_secs: 10, show_misses: false };
   page.push(other);
-  assert.equal(page.$("settings").textContent, "4 cards, no turn limit, 15s away grace, 10s peeks");
+  assert.equal(page.$("settings").textContent, "4 cards, no turn limit, 15s away grace, 10s peeks, misses hidden");
   // a view without settings shows nothing
   page.push(makeView());
   assert.equal(page.$("settings").textContent, "");

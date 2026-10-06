@@ -53,6 +53,8 @@ pub struct Settings {
     pub turn_limit_secs: Option<i64>,
     /// `None` keeps a peek up until the player hides it.
     pub reveal_secs: Option<i64>,
+    /// Show everyone the value of a card a failed match targeted (SET-13).
+    pub show_misses: bool,
 }
 
 impl Default for Settings {
@@ -62,6 +64,7 @@ impl Default for Settings {
             away_grace_secs: 30,
             turn_limit_secs: None,
             reveal_secs: Some(15),
+            show_misses: true,
         }
     }
 }
@@ -71,6 +74,7 @@ impl Settings {
     pub fn legacy() -> Self {
         Self {
             reveal_secs: Some(5),
+            show_misses: false,
             ..Self::default()
         }
     }
@@ -1135,11 +1139,12 @@ impl Game {
                 self.seats[me].slots.push(Some(card));
             }
             out.stat(player, Stat::FailedMatches, 1);
-            out.event(
-                Some(player),
-                "match",
-                json!({ "ok": false, "seat": seat, "slot": slot, "penalty": penalty.is_some() }),
-            );
+            let mut payload =
+                json!({ "ok": false, "seat": seat, "slot": slot, "penalty": penalty.is_some() });
+            if self.settings.show_misses {
+                payload["value"] = json!(card);
+            }
+            out.event(Some(player), "match", payload);
         }
         Ok(())
     }
@@ -2510,6 +2515,7 @@ mod tests {
             away_grace_secs: 600,
             turn_limit_secs: Some(10),
             reveal_secs: Some(60),
+            show_misses: false,
         };
         assert_eq!(ok.validate(), Ok(()));
         let bad = [
@@ -2573,6 +2579,42 @@ mod tests {
                 assert_eq!(c["v"], g.seats[0].slots[slot].unwrap());
             }
         }
+    }
+
+    #[test]
+    fn a_miss_shows_the_targeted_value_only_when_the_room_says_so() {
+        for (show_misses, value) in [(true, json!(5)), (false, Value::Null)] {
+            let settings = Settings {
+                show_misses,
+                ..Settings::default()
+            };
+            let mut g = with(settings, &[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[9, 12]);
+            act(&mut g, "p0", Action::Draw);
+            act(&mut g, "p0", Action::Swap { slot: 0 }); // discards 1
+            let seq = g.discard_seq;
+            let out = act(
+                &mut g,
+                "p1",
+                Action::Match {
+                    seq,
+                    seat: 1,
+                    slot: 0,
+                    give_slot: None,
+                },
+            );
+            let e = out.events.last().unwrap();
+            assert_eq!(e.kind, "match");
+            assert_eq!(e.payload["ok"], false);
+            assert_eq!(
+                e.payload.get("value").cloned().unwrap_or(Value::Null),
+                value
+            );
+        }
+        // settings saved before the option existed show misses; games saved
+        // before settings existed keep them hidden
+        let old: Settings = serde_json::from_value(json!({ "hand_size": 4 })).unwrap();
+        assert!(old.show_misses);
+        assert!(!Settings::legacy().show_misses);
     }
 
     fn untimed() -> Settings {

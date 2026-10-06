@@ -6,7 +6,7 @@ peeks stay up.
 ## Choosing settings
 
 ### SET-1
-The lobby's `create a room` form has four settings, each preset to its default:
+The lobby's `create a room` form has five settings, each preset to its default:
 
 | Setting | Field | Allowed | Default |
 |---------|-------|---------|---------|
@@ -14,10 +14,11 @@ The lobby's `create a room` form has four settings, each preset to its default:
 | away grace | `away_grace_secs` | 10-600 seconds | 30 |
 | turn limit | `turn_limit_secs` | off, or 10-600 seconds | off |
 | peek time | `reveal_secs` | until hidden, or 1-60 seconds | 15 |
+| missed matches | `show_misses` | true (shown to all) or false (hidden) | true |
 
 The form offers a select for each (away grace 15, 30, 60, 120 seconds; turn limit off, 30,
-60, 90, 120, 300 seconds; peek time until hidden, 3, 5, 10, 15, 30 seconds). The api accepts any
-value in the allowed range.
+60, 90, 120, 300 seconds; peek time until hidden, 3, 5, 10, 15, 30 seconds; missed matches
+shown to all or hidden). The api accepts any value in the allowed range.
 
 ### SET-2
 `POST /komino/api/rooms` takes the settings as an optional json body. A missing body or field
@@ -28,11 +29,12 @@ the allowed range is rejected as `invalid` (http 400) and no room is created.
 Settings are fixed for the life of the room and stored on the `rooms` row. Each game copies
 them into its state when it starts, so a game always plays by the settings it was dealt
 with. Games saved before settings existed play by the earlier fixed rules (4 cards, 30 second
-grace, no turn limit, 5 second peeks).
+grace, no turn limit, 5 second peeks, misses hidden). Games saved with settings but before
+`show_misses` existed show misses.
 
 ### SET-4
 The room view carries the settings, and the room page shows them in one line under the room
-code (e.g. `6 cards, 60s turns, 30s away grace, peeks until hidden`).
+code (e.g. `6 cards, 60s turns, 30s away grace, peeks until hidden, misses shown`).
 
 ## Hand size
 
@@ -80,3 +82,12 @@ slot changes, or the game is scored. Either way it ends early when the slot chan
 holds, so the slot highlight (UI-17) clears for everyone. The `hide card` button sends it, and
 is shown whenever the player holds a live peek, including after a reload when its value can no
 longer be fetched (SEAL-9). Hiding carries no turn token and adds no log event.
+
+## Missed matches
+
+### SET-13
+With `show_misses` on, a wrong match (RULE-20) makes the targeted card's value public: the
+match event carries it as `value`, so every player and observer sees it. The card stays face
+down in its hand; each page turns it face up for 3 seconds as the miss plays (UI-24), and the
+log and caption name the value (`bob missed a match on your card 2, a 9, and took a penalty`).
+With it off, the event carries no value and nobody, the matcher included, learns the card.

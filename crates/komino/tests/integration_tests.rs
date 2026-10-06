@@ -1428,8 +1428,64 @@ async fn test_rooms_default_their_settings() {
     let view: Value = host.post("/api/rooms").await.json();
     assert_eq!(
         view["room"]["settings"],
-        json!({ "hand_size": 4, "away_grace_secs": 30, "turn_limit_secs": null, "reveal_secs": 15 })
+        json!({
+            "hand_size": 4, "away_grace_secs": 30, "turn_limit_secs": null, "reveal_secs": 15,
+            "show_misses": true
+        })
     );
+}
+
+/// A miss carries the targeted card's value to every viewer only in a room
+/// that shows misses (SET-13).
+#[tokio::test]
+async fn test_a_miss_shows_its_card_when_the_room_says_so() {
+    let state = get_state().await;
+    for show_misses in [true, false] {
+        let host = client(&state);
+        let guest = client(&state);
+        let resp = host
+            .post("/api/rooms")
+            .json(&json!({ "show_misses": show_misses }))
+            .await;
+        resp.assert_status_ok();
+        let code = resp.json::<Value>()["room"]["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        guest
+            .post(&format!("/api/rooms/{code}/join"))
+            .await
+            .assert_status_ok();
+        act(&host, &code, json!({ "type": "start" }))
+            .await
+            .assert_status_ok();
+        set_game(&state, &code, |g| {
+            g.status = Status::Playing;
+            g.stage = Stage::Start;
+            g.ready_deadline = None;
+            g.discard = vec![5];
+            g.discard_seq = 3;
+            g.matchable = true;
+            g.seats[0].slots = vec![Some(7), Some(1), Some(1), Some(1)];
+            g.seats[1].slots = vec![Some(9), Some(2), Some(2), Some(2)];
+        })
+        .await;
+        act(
+            &guest,
+            &code,
+            json!({ "type": "match", "seq": 3, "seat": 1, "slot": 0 }),
+        )
+        .await
+        .assert_status_ok();
+        let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+        let e = &view["events"][0];
+        assert_eq!(e["kind"], "match");
+        assert_eq!(e["payload"]["ok"], false);
+        let shown = if show_misses { json!(9) } else { Value::Null };
+        assert_eq!(e["payload"]["value"], shown, "show_misses {show_misses}");
+        // the missed card stays face down in the hand
+        assert!(view["game"]["seats"][1]["slots"][0].get("v").is_none());
+    }
 }
 
 #[tokio::test]
@@ -1437,8 +1493,10 @@ async fn test_room_settings_shape_the_game() {
     let state = get_state().await;
     let host = client(&state);
     let guest = client(&state);
-    let settings =
-        json!({ "hand_size": 9, "away_grace_secs": 60, "turn_limit_secs": 90, "reveal_secs": 10 });
+    let settings = json!({
+        "hand_size": 9, "away_grace_secs": 60, "turn_limit_secs": 90, "reveal_secs": 10,
+        "show_misses": false
+    });
     let resp = host.post("/api/rooms").json(&settings).await;
     resp.assert_status_ok();
     let code = resp.json::<Value>()["room"]["code"]
@@ -1503,6 +1561,7 @@ async fn test_out_of_range_settings_create_no_room() {
         json!({ "turn_limit_secs": 0 }),
         json!({ "reveal_secs": 61 }),
         json!({ "hand_size": "six" }),
+        json!({ "show_misses": null }),
     ] {
         let resp = host.post("/api/rooms").json(&bad).await;
         resp.assert_status(StatusCode::BAD_REQUEST);

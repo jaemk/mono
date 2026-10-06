@@ -618,6 +618,15 @@ mod tests {
         );
         let s = parse_settings(br#"{"reveal_secs": null}"#).unwrap();
         assert_eq!(s.reveal_secs, None);
+        assert!(s.show_misses);
+        let s = parse_settings(br#"{"show_misses": false}"#).unwrap();
+        assert!(!s.show_misses);
+        assert_eq!(
+            parse_settings(br#"{"show_misses": null}"#)
+                .unwrap_err()
+                .code,
+            "invalid"
+        );
         assert_eq!(parse_settings(b"{").unwrap_err().code, "invalid");
         assert_eq!(
             parse_settings(br#"{"hand_size": -1}"#).unwrap_err().code,

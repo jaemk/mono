@@ -209,7 +209,8 @@ pub struct Room {
 }
 
 const ROOM_COLUMNS: &str =
-    "id, code, host_player_id, last_winner, hand_size, away_grace_secs, turn_limit_secs, reveal_secs";
+    "id, code, host_player_id, last_winner, hand_size, away_grace_secs, turn_limit_secs, reveal_secs,
+     show_misses";
 
 fn room_from_row(row: &sqlx::postgres::PgRow) -> Room {
     Room {
@@ -222,6 +223,7 @@ fn room_from_row(row: &sqlx::postgres::PgRow) -> Room {
             away_grace_secs: row.get::<i32, _>("away_grace_secs").into(),
             turn_limit_secs: row.get::<Option<i32>, _>("turn_limit_secs").map(Into::into),
             reveal_secs: row.get::<Option<i32>, _>("reveal_secs").map(Into::into),
+            show_misses: row.get("show_misses"),
         },
     }
 }
@@ -256,8 +258,8 @@ pub async fn create_room(db: &DbPool, host: &str, settings: Settings) -> Result<
         let mut tx = db.begin().await?;
         let id: Option<i64> = sqlx::query_scalar(
             "INSERT INTO rooms (code, host_player_id, hand_size, away_grace_secs,
-                                turn_limit_secs, reveal_secs)
-             VALUES ($1, $2, $3, $4, $5, $6)
+                                turn_limit_secs, reveal_secs, show_misses)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (code) DO NOTHING RETURNING id",
         )
         .bind(&code)
@@ -266,6 +268,7 @@ pub async fn create_room(db: &DbPool, host: &str, settings: Settings) -> Result<
         .bind(settings.away_grace_secs as i32)
         .bind(settings.turn_limit_secs.map(|s| s as i32))
         .bind(settings.reveal_secs.map(|s| s as i32))
+        .bind(settings.show_misses)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(id) = id else { continue };
@@ -320,7 +323,8 @@ async fn lock_room(tx: &mut Tx<'_>, room_id: i64) -> Result<Room> {
 async fn lock_room_as(tx: &mut Tx<'_>, room_id: i64, player: &str) -> Result<Room> {
     let row = sqlx::query(
         "SELECT r.id, r.code, r.host_player_id, r.last_winner, r.hand_size, r.away_grace_secs,
-                r.turn_limit_secs, r.reveal_secs, m.removed, m.left_at IS NOT NULL AS gone
+                r.turn_limit_secs, r.reveal_secs, r.show_misses, m.removed,
+                m.left_at IS NOT NULL AS gone
          FROM rooms r LEFT JOIN room_members m ON m.room_id = r.id AND m.player_id = $2
          WHERE r.id = $1 FOR UPDATE OF r",
     )
@@ -1062,7 +1066,7 @@ static SNAPSHOT_SQL: LazyLock<String> = LazyLock::new(|| {
         .join(", ");
     format!(
         "SELECT r.id, r.code, r.host_player_id, r.last_winner, r.hand_size, r.away_grace_secs,
-                r.turn_limit_secs, r.reveal_secs,
+                r.turn_limit_secs, r.reveal_secs, r.show_misses,
                 (SELECT count(*) FROM room_observers o
                  WHERE o.room_id = r.id AND o.until > now()) AS observers,
                 (SELECT coalesce(jsonb_agg(jsonb_build_object(

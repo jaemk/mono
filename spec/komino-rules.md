@@ -108,7 +108,8 @@ vacated slot of that player. A player with no cards left cannot match another pl
 
 ### RULE-20
 An incorrect match leaves the selected card where it was and adds the top card of the draw pile
-face down to the matcher's hand as a penalty, in a new slot they have not seen.
+face down to the matcher's hand as a penalty, in a new slot they have not seen. A room can
+show everyone the selected card's value (SET-13).
 
 ### RULE-21
 Only one match succeeds per discard, decided by reaction time (RT-17). Once a card is matched

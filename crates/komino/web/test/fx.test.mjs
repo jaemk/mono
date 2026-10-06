@@ -68,6 +68,34 @@ test("marks survive re-renders and clear once they run out", async (t) => {
   assert.equal(page.slot(0, 1).classList.contains("fx-peek"), false);
 });
 
+test("a shown miss turns its card face up for everyone, then back (SET-13)", async (t) => {
+  const page = await boot({ view: bobsTurn() });
+  t.after(page.stop);
+  const miss = ev(4, "match", "p1", { ok: false, seat: 0, slot: 1, penalty: false, value: 9 });
+  page.push(bobsTurn({}, [miss, BOB_DREW]));
+  assert.ok(page.slot(0, 1).classList.contains("fx-miss"));
+  assert.equal(page.label(0, 1), "your card 2: 9, peek other, missed match");
+  assert.deepEqual(caption(page), ["bob missed a match on your card 2, a 9, and took a penalty"]);
+  assert.equal(page.doc.querySelector("#log li").textContent, "bob missed a match on your card 2, a 9, and took a penalty");
+
+  // it stays up past the usual mark, then flips back
+  const now = Date.now;
+  t.after(() => (Date.now = now));
+  Date.now = () => now() + 2_000;
+  page.push(bobsTurn({}, [miss, BOB_DREW]));
+  assert.equal(page.label(0, 1), "your card 2: 9, peek other, missed match");
+  Date.now = () => now() + 3_100;
+  page.push(bobsTurn({}, [miss, BOB_DREW]));
+  assert.equal(page.label(0, 1), "your card 2, face down");
+
+  // a hidden miss names no value and leaves the card face down
+  const hidden = ev(5, "match", "p1", { ok: false, seat: 0, slot: 2, penalty: false });
+  page.push(bobsTurn({}, [hidden, miss, BOB_DREW]));
+  assert.ok(page.slot(0, 2).classList.contains("fx-miss"));
+  assert.equal(page.label(0, 2), "your card 3, face down");
+  assert.deepEqual(caption(page), ["bob missed a match on your card 3 and took a penalty"]);
+});
+
 test("captions and flights fade on their own", async (t) => {
   const page = await boot({ view: bobsTurn() });
   t.after(page.stop);

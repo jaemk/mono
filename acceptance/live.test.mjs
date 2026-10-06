@@ -336,6 +336,8 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   assert.match(script, /grid-area/, "komino app.js turns other players' hands");
   assert.match(script, /slot-no/, "komino app.js numbers the cards");
   assert.match(script, /reaction_ms/, "komino app.js reports match reaction times");
+  assert.match(script, /show_misses/, "komino app.js sends the missed match setting");
+  assert.match(page, /id="set-misses"/, "komino page offers the missed match setting");
 
   const server = await host.json("GET", "/komino/api/key");
   assert.match(server.kid, /^[0-9a-f]{16}$/);
@@ -347,7 +349,9 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   const code = room.room.code;
   assert.match(code, /^[A-Z0-9]{6}$/);
   // no body takes every default setting
-  assert.deepEqual(room.room.settings, { hand_size: 4, away_grace_secs: 30, turn_limit_secs: null, reveal_secs: 15 });
+  assert.deepEqual(room.room.settings, {
+    hand_size: 4, away_grace_secs: 30, turn_limit_secs: null, reveal_secs: 15, show_misses: true,
+  });
   t.after(async () => {
     // leaving as host ends the game; the empty room is swept later
     await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
@@ -361,6 +365,7 @@ test("komino plays a sealed round with an observer watching", async (t) => {
 
   // each player opens their own two cards, sealed to a fresh key
   const keys = {};
+  const known = {};
   for (const [name, c] of [["host", host], ["guest", guest]]) {
     keys[name] = await clientKey();
     const sealed = await reveal(c, code, keys[name], "opening");
@@ -368,6 +373,7 @@ test("komino plays a sealed round with an observer watching", async (t) => {
     const opened = await openSealed(keys[name], server.public_key, code, sealed);
     assert.equal(opened.cards.length, 2);
     for (const card of opened.cards) assert.equal(typeof card.v, "number");
+    known[name] = opened.cards;
   }
   // a key belongs to one player, and nobody else's room is readable
   await reveal(guest, code, keys.host, "opening", undefined, 403);
@@ -419,6 +425,22 @@ test("komino plays a sealed round with an observer watching", async (t) => {
     json: { type: "swap", slot: 0, turn_seq: view.game.turn_seq },
   });
   assert.notEqual(view.game.seats[view.game.turn].player, turnPlayer, "the turn should pass");
+
+  // the host matches its own slot 2 against the swapped-out discard; a miss
+  // shows the card's value to everyone in a room that shows misses
+  const hostSeat = view.game.seats.findIndex((s) => s.player === hostMe.id);
+  const mine = known.host.find((c) => c.slot === 1).v;
+  const top = view.game.discard_top;
+  view = await host.json("POST", `/komino/api/rooms/${code}/action`, {
+    json: { type: "match", seq: view.game.discard_seq, seat: hostSeat, slot: 1 },
+  });
+  const matched = view.events.find((e) => e.kind === "match");
+  assert.equal(matched.payload.ok, mine === top);
+  if (mine !== top) {
+    assert.equal(matched.payload.value, mine, "a shown miss names the card");
+    const seen = await guest.json("GET", `/komino/api/rooms/${code}`);
+    assert.equal(seen.events.find((e) => e.kind === "match").payload.value, mine);
+  }
 });
 
 test("komino rooms play by the settings they were created with", async (t) => {
@@ -429,12 +451,12 @@ test("komino rooms play by the settings they were created with", async (t) => {
   const server = await host.json("GET", "/komino/api/key");
 
   // out of range settings create nothing
-  for (const bad of [{ hand_size: 11 }, { hand_size: 3 }, { turn_limit_secs: 5 }, { reveal_secs: 61 }]) {
+  for (const bad of [{ hand_size: 11 }, { hand_size: 3 }, { turn_limit_secs: 5 }, { reveal_secs: 61 }, { show_misses: null }]) {
     const err = await host.json("POST", "/komino/api/rooms", { json: bad }, 400);
     assert.equal(err.code, "invalid", JSON.stringify(bad));
   }
 
-  const settings = { hand_size: 6, away_grace_secs: 15, turn_limit_secs: 60, reveal_secs: null };
+  const settings = { hand_size: 6, away_grace_secs: 15, turn_limit_secs: 60, reveal_secs: null, show_misses: false };
   const room = await host.json("POST", "/komino/api/rooms", { json: settings });
   const code = room.room.code;
   t.after(async () => {

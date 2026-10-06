@@ -151,7 +151,7 @@ and observer:
 | discard | the card flies face up from the player's hand to the discard |
 | peek | the peeked card lifts and tilts, as if being looked at |
 | blind swap, look and swap | both cards pulse and fly past each other between the two slots |
-| match | a hit flies the card to the discard (and the given card to the emptied slot); a miss shakes the card, and a penalty card flies from the deck |
+| match | a hit flies the card to the discard (and the given card to the emptied slot); a miss shakes the card, shows its face for 3 seconds when the room shows misses (SET-13), and a penalty card flies from the deck |
 | komino | the status banner flashes |
 | scored | every card flips face up |
 
