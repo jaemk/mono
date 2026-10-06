@@ -321,7 +321,7 @@ async fn test_views_are_redacted_per_player() {
     let guest_seat = seats.iter().position(|s| s["player"] != host_id).unwrap();
     assert_eq!(cards["cards"].as_array().unwrap().len(), 2);
     assert_eq!(cards["cards"][0]["seat"], guest_seat);
-    assert_eq!(cards["cards"][0]["slot"], 2);
+    assert_eq!(cards["cards"][0]["slot"], 0);
 }
 
 #[tokio::test]
@@ -1257,7 +1257,8 @@ async fn test_room_settings_shape_the_game() {
         .iter()
         .map(|c| c["slot"].as_u64().unwrap())
         .collect();
-    assert_eq!(slots, vec![5, 6, 7, 8]);
+    // the near row is slots 1-4
+    assert_eq!(slots, vec![0, 1, 2, 3]);
 
     for player in [&host, &guest] {
         act(player, &code, json!({ "type": "ready" }))

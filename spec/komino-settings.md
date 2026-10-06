@@ -38,13 +38,14 @@ code (e.g. `6 cards, 60s turns, 30s away grace, peeks until hidden`).
 
 ### SET-5
 Each seated player is dealt `hand_size` cards into slots 1 through `hand_size` (RULE-5). Hands
-are laid out in two rows of `ceil(hand_size / 2)` columns; the second row is nearest the
-player. Penalty cards (RULE-20) take new slots after the last. Other players' hands are
-shown turned toward their owners (UI-30).
+are laid out in two rows of `ceil(hand_size / 2)` columns. The row nearest the player holds
+slots 1 through `floor(hand_size / 2)`, left to right; the row behind it holds the rest.
+Penalty cards (RULE-20) take new slots after the last, in rows farther back. Other players'
+hands are shown turned toward their owners (UI-30).
 
 ### SET-6
-The opening peek (RULE-7) shows the row nearest the player: slots `ceil(hand_size / 2) + 1`
-through `hand_size` (slots 3 and 4 with 4 cards, slots 6-10 with 10).
+The opening peek (RULE-7) shows the row nearest the player: slots 1 through
+`floor(hand_size / 2)` (slots 1 and 2 with 4 cards, slots 1-5 with 10).
 
 ### SET-7
 When one 60 card deck would leave fewer than 20 cards in the draw pile after the deal and the

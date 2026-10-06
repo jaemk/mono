@@ -54,8 +54,9 @@ The layout works on a phone in portrait at 360px wide without horizontal scrolli
 
 ### UI-30
 A seated player sees the other players' hands as if sitting across from them: turned 180
-degrees, so each owner's near row (SET-5) is farthest away and their slot 1 is bottom right.
-Observers see every hand as its owner does, near row at the bottom.
+degrees, so each owner's near row (SET-5) is farthest away and their slot 1 is top right.
+Your own hand, and every hand on the watch page, is seen as its owner sees it: slots 1 and 2
+on the bottom row, 3 and 4 above.
 
 ### UI-31
 Every card in a hand shows its slot number (1 through the hand's size, then penalty slots),

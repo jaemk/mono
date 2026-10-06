@@ -62,24 +62,29 @@ test("hands lay out in two rows, wide ones marked to shrink", async (t) => {
   assert.equal(grid.classList.contains("wide"), false);
 });
 
-test("other players' hands are turned toward them; yours and an observer's are not (UI-30)", async (t) => {
-  const at = (page, s, n) => page.slot(s, n).getAttribute("style");
+test("hands put slots 1 and 2 nearest their owner; other players' are turned toward them (SET-5, UI-30)", async (t) => {
+  const at = (page, s, n) => page.slot(s, n).getAttribute("style").replace("grid-area: ", "");
+  const four = (page, s) => [0, 1, 2, 3].map((n) => at(page, s, n));
   const page = await boot();
   t.after(page.stop);
-  // bob's near row (cards 3 and 4) is farthest away, his card 1 bottom right
-  assert.deepEqual([0, 1, 2, 3].map((n) => at(page, 1, n)), ["grid-area: 2 / 2", "grid-area: 2 / 1", "grid-area: 1 / 2", "grid-area: 1 / 1"]);
-  assert.deepEqual([0, 1, 2, 3].map((n) => at(page, 0, n)), [null, null, null, null]);
-  // an odd hand leaves its gap at the far left
+  // yours: 1 and 2 on the bottom row, 3 and 4 above
+  assert.deepEqual(four(page, 0), ["2 / 1", "2 / 2", "1 / 1", "1 / 2"]);
+  // bob's near row is farthest away, his card 1 top right
+  assert.deepEqual(four(page, 1), ["1 / 2", "1 / 1", "2 / 2", "2 / 1"]);
+  // an odd hand has the shorter row nearest its owner
   page.push(makeView(makeGame({ hand_size: 5, seats: [seat("p0", Array(5).fill("x")), seat("p1", Array(5).fill("x"))] })));
-  assert.deepEqual([0, 2, 3, 4].map((n) => at(page, 1, n)), ["grid-area: 2 / 3", "grid-area: 2 / 1", "grid-area: 1 / 3", "grid-area: 1 / 2"]);
-  // a penalty card adds a row on bob's side, farthest away
-  page.push(makeView(makeGame({ seats: [seat("p0"), seat("p1", ["x", "x", "x", "x", "x"])] })));
-  assert.equal(at(page, 1, 4), "grid-area: 1 / 2");
-  assert.equal(at(page, 1, 0), "grid-area: 3 / 2");
+  assert.deepEqual([0, 1, 2, 4].map((n) => at(page, 0, n)), ["2 / 1", "2 / 2", "1 / 1", "1 / 3"]);
+  assert.deepEqual([0, 2, 3, 4].map((n) => at(page, 1, n)), ["1 / 3", "2 / 3", "2 / 2", "2 / 1"]);
+  // a penalty card adds a row behind the others
+  page.push(makeView(makeGame({ seats: [seat("p0", ["x", "x", "x", "x", "x"]), seat("p1", ["x", "x", "x", "x", "x"])] })));
+  assert.deepEqual([0, 4].map((n) => at(page, 0, n)), ["3 / 1", "1 / 1"]);
+  assert.deepEqual([0, 4].map((n) => at(page, 1, n)), ["1 / 2", "3 / 2"]);
 
+  // observers see every hand as its owner does
   const watch = await boot({ path: "/komino/r/ABCDEF/watch", view: makeView(makeGame({ me: null }), { me: null, observer: true }) });
   t.after(watch.stop);
-  assert.deepEqual([0, 1].map((s) => at(watch, s, 0)), [null, null]);
+  assert.deepEqual(four(watch, 0), ["2 / 1", "2 / 2", "1 / 1", "1 / 2"]);
+  assert.deepEqual(four(watch, 1), ["2 / 1", "2 / 2", "1 / 1", "1 / 2"]);
 });
 
 test("every card shows its slot number, face up, face down, or empty (UI-31)", async (t) => {

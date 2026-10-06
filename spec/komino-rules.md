@@ -34,8 +34,8 @@ When the draw pile is empty, every discard but the top card is shuffled into a n
 ## Setup
 
 ### RULE-5
-Each seated player is dealt 4 cards face down into slots 1-4, shown as a 2x2 grid. Slots 3
-and 4 are the row nearest the player. A room can deal 4-10 cards (SET-5) and play with two
+Each seated player is dealt 4 cards face down into slots 1-4, shown as a 2x2 grid. Slots 1
+and 2 are the row nearest the player, with 3 and 4 behind them. A room can deal 4-10 cards (SET-5) and play with two
 decks (SET-7).
 
 ### RULE-6
@@ -43,7 +43,7 @@ After the deal, one card is flipped to start the discard pile. It cannot be matc
 (matching opens with the first discard of play).
 
 ### RULE-7
-Each player sees the values of their slots 3 and 4 (the nearest row, SET-6) until they press
+Each player sees the values of their slots 1 and 2 (the nearest row, SET-6) until they press
 `ready`. Play starts when
 every seated player is ready, or 30 seconds after the deal, whichever comes first.
 

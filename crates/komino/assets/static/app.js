@@ -720,16 +720,18 @@
         (v === null ? back() : face(v)) + no + lock + badge + `</button>`;
     }
 
-    // other players sit across the table, so a seated viewer sees their hand
-    // turned 180 degrees: their near row farthest away, slot 1 bottom right
-    // (UI-30). Observers see every hand as its owner does.
+    // the near row holds slots 1 to floor(n / 2), the rows behind it the
+    // rest, penalty slots farthest back (SET-5). Owners see the near row at
+    // the bottom; a seated viewer sees other players across the table,
+    // turned 180 degrees: near row on top, slot 1 top right (UI-30).
     function slotPos(g, seat, slot, count) {
-      if (seat === g.me || g.me === null) return "";
       const cols = columns(g);
-      const rows = Math.ceil(count / cols);
-      const row = rows - Math.floor(slot / cols);
-      const col = cols - (slot % cols);
-      return ` style="grid-area: ${row} / ${col}"`;
+      const near = (g.hand_size || 4) - cols;
+      // row back from the owner's near edge, and column from their left
+      const [back, col] = slot < near ? [0, slot] : [1 + Math.floor((slot - near) / cols), (slot - near) % cols];
+      if (seat !== g.me && g.me !== null) return ` style="grid-area: ${back + 1} / ${cols - col}"`;
+      const rows = 1 + Math.ceil(Math.max(0, count - near) / cols);
+      return ` style="grid-area: ${rows - back} / ${col + 1}"`;
     }
 
     function hand(g, seat, mine) {

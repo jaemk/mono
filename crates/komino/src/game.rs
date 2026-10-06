@@ -96,7 +96,7 @@ impl Settings {
     /// Slots seen during the opening peek: the row nearest the player
     /// (SET-6).
     fn opening_slots(&self) -> std::ops::Range<usize> {
-        self.hand_size.div_ceil(2)..self.hand_size
+        0..self.hand_size / 2
     }
 }
 
@@ -1373,12 +1373,12 @@ mod tests {
         assert!(!g.view("p0", 0).to_string().contains("\"v\""));
         assert_eq!(
             g.secret("p0", &Secret::Opening, 0).unwrap(),
-            json!({ "cards": [{ "seat": 0, "slot": 2, "v": 3 }, { "seat": 0, "slot": 3, "v": 4 }] })
+            json!({ "cards": [{ "seat": 0, "slot": 0, "v": 1 }, { "seat": 0, "slot": 1, "v": 2 }] })
         );
         // each player only ever gets their own
         assert_eq!(
             g.secret("p1", &Secret::Opening, 0).unwrap()["cards"][0],
-            json!({ "seat": 1, "slot": 2, "v": 0 })
+            json!({ "seat": 1, "slot": 0, "v": 5 })
         );
         assert_eq!(
             g.secret("p9", &Secret::Opening, 0).unwrap_err().code,
@@ -2091,7 +2091,7 @@ mod tests {
 
     #[test]
     fn larger_hands_deal_and_open_the_near_row() {
-        for (hand_size, near) in [(5, 3..5), (10, 5..10)] {
+        for (hand_size, near) in [(5, 0..2), (10, 0..5)] {
             let settings = Settings {
                 hand_size,
                 ..Settings::default()

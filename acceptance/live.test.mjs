@@ -450,10 +450,10 @@ test("komino rooms play by the settings they were created with", async (t) => {
   // 2 x 6 + 1 leaves 47 of one deck
   assert.equal(view.game.deck_count, 47);
 
-  // the opening peek is the near row: slots 4-6
+  // the opening peek is the near row: slots 1-3
   const key = await clientKey();
   const opened = await openSealed(key, server.public_key, code, await reveal(host, code, key, "opening"));
-  assert.deepEqual(opened.cards.map((c) => c.slot), [3, 4, 5]);
+  assert.deepEqual(opened.cards.map((c) => c.slot), [0, 1, 2]);
 
   await host.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "ready" } });
   view = await guest.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "ready" } });
