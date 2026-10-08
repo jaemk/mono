@@ -110,6 +110,10 @@ main { max-width: 980px; margin: 0 auto; padding: 12px 16px 120px; }
 .card {
   width: 54px; height: 76px; padding: 0; border: 0; background: none; border-radius: 7px;
   display: inline-block; position: relative;
+  /* card art and slot numbers carry their own contrast; forced colors (e.g.
+     Firefox's color override) would turn the back's center circle white over
+     the number */
+  forced-color-adjust: none;
 }
 .mine .card, .pile .card { width: 68px; height: 96px; }
 /* wide hands (SET-5) shrink to fit a 360px screen */
@@ -131,7 +135,7 @@ main { max-width: 980px; margin: 0 auto; padding: 12px 16px 120px; }
 }
 /* slot numbers (UI-31): centered on a back or an empty slot, a tab above a face */
 .card .slot-no {
-  position: absolute; top: -7px; left: 50%; transform: translateX(-50%);
+  position: absolute; top: -7px; left: 50%; transform: translateX(-50%); z-index: 1;
   min-width: 16px; padding: 0 4px; border-radius: 6px; pointer-events: none;
   background: var(--ink); color: var(--bg); font-size: 11px; font-weight: 700; line-height: 15px; text-align: center;
 }

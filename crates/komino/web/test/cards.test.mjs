@@ -57,6 +57,8 @@ test("special cards replace the center value with a colored symbol", () => {
 test("card backs are one shared design", () => {
   assert.equal(back(), back());
   assert.ok(parse(back()).querySelector("path"));
+  // the slot number sits at the center (UI-31); nothing there may cover it
+  assert.equal(parse(back()).querySelector("circle"), null);
 });
 
 test("labels name the move", () => {

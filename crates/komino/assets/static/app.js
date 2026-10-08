@@ -83,8 +83,7 @@
     return `<svg viewBox="0 0 70 100" aria-hidden="true">` +
       `<rect x="1" y="1" width="68" height="98" rx="7" fill="var(--back)" stroke="#0003" stroke-width="2"/>` +
       `<rect x="7" y="7" width="56" height="86" rx="4" fill="none" stroke="var(--back-2)" stroke-width="2"/>` +
-      `<path d="M35 20 L52 50 L35 80 L18 50 Z" fill="var(--back-2)"/>` +
-      `<circle cx="35" cy="50" r="6" fill="var(--back)"/></svg>`;
+      `<path d="M35 20 L52 50 L35 80 L18 50 Z" fill="var(--back-2)"/></svg>`;
   }
 
   function cardLabel(v) {
