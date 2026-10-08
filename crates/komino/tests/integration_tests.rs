@@ -1490,9 +1490,235 @@ async fn test_rooms_default_their_settings() {
         view["room"]["settings"],
         json!({
             "hand_size": 4, "away_grace_secs": 30, "turn_limit_secs": null, "reveal_secs": 15,
-            "show_misses": true
+            "show_misses": true, "target_score": null, "caller_penalty": 0, "exact_reset": false,
+            "memory_marks": false
         })
     );
+    assert_eq!(view["room"]["history"], json!([]));
+}
+
+/// The host adds bots, which sit in the next game and play it from the
+/// sweep; a removed bot just leaves, and bots go with their room (BOT-*).
+#[tokio::test]
+async fn test_bots_join_play_and_leave() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    let resp = guest.post(&format!("/api/rooms/{code}/bots")).await;
+    resp.assert_status(StatusCode::FORBIDDEN);
+    let view: Value = host.post(&format!("/api/rooms/{code}/bots")).await.json();
+    let bot = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["bot"] == true)
+        .unwrap()
+        .clone();
+    assert_eq!(bot["name"], "bot ava");
+    assert_eq!(bot["present"], true);
+    // no body plays at normal; a level must be one of the three (BOT-5)
+    assert_eq!(bot["bot_level"], "normal");
+    host.post(&format!("/api/rooms/{code}/bots"))
+        .json(&json!({ "level": "expert" }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    let view: Value = host
+        .post(&format!("/api/rooms/{code}/bots"))
+        .json(&json!({ "level": "hard" }))
+        .await
+        .json();
+    let hard = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "bot ben")
+        .unwrap();
+    assert_eq!(hard["bot_level"], "hard");
+    // people carry no level
+    assert_eq!(view["members"][0]["bot_level"], Value::Null);
+    let names: Vec<&str> = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["bot"] == true)
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["bot ava", "bot ben"]);
+    let bot_id = bot["id"].as_str().unwrap().to_string();
+
+    let view: Value = act(&host, &code, json!({ "type": "start" })).await.json();
+    let seats = view["game"]["seats"].as_array().unwrap();
+    assert_eq!(seats.len(), 4);
+    assert_eq!(
+        seats.iter().filter(|s| s["bot"] == true).count(),
+        2,
+        "both bots are seated"
+    );
+    // the sweep readies the bots
+    komino::models::tick_all(&state.db).await.unwrap();
+    let g = game_state(&state, &code).await;
+    let bot_seat = g.seat_of(&bot_id).unwrap();
+    assert!(g.seats[bot_seat].ready);
+    let levels: Vec<_> = g.minds.iter().map(|m| m.level).collect();
+    assert_eq!(
+        levels,
+        [komino::bot::Level::Normal, komino::bot::Level::Hard]
+    );
+    // and plays the bot's turn once its clock has run
+    set_game(&state, &code, |g| {
+        g.status = Status::Playing;
+        g.ready_deadline = None;
+        g.turn = bot_seat;
+        g.stage = Stage::Start;
+        g.bot_clock = Some((g.turn_seq, 0));
+    })
+    .await;
+    komino::models::tick_all(&state.db).await.unwrap();
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    let first = &view["events"][0];
+    assert_eq!(first["player"], bot_id.as_str());
+    assert!(["draw", "take"].contains(&first["kind"].as_str().unwrap()));
+
+    // removing a bot forfeits it and leaves nothing to unban
+    host.post(&format!("/api/rooms/{code}/remove"))
+        .json(&json!({ "player": bot_id }))
+        .await
+        .assert_status_ok();
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    let gone = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == bot_id.as_str())
+        .unwrap();
+    assert_eq!(
+        (gone["left"].clone(), gone["removed"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(view["game"]["seats"][bot_seat]["forfeited"], true);
+
+    // a leaving host hands the room to a person, never a bot
+    host.post(&format!("/api/rooms/{code}/leave"))
+        .await
+        .assert_status_ok();
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["room"]["host"], me(&guest).await.as_str());
+
+    // a deleted room takes its bots with it
+    sqlx::query("UPDATE rooms SET last_active = now() - interval '31 days' WHERE code = $1")
+        .bind(&code)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    komino::models::delete_stale_rooms(&state.db).await.unwrap();
+    let bots: i64 = sqlx::query_scalar("SELECT count(*) FROM players WHERE bot")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(bots, 0);
+}
+
+#[tokio::test]
+async fn test_a_room_holds_at_most_seven_bots() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    for _ in 0..7 {
+        host.post(&format!("/api/rooms/{code}/bots"))
+            .await
+            .assert_status_ok();
+    }
+    let resp = host.post(&format!("/api/rooms/{code}/bots")).await;
+    resp.assert_status(StatusCode::BAD_REQUEST);
+    // with the host, a full table: the bots never leave it alone
+    let view: Value = act(&host, &code, json!({ "type": "start" })).await.json();
+    assert_eq!(view["game"]["seats"].as_array().unwrap().len(), 8);
+}
+
+/// Score the room's running game now, with these hands by seat.
+async fn score_with(state: &State, code: &str, hands: Vec<[i8; 4]>) {
+    set_game(state, code, |g| {
+        g.status = Status::Scoring;
+        g.ready_deadline = None;
+        g.score_at = Some(0);
+        for (seat, hand) in g.seats.iter_mut().zip(hands) {
+            seat.slots = hand.iter().map(|&v| Some(v)).collect();
+        }
+    })
+    .await;
+    komino::models::tick_all(&state.db).await.unwrap();
+}
+
+/// Running totals carry from game to game until one reaches the target,
+/// and a player joining mid match starts level with the highest (SET-14).
+#[tokio::test]
+async fn test_a_match_carries_totals_until_the_target() {
+    let state = get_state().await;
+    let host = client(&state);
+    let guest = client(&state);
+    let late = client(&state);
+    let resp = host
+        .post("/api/rooms")
+        .json(&json!({ "target_score": 30 }))
+        .await;
+    resp.assert_status_ok();
+    let code = resp.json::<Value>()["room"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    guest
+        .post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    let (h, g) = (me(&host).await, me(&guest).await);
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    assert_eq!(game_state(&state, &code).await.match_no, 1);
+    score_with(&state, &code, vec![[5; 4], [1; 4]]).await;
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(
+        view["room"]["history"],
+        json!([{ "m": 1, "over": false, "totals": { &h: 20, &g: 4 }, "scores": { &h: 20, &g: 4 } }])
+    );
+
+    late.post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    let l = me(&late).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let game = game_state(&state, &code).await;
+    assert_eq!(game.match_no, 1);
+    let carry: Vec<(String, i32)> = game
+        .seats
+        .iter()
+        .map(|s| (s.player.clone(), s.carry))
+        .collect();
+    assert_eq!(carry, [(h.clone(), 20), (g.clone(), 4), (l.clone(), 20)]);
+    // the host passes 30, so the lowest total takes the match
+    score_with(&state, &code, vec![[3; 4], [0; 4], [1; 4]]).await;
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    let history = view["room"]["history"].as_array().unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1]["over"], true);
+    assert_eq!(history[1]["totals"], json!({ &h: 32, &g: 4, &l: 24 }));
+    assert_eq!(view["events"][0]["payload"]["match_winners"], json!([&g]));
+    assert_eq!(view["game"]["match_over"], true);
+
+    // the next game starts a new match from zero
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let game = game_state(&state, &code).await;
+    assert_eq!(game.match_no, 2);
+    assert!(game.seats.iter().all(|s| s.carry == 0));
+    score_with(&state, &code, vec![[2; 4], [2; 4], [2; 4]]).await;
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    // the view shows only the newest match
+    let history = view["room"]["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["m"], 2);
 }
 
 /// A miss carries the targeted card's value to every viewer only in a room
@@ -1555,7 +1781,8 @@ async fn test_room_settings_shape_the_game() {
     let guest = client(&state);
     let settings = json!({
         "hand_size": 9, "away_grace_secs": 60, "turn_limit_secs": 90, "reveal_secs": 10,
-        "show_misses": false
+        "show_misses": false, "target_score": 100, "caller_penalty": 10, "exact_reset": true,
+        "memory_marks": true
     });
     let resp = host.post("/api/rooms").json(&settings).await;
     resp.assert_status_ok();
@@ -1622,6 +1849,9 @@ async fn test_out_of_range_settings_create_no_room() {
         json!({ "reveal_secs": 61 }),
         json!({ "hand_size": "six" }),
         json!({ "show_misses": null }),
+        json!({ "target_score": 10 }),
+        json!({ "caller_penalty": 60 }),
+        json!({ "memory_marks": "yes" }),
     ] {
         let resp = host.post("/api/rooms").json(&bad).await;
         resp.assert_status(StatusCode::BAD_REQUEST);

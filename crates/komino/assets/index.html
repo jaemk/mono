@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>komino</title>
+  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20x%3D%225%22%20y%3D%222%22%20width%3D%2222%22%20height%3D%2228%22%20rx%3D%224%22%20fill%3D%22%2329466b%22%2F%3E%3Cpath%20d%3D%22M16%208%20L22%2016%20L16%2024%20L10%2016%20Z%22%20fill%3D%22%233c5f8c%22%2F%3E%3C%2Fsvg%3E">
   <link rel="stylesheet" href="/komino/static/app.css">
 </head>
 <body>
@@ -52,6 +53,28 @@
             <option value="shown" selected>shown to all</option><option value="hidden">hidden</option>
           </select>
         </label>
+        <label>play to
+          <select id="set-target">
+            <option value="" selected>no target</option><option value="50">50</option>
+            <option value="100">100</option><option value="150">150</option><option value="200">200</option>
+          </select>
+        </label>
+        <label>losing call penalty
+          <select id="set-penalty">
+            <option value="0" selected>none</option><option value="5">+5</option>
+            <option value="10">+10</option><option value="20">+20</option>
+          </select>
+        </label>
+        <label>exact target halves
+          <select id="set-exact">
+            <option value="off" selected>off</option><option value="on">on</option>
+          </select>
+        </label>
+        <label>memory marks
+          <select id="set-marks">
+            <option value="off" selected>off</option><option value="on">allowed</option>
+          </select>
+        </label>
       </div>
       <button id="create" class="primary">create a room</button>
       <form id="join-form" class="join">
@@ -71,6 +94,8 @@
       </div>
       <div class="actions">
         <button id="sound" class="small" aria-pressed="true">sound on</button>
+        <button id="fast" class="small player-only" aria-pressed="false" title="send a match on the first tap, without confirming">fast match off</button>
+        <button id="alerts" class="small player-only" aria-pressed="false" title="notify me when the game waits on me in another tab">alerts off</button>
         <button id="copy" class="small player-only">copy link</button>
         <button id="copy-watch" class="small">copy watch link</button>
         <button id="start" class="primary small" hidden>start game</button>
@@ -83,9 +108,27 @@
       <section id="table" class="table"></section>
       <div id="caption" class="caption" aria-live="polite" hidden></div>
     </div>
+    <section id="summary" class="panel summary" hidden></section>
     <div id="actionbar" class="actionbar" hidden>
+      <div id="tip" class="tip" hidden>
+        <span id="tip-text"></span>
+        <span class="tip-buttons">
+          <button id="tip-ok" class="small">got it</button>
+          <button id="tip-off" class="small">no more tips</button>
+        </span>
+      </div>
       <div id="prompt" class="prompt" aria-live="polite"></div>
       <section id="controls" class="controls"></section>
+    </div>
+    <div id="marks" class="confirm-backdrop" hidden>
+      <div class="confirm" role="dialog" aria-modal="true" aria-labelledby="marks-title">
+        <p id="marks-title"></p>
+        <div id="marks-values" class="mark-values"></div>
+        <div class="confirm-buttons">
+          <button id="marks-clear">clear mark</button>
+          <button id="marks-cancel">cancel</button>
+        </div>
+      </div>
     </div>
     <div id="confirm" class="confirm-backdrop" hidden>
       <div class="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
@@ -100,6 +143,12 @@
       <section class="panel">
         <h2>players</h2>
         <ul id="members" class="members"></ul>
+        <div id="bots" class="bots" hidden>
+          <select id="bot-level" aria-label="bot level">
+            <option value="easy">easy</option><option value="normal" selected>normal</option><option value="hard">hard</option>
+          </select>
+          <button id="add-bot" class="small">add bot</button>
+        </div>
       </section>
       <section class="panel">
         <h2>log</h2>
@@ -134,6 +183,7 @@
   </div>
 
   <div id="toast" class="toast" role="status" hidden></div>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
   <div id="fx" class="fx-layer" aria-hidden="true"></div>
   <script src="/komino/static/app.js"></script>
 </body>

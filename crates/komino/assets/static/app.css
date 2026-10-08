@@ -277,8 +277,87 @@ button.card:disabled { opacity: 1; cursor: default; }
 .eye-badge svg { width: 100%; height: 100%; display: block; }
 @keyframes blink { 50% { transform: translateX(-50%) scale(1.15); } }
 
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* a color per seat (UI-36): hands, log lines, captions, and flying cards */
+.chip { width: 10px; height: 10px; border-radius: 3px; background: var(--seat, #999); display: inline-block; flex: none; }
+.hand .who { border-bottom: 3px solid var(--seat, transparent); padding-bottom: 2px; }
+.log li.by::marker { color: var(--seat); }
+.log li.by { border-left: 3px solid var(--seat); padding-left: 6px; margin-bottom: 2px; }
+.caption div { border-left: 6px solid var(--seat, transparent); }
+.ghost { border-radius: 7px; box-shadow: 0 0 0 3px var(--seat, transparent); }
+.members .chip { margin-right: -2px; }
+.bots { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.bots select { padding: 3px 8px; font-size: 13px; }
+.total { font-size: 11px; opacity: .8; font-variant-numeric: tabular-nums; }
+
+/* other players around the table on a wide screen, stacked on a narrow one */
+.side { display: contents; }
+@media (min-width: 900px) {
+  .table {
+    display: grid; grid-template-columns: auto 1fr auto; align-items: center;
+    grid-template-areas: "left top right" "left center right" "left mine right";
+  }
+  .opponents { display: contents; }
+  .side { display: flex; gap: 10px; justify-content: center; align-items: center; }
+  .side.left { grid-area: left; flex-direction: column-reverse; }
+  .side.top { grid-area: top; flex-wrap: wrap; }
+  .side.right { grid-area: right; flex-direction: column; }
+  .side:empty { display: none; }
+  .table > .center { grid-area: center; }
+  .table > .hand.mine { grid-area: mine; justify-self: center; }
+}
+.center { flex-direction: column; gap: 8px; }
+.piles { display: flex; gap: 18px; justify-content: center; align-items: center; }
+
+/* the newest discards beneath the top card (RULE-28) */
+.recent { display: flex; gap: 3px; align-items: center; font-size: 11px; opacity: .85; flex-wrap: wrap; justify-content: center; }
+.recent > span:first-child { margin-right: 4px; }
+.card.mini { width: 22px; height: 31px; }
+.card.mini svg .corner { display: none; }
+
+/* a matchable discard glows, fading as it ages (UI-41) */
+#discard.live { animation: glow 6s linear forwards; }
+@keyframes glow {
+  from { box-shadow: 0 0 0 4px var(--select), 0 0 22px 6px var(--select); }
+  to { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* memory marks (SET-17) */
+.card .mark {
+  position: absolute; bottom: -6px; right: -6px; z-index: 2; pointer-events: none;
+  background: #fff3c4; color: #1f1d1a; border: 1px solid #c9a227; border-radius: 6px;
+  font-size: 11px; font-weight: 700; padding: 0 4px; line-height: 15px;
+}
+.mark-values { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 0 0 14px; }
+.mark-values button { min-height: 44px; font-weight: 700; }
+
+/* first game tips (UI-37) */
+.tip {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center;
+  margin: 0 0 8px; padding: 8px 10px; border-radius: 10px;
+  background: var(--panel); border: 1px dashed var(--select); font-size: 14px; text-align: center;
+}
+.tip-buttons { display: flex; gap: 6px; }
+
+/* the end of a game (UI-38) */
+.summary .match-result { font-weight: 700; margin: 0 0 8px; }
+.summary td .chip { margin-right: 6px; vertical-align: middle; }
+.chart { margin: 12px 0 0; color: var(--muted); }
+.chart svg { width: 100%; max-width: 480px; height: auto; display: block; }
+.chart figcaption { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.chart figcaption > span { display: inline-flex; gap: 4px; align-items: center; }
+kbd {
+  font: 12px ui-monospace, monospace; padding: 0 4px; border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 4px; background: var(--bg);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .card[class*="fx-"], .status.fx-flash { animation: none; outline: 3px solid var(--select); outline-offset: 2px; }
   .ghost { display: none; }
   .caption div, .eye-badge, .card.claiming, .card.empty.owed { animation: none; }
+  #discard.live { animation: none; box-shadow: 0 0 0 4px var(--select); }
 }

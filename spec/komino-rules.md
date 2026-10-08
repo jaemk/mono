@@ -31,6 +31,10 @@ see privately are only sent sealed (SEAL-1).
 ### RULE-4
 When the draw pile is empty, every discard but the top card is shuffled into a new draw pile.
 
+### RULE-28
+Every discard is face up, so the view lists the newest 10 cards of the discard pile, top first,
+as `discard_recent`. The table shows the ones under the top card next to the piles.
+
 ## Setup
 
 ### RULE-5
@@ -148,7 +152,9 @@ A player's score is the sum of their card values. A player with no cards scores 
 
 ### RULE-26
 The lowest score wins. If the caller does not have the strictly lowest score, they cannot
-win, and the lowest score among the other players wins. Any other tie is a shared win.
+win, and the lowest score among the other players wins. Any other tie is a shared win. A room
+can add points to a caller who does not win (SET-15) and play a match over several games
+(SET-14).
 
 ### RULE-27
 A forfeited player (ROOM-15, ROOM-18) has their cards removed from play, is skipped for the

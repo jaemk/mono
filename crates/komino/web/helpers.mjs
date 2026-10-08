@@ -171,6 +171,26 @@ export function fakeAudio() {
   };
 }
 
+/**
+ * A Notification stand-in: `shown` lists `{ title, body }`, and
+ * `permission` starts as given.
+ */
+export function fakeNotifications(permission = "default") {
+  const shown = [];
+  const requests = [];
+  class N {
+    constructor(title, opts) {
+      shown.push({ title, body: opts.body });
+    }
+    static requestPermission() {
+      requests.push(true);
+      return Promise.resolve(N.permission);
+    }
+  }
+  N.permission = permission;
+  return { N, shown, requests };
+}
+
 /** Let pending promise callbacks run. */
 export async function flush() {
   for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
@@ -202,6 +222,8 @@ export async function boot({
   AudioContext,
   // replaces the page's localStorage, e.g. one that throws
   storage,
+  // a Notification constructor, e.g. fakeNotifications().N
+  Notification,
 } = {}) {
   const dom = new JSDOM(html, { url: "https://kominick.com" + path });
   const w = dom.window;
@@ -270,7 +292,9 @@ export async function boot({
   const clock = { ms: 1000 };
   const confirms = [];
   const clipboard = [];
+  const vibrations = [];
   const env = {
+    Notification,
     document: w.document,
     crypto: { subtle },
     location,
@@ -292,6 +316,7 @@ export async function boot({
       return confirmAnswer;
     },
     navigator: {
+      vibrate: (pattern) => vibrations.push(pattern),
       clipboard: {
         writeText: async (text) => {
           if (clipboardFails) throw new Error("denied");
@@ -316,6 +341,18 @@ export async function boot({
     location,
     confirms,
     clipboard,
+    vibrations,
+    /** Show or hide the page, as switching tabs does. */
+    setHidden(hidden) {
+      Object.defineProperty(w.document, "visibilityState", { value: hidden ? "hidden" : "visible", configurable: true });
+      w.document.dispatchEvent(new w.Event("visibilitychange"));
+    },
+    /** Press a key on the page, or on `target`. */
+    key(key, target = w.document.body) {
+      const e = new w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      target.dispatchEvent(e);
+      return e;
+    },
     /** Move the page's monotonic clock forward. */
     tick(ms) {
       clock.ms += ms;

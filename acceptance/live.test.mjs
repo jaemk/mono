@@ -341,6 +341,11 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   // the sticky action bar and the rules guide (UI-33, UI-34)
   for (const id of ["actionbar", "prompt", "guide-btn", "guide"]) assert.match(page, new RegExp(`id="${id}"`), `komino page #${id}`);
   assert.match(script, /guideHtml/, "komino app.js builds the rules guide");
+  // play aids, the summary, and match play (UI-35 - UI-43, SET-14 - SET-17)
+  for (const id of ["fast", "alerts", "tip", "summary", "marks", "announce", "favicon", "set-target", "set-penalty", "set-exact", "set-marks"]) {
+    assert.match(page, new RegExp(`id="${id}"`), `komino page #${id}`);
+  }
+  for (const word of ["memory_marks", "discard_recent", "match_over", "onKey"]) assert.match(script, new RegExp(word), `komino app.js ${word}`);
 
   const server = await host.json("GET", "/komino/api/key");
   assert.match(server.kid, /^[0-9a-f]{16}$/);
@@ -354,7 +359,9 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   // no body takes every default setting
   assert.deepEqual(room.room.settings, {
     hand_size: 4, away_grace_secs: 30, turn_limit_secs: null, reveal_secs: 15, show_misses: true,
+    target_score: null, caller_penalty: 0, exact_reset: false, memory_marks: false,
   });
+  assert.deepEqual(room.room.history, []);
   t.after(async () => {
     // leaving as host ends the game; the empty room is swept later
     await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
@@ -365,6 +372,13 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   assert.equal(view.game.status, "peeking");
   assert.ok(!JSON.stringify(view.game).includes('"v"'), "a view carried a card value");
   assert.equal(typeof view.server_now, "number");
+  // the starter is the only discard; every seat starts its first match at 0
+  assert.equal(view.game.discard_recent.length, 1);
+  assert.equal(view.game.match_over, false);
+  for (const seat of view.game.seats) {
+    assert.equal(seat.carry, 0);
+    assert.deepEqual(seat.tally, { matches: 0, misses: 0, penalties: 0, specials: 0 });
+  }
 
   // each player opens their own two cards, sealed to a fresh key
   const keys = {};
@@ -439,6 +453,8 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   });
   const matched = view.events.find((e) => e.kind === "match");
   assert.equal(matched.payload.ok, mine === top);
+  assert.equal(typeof matched.payload.reaction_ms, "number", "a match carries its reaction time");
+  assert.equal(view.game.seats[hostSeat].tally[mine === top ? "matches" : "misses"], 1);
   if (mine !== top) {
     assert.equal(matched.payload.value, mine, "a shown miss names the card");
     const seen = await guest.json("GET", `/komino/api/rooms/${code}`);
@@ -480,12 +496,14 @@ test("komino rooms play by the settings they were created with", async (t) => {
   const server = await host.json("GET", "/komino/api/key");
 
   // out of range settings create nothing
-  for (const bad of [{ hand_size: 11 }, { hand_size: 3 }, { turn_limit_secs: 5 }, { reveal_secs: 61 }, { show_misses: null }]) {
+  for (const bad of [{ hand_size: 11 }, { hand_size: 3 }, { turn_limit_secs: 5 }, { reveal_secs: 61 }, { show_misses: null },
+    { target_score: 10 }, { caller_penalty: 51 }]) {
     const err = await host.json("POST", "/komino/api/rooms", { json: bad }, 400);
     assert.equal(err.code, "invalid", JSON.stringify(bad));
   }
 
-  const settings = { hand_size: 6, away_grace_secs: 15, turn_limit_secs: 60, reveal_secs: null, show_misses: false };
+  const settings = { hand_size: 6, away_grace_secs: 15, turn_limit_secs: 60, reveal_secs: null, show_misses: false,
+    target_score: 100, caller_penalty: 10, exact_reset: true, memory_marks: true };
   const room = await host.json("POST", "/komino/api/rooms", { json: settings });
   const code = room.room.code;
   t.after(async () => {
@@ -495,6 +513,18 @@ test("komino rooms play by the settings they were created with", async (t) => {
   assert.deepEqual(room.room.settings, settings);
   const joined = await guest.json("POST", `/komino/api/rooms/${code}/join`);
   assert.deepEqual(joined.room.settings, settings, "a joiner sees the same settings");
+  // only the host adds bots, which are present at once (BOT-1); remove it
+  // again so the two people play alone
+  await guest.json("POST", `/komino/api/rooms/${code}/bots`, {}, 403);
+  await host.json("POST", `/komino/api/rooms/${code}/bots`, { json: { level: "expert" } }, 400);
+  const withBot = await host.json("POST", `/komino/api/rooms/${code}/bots`, { json: { level: "easy" } });
+  const bot = withBot.members.find((m) => m.bot);
+  assert.equal(bot.name, "bot ava");
+  assert.equal(bot.present, true);
+  assert.equal(bot.bot_level, "easy");
+  const without = await host.json("POST", `/komino/api/rooms/${code}/remove`, { json: { player: bot.id } });
+  const gone = without.members.find((m) => m.id === bot.id);
+  assert.deepEqual([gone.left, gone.removed], [true, false]);
 
   let view = await host.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "start" } });
   assert.equal(view.game.hand_size, 6);

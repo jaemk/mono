@@ -26,6 +26,63 @@
   // how long a matcher has to give a card (game.rs GIVE_MS)
   const GIVE_SECS = 15;
   const SOUND_KEY = "komino.sound";
+  const FAST_KEY = "komino.fast";
+  const ALERTS_KEY = "komino.alerts";
+  const TIPS_KEY = "komino.tips";
+  const MARKS_KEY = "komino.marks";
+  // how long a press on a card opens the mark picker (SET-17)
+  const LONG_PRESS_MS = 450;
+  // how long a fresh discard glows, fading as it ages (UI-41)
+  const GLOW_MS = 6000;
+  // one color per seat, in seat order (UI-36)
+  const SEAT_COLORS = ["#e8a23a", "#4fb3e8", "#e0607e", "#7fd16b", "#b48cf2", "#f07d4a", "#46c9b4", "#d8d05a"];
+  const TITLE = "komino";
+  const ICON = "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="5" y="2" width="22" height="28" rx="4" fill="#29466b"/>` +
+    `<path d="M16 8 L22 16 L16 24 L10 16 Z" fill="#3c5f8c"/></svg>`);
+  // the icon with a red dot, while a hidden page waits on this player (UI-35)
+  const ICON_ALERT = "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="5" y="2" width="22" height="28" rx="4" fill="#29466b"/>` +
+    `<path d="M16 8 L22 16 L16 24 L10 16 Z" fill="#3c5f8c"/><circle cx="24" cy="8" r="7" fill="#e0443a"/></svg>`);
+  // first game tips, shown once each (UI-37)
+  const TIPS = {
+    peek: "tip: these face up cards are yours. memorize them, then press ready. they turn face down for the rest of the game.",
+    start: "tip: on your turn, draw from the deck or take the face up discard. the lowest total wins, so keep low cards.",
+    drawn: "tip: only you see the drawn card. tap one of your cards to swap it in, or discard it.",
+    match: "tip: when the discard pile says matchable, tap any face down card you think has the same value. right sends it to the pile; wrong costs a penalty card.",
+    earned: "tip: you discarded a special card, so you earned its move. press use to start it, or end turn. tapping a card first is a match attempt.",
+    owe: "tip: you matched another player's card, so give them one of yours. pick your highest.",
+    komino: "tip: when you think your total is the lowest, call KOMINO on your turn. everyone else gets one more turn.",
+  };
+  // keys for the controls (UI-39), matched against the control labels
+  const KEYS = {
+    d: (l) => l === "draw",
+    t: (l) => l.startsWith("take "),
+    x: (l) => l.startsWith("discard"),
+    u: (l) => l.startsWith("use "),
+    e: (l) => l === "end turn" || l === "skip move" || l === "keep my cards",
+    m: (l) => l.startsWith("match ") || l === "cancel match",
+    h: (l) => l === "hide card",
+    r: (l) => l === "ready",
+    k: (l) => l === "KOMINO",
+  };
+
+  // browser storage can be missing or throw; it only holds conveniences
+  function loadPref(win, key, fallback) {
+    try {
+      const v = win.localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch (_) {
+      return fallback;
+    }
+  }
+  function savePref(win, key, value) {
+    try {
+      win.localStorage.setItem(key, value);
+    } catch (_) {
+      // the choice still holds for this page
+    }
+  }
 
   const esc = (s) =>
     String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -226,6 +283,8 @@
     return `<h3>goal</h3><p>Finish with the lowest total. Each game is one round.</p>` +
       `<h3>setup</h3><p>Everyone is dealt ${dealt} face down in two rows. You see your near row (${nearRow}) ` +
       `until you press ready or 30 seconds pass, so memorize it.</p>` +
+      `<p>The host can add bots to fill seats, at easy, normal, or hard. A bot sees only what its seat may see. ` +
+      `Easier bots forget more, react slower, misremember cards, and misjudge when to call.</p>` +
       `<h3>your turn</h3><ol><li>Draw from the deck (only you see it) or take the top discard (everyone sees it).</li>` +
       `<li>A drawn card is swapped into one of your slots, discarding the card it replaces, or discarded. ` +
       `A taken card must be swapped in.</li></ol><p>${turnLimit} If you are away when your turn comes, it is skipped after ${away}.</p>` +
@@ -244,7 +303,32 @@
       `strictly lowest total, you cannot win.</p>` +
       `<h3>scoring</h3><p>Each card counts its value, so -1 is the best card and 13 the worst. The lowest total ` +
       `wins and ties share the win. With many players or large hands a second deck is added, so there are ` +
-      `always at least 20 cards to draw.</p>`;
+      `always at least 20 cards to draw.</p>` +
+      `<h3>matches over several games</h3><p>${matchText(s)}</p>` +
+      `<h3>memory marks</h3><p>${!s ? "A room can let players mark cards: press and hold a card (or right click it) " +
+        "to note the value you think it has. Only you see your marks."
+        : s.memory_marks ? "Press and hold a card (or right click it) to note the value you think it has. Only you " +
+          "see your marks, and they follow the card when it is swapped or given."
+          : "This room does not allow memory marks."}</p>` +
+      `<h3>keyboard</h3><p><kbd>d</kbd> draw, <kbd>t</kbd> take, <kbd>x</kbd> discard, <kbd>1</kbd>-<kbd>9</kbd> ` +
+      `your cards (<kbd>0</kbd> is 10), <kbd>u</kbd> use the move, <kbd>e</kbd> end turn or skip, <kbd>m</kbd> match, ` +
+      `<kbd>h</kbd> hide card, <kbd>r</kbd> ready, <kbd>k</kbd> KOMINO, <kbd>?</kbd> this guide. Enter confirms, Escape cancels.</p>`;
+  }
+
+  // the running totals and match rules as a room sets them (SET-14 - SET-16)
+  function matchText(s) {
+    if (!s) {
+      return "Each player's scores add up to a running total from game to game. A room can play to a target: " +
+        "once a total reaches it, the lowest total wins the match. A room can also add points to a caller who " +
+        "does not win, and halve a total that lands exactly on the target.";
+    }
+    const parts = [s.target_score
+      ? `Scores add up to running totals. Once a total reaches ${s.target_score}, the lowest total wins the match ` +
+        `and the next game starts a new one. Someone joining partway starts level with the highest total.`
+      : "Scores add up to running totals from game to game, with no target."];
+    if (s.caller_penalty) parts.push(`A caller who does not win adds ${s.caller_penalty} points to their score.`);
+    if (s.target_score && s.exact_reset) parts.push(`A total that lands exactly on ${s.target_score} is halved.`);
+    return parts.join(" ");
   }
 
   function createKomino(win) {
@@ -281,6 +365,18 @@
     let flights = [];
     let audio = null;
     let sound = loadSound();
+    // per-browser choices (UI-35, UI-37, UI-40)
+    let fast = loadPref(win, FAST_KEY, "off") === "on";
+    let alerts = loadPref(win, ALERTS_KEY, "off") === "on";
+    let tipsSeen = loadTips();
+    // this player's memory marks for the current game (SET-17):
+    // { game, at: { "<seat>:<slot>": value } }
+    let marks = { game: null, at: {} };
+    // the slot a mark is being picked for, and a press that became one
+    let marking = null;
+    let pressed = null;
+    // whether a hidden page is waiting on this player (UI-35)
+    let waiting = false;
     // the last markup written per element, so an unchanged render leaves the
     // buttons in place and a tap that spans it still lands
     const painted = new Map();
@@ -309,12 +405,29 @@
     function myTurn(g) {
       return inPlay(g) && g.me !== null && g.turn === g.me;
     }
+    function seatOfPlayer(g, id) {
+      return g && id ? g.seats.findIndex((s) => s.player === id) : -1;
+    }
+    // each seat's color (UI-36), as a style attribute
+    function seatStyle(seat) {
+      return seat >= 0 ? ` style="--seat: ${SEAT_COLORS[seat % SEAT_COLORS.length]}"` : "";
+    }
     function seatOwner(g, seat) {
       return seat === g.me ? "your" : `${nameOf(g.seats[seat].player)}'s`;
     }
     function canMatch(g) {
       return g && g.me !== null && !g.seats[g.me].forfeited && g.matchable && g.discard_top !== null &&
         ["playing", "final", "scoring"].includes(g.status);
+    }
+    // whether anyone may match the top discard now
+    function canMatchAny(g) {
+      return g.matchable && g.discard_top !== null && ["playing", "final", "scoring"].includes(g.status);
+    }
+    // the discard's glow picks up where it was, so a re-render doesn't
+    // restart it (UI-41)
+    function glow() {
+      const d = $("discard");
+      if (d && shown) d.style.animationDelay = d.classList.contains("live") ? `-${Math.max(0, Date.now() - shown.wall)}ms` : "";
     }
     function filled(g, seat, slot) {
       const s = g.seats[seat] && g.seats[seat].slots[slot];
@@ -481,25 +594,205 @@
     // ---------------------------------------------------------------- effects
 
     function loadSound() {
-      try {
-        return win.localStorage.getItem(SOUND_KEY) !== "off";
-      } catch (_) {
-        return true;
-      }
+      return loadPref(win, SOUND_KEY, "on") !== "off";
     }
     function setSound(on) {
       sound = on;
-      try {
-        win.localStorage.setItem(SOUND_KEY, on ? "on" : "off");
-      } catch (_) {
-        // sound still follows the button for this page
-      }
+      savePref(win, SOUND_KEY, on ? "on" : "off");
       renderSound();
       unlock();
     }
+    function toggle(id, on, label) {
+      $(id).textContent = `${label} ${on ? "on" : "off"}`;
+      $(id).setAttribute("aria-pressed", String(on));
+    }
     function renderSound() {
-      $("sound").textContent = sound ? "sound on" : "sound off";
-      $("sound").setAttribute("aria-pressed", String(sound));
+      toggle("sound", sound, "sound");
+      toggle("fast", fast, "fast match");
+      toggle("alerts", alerts, "alerts");
+    }
+    // a fast match sends on the first tap, without the confirm (UI-40)
+    function setFast(on) {
+      fast = on;
+      savePref(win, FAST_KEY, on ? "on" : "off");
+      renderSound();
+      toast(on ? "fast match on: a tap on a card sends the match at once" : "fast match off: matches ask to confirm");
+    }
+    // alerts ask for notification permission once they are turned on
+    function setAlerts(on) {
+      alerts = on;
+      savePref(win, ALERTS_KEY, on ? "on" : "off");
+      renderSound();
+      const N = win.Notification;
+      if (on && N && N.permission === "default") N.requestPermission();
+    }
+
+    // ---------------------------------------------------------------- alerts
+    //
+    // While the page is hidden and the game waits on this player, the title
+    // and icon say so and an opted-in notification fires (UI-35).
+
+    function pageHidden() {
+      return doc.visibilityState === "hidden";
+    }
+    function setIcon(href) {
+      const link = $("favicon");
+      if (link && link.getAttribute("href") !== href) link.setAttribute("href", href);
+    }
+    function alertOn(text) {
+      if (navigatorOf().vibrate) navigatorOf().vibrate([120, 60, 120]);
+      if (!pageHidden()) return;
+      waiting = true;
+      doc.title = `(!) ${text} - ${TITLE}`;
+      setIcon(ICON_ALERT);
+      const N = win.Notification;
+      if (alerts && N && N.permission === "granted") {
+        try {
+          new N(TITLE, { body: text, tag: `komino-${code}` });
+        } catch (_) {
+          // some browsers only notify from a service worker
+        }
+      }
+    }
+    function alertOff() {
+      if (!waiting) return;
+      waiting = false;
+      doc.title = TITLE;
+      setIcon(ICON);
+    }
+    function navigatorOf() {
+      return win.navigator || {};
+    }
+
+    // ---------------------------------------------------------------- tips
+
+    function loadTips() {
+      const raw = loadPref(win, TIPS_KEY, "[]");
+      if (raw === "off") return null;
+      try {
+        return new Set(JSON.parse(raw));
+      } catch (_) {
+        return new Set();
+      }
+    }
+    function saveTips() {
+      savePref(win, TIPS_KEY, tipsSeen ? JSON.stringify([...tipsSeen]) : "off");
+    }
+    // the first unseen tip that fits what this player can do now (UI-37)
+    function tipFor(g) {
+      if (!tipsSeen || watching || !g || g.me === null || g.seats[g.me].forfeited) return null;
+      const want = [];
+      if (g.status === "peeking" && !g.seats[g.me].ready) want.push("peek");
+      if (myOwe(g)) want.push("owe");
+      if (myTurn(g)) {
+        const k = g.stage.kind;
+        if (k === "start") want.push("start");
+        if (k === "drawn") want.push("drawn");
+        if (k === "earned") want.push("earned");
+        if (g.can_call) want.push("komino");
+      }
+      if (canMatch(g) && !myTurn(g)) want.push("match");
+      return want.find((t) => !tipsSeen.has(t)) || null;
+    }
+    function renderTip(g) {
+      const t = tipFor(g);
+      const el = $("tip");
+      el.hidden = !t;
+      el.dataset.tip = t || "";
+      $("tip-text").textContent = t ? TIPS[t] : "";
+    }
+
+    // ---------------------------------------------------------------- marks
+    //
+    // Memory marks (SET-17) live in this browser only, per game, and follow
+    // their card as it moves.
+
+    function marksOn() {
+      return !watching && Boolean(view && view.room && view.room.settings && view.room.settings.memory_marks);
+    }
+    function loadMarks(g) {
+      if (!g || marks.game === g.id) return;
+      marks = { game: g.id, at: {} };
+      try {
+        const saved = JSON.parse(loadPref(win, `${MARKS_KEY}.${code}`, "null"));
+        if (saved && saved.game === g.id) marks.at = saved.at || {};
+      } catch (_) {
+        // a bad saved value starts the game unmarked
+      }
+    }
+    function saveMarks() {
+      savePref(win, `${MARKS_KEY}.${code}`, JSON.stringify(marks));
+    }
+    function markAt(seat, slot) {
+      const v = marks.at[`${seat}:${slot}`];
+      return v === undefined ? null : v;
+    }
+    function setMark(seat, slot, v) {
+      if (v === null) delete marks.at[`${seat}:${slot}`];
+      else marks.at[`${seat}:${slot}`] = v;
+      saveMarks();
+    }
+    // move marks with the cards an event moved
+    function followMarks(e) {
+      const p = e.payload || {};
+      const k = (s, n) => `${s}:${n}`;
+      const at = marks.at;
+      const move = (from, to) => {
+        if (at[from] === undefined) delete at[to];
+        else at[to] = at[from];
+        delete at[from];
+      };
+      switch (e.kind) {
+        case "swap":
+          delete at[k(p.seat, p.slot)];
+          break;
+        case "blind_swap":
+        case "look_swap": {
+          const a = at[k(p.seat, p.slot)];
+          move(k(p.target_seat, p.target_slot), k(p.seat, p.slot));
+          if (a === undefined) delete at[k(p.target_seat, p.target_slot)];
+          else at[k(p.target_seat, p.target_slot)] = a;
+          break;
+        }
+        case "match":
+          if (p.ok) {
+            delete at[k(p.seat, p.slot)];
+            if (typeof p.give_slot === "number") {
+              const seat = game().seats.findIndex((s) => s.player === e.player);
+              move(k(seat, p.give_slot), k(p.seat, p.slot));
+            }
+          }
+          break;
+        case "give":
+          move(k(p.seat, p.slot), k(p.target_seat, p.target_slot));
+          break;
+        default:
+          return;
+      }
+      saveMarks();
+    }
+    function openMarks(seat, slot) {
+      const g = game();
+      if (!marksOn() || !g || !filled(g, seat, slot)) return;
+      marking = { seat, slot };
+      $("marks-title").textContent = `mark ${seatOwner(g, seat)} card ${slot + 1}`;
+      const values = [];
+      for (let v = -1; v <= 13; v++) values.push(v);
+      const cur = markAt(seat, slot);
+      $("marks-values").innerHTML = values.map((v) =>
+        `<button class="mark-value${cur === v ? " primary" : ""}" data-v="${v}">${v}</button>`).join("");
+      $("marks-values").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => pickMark(Number(b.dataset.v))));
+      $("marks").hidden = false;
+      $("marks-values").querySelector("button").focus();
+    }
+    function pickMark(v) {
+      if (marking) setMark(marking.seat, marking.slot, v);
+      closeMarks();
+    }
+    function closeMarks() {
+      marking = null;
+      $("marks").hidden = true;
+      render();
     }
     // browsers only start audio after a gesture, so the context is made on
     // the first tap or key press (UI-27)
@@ -525,8 +818,10 @@
       const f = fx.get(key);
       return f ? ` ${f.cls}` : "";
     }
+    // the seat whose event is being played, which colors its flights
+    let actor = -1;
     function fly(from, to, html) {
-      flights.push({ from, to, html });
+      flights.push({ from, to, html, seat: actor });
     }
     // a slot "s:<seat>:<slot>", a hand "h:<seat>", or a pile
     function spot(key) {
@@ -554,6 +849,7 @@
         el.style.height = `${size.height}px`;
         el.style.setProperty("--dx", `${from.left + from.width / 2 - (to.left + to.width / 2)}px`);
         el.style.setProperty("--dy", `${from.top + from.height / 2 - (to.top + to.height / 2)}px`);
+        if (f.seat >= 0) el.style.setProperty("--seat", SEAT_COLORS[f.seat % SEAT_COLORS.length]);
         $("fx").append(el);
         win.setTimeout(() => el.remove(), FLY_MS);
       }
@@ -565,6 +861,7 @@
     function effect(e, g, at) {
       const p = e.payload || {};
       const seat = g.seats.findIndex((s) => s.player === e.player);
+      actor = seat;
       const slot = (s, n) => `s:${s}:${n}`;
       switch (e.kind) {
         case "start":
@@ -644,7 +941,7 @@
 
     function caption(lines) {
       const c = $("caption");
-      c.innerHTML = lines.map((l) => `<div${l.mine ? ` class="about-you"` : ""}>${esc(l.text)}</div>`).join("");
+      c.innerHTML = lines.map((l) => `<div${l.mine ? ` class="about-you"` : ""}${seatStyle(l.seat)}>${esc(l.text)}</div>`).join("");
       c.hidden = false;
       win.clearTimeout(caption.timer);
       caption.timer = win.setTimeout(() => (c.hidden = true), CAPTION_MS);
@@ -659,17 +956,36 @@
       seenEvent = { game: g.id, id: events.length ? events[0].id : 0 };
       let at = 0;
       if (last) {
-        const fresh = events.filter((e) => last.game !== g.id || e.id > last.id).slice(0, 6).reverse();
+        const fresh = events.filter((e) => last.game !== g.id || e.id > last.id).reverse();
+        // marks follow every move, even ones too many to animate
+        if (last.game === g.id && marksOn()) fresh.forEach(followMarks);
         const lines = [];
-        for (const e of fresh) {
+        const said = [];
+        for (const e of fresh.slice(-6)) {
           effect(e, g, at);
           at += 0.25;
-          if (e.player !== me && e.kind !== "ready") lines.push({ text: describe(e, g), mine: aboutMe(e, g) });
+          if (e.kind !== "ready") said.push(describe(e, g));
+          if (e.player !== me && e.kind !== "ready") lines.push({ text: describe(e, g), mine: aboutMe(e, g), seat: seatOfPlayer(g, e.player) });
+          if (e.player === me && e.kind === "match" && !(e.payload || {}).ok && navigatorOf().vibrate) navigatorOf().vibrate(200);
         }
         if (lines.length) caption(lines);
+        if (said.length) announce(said.join(". "));
       }
-      // a chime when your turn starts
-      if (before && before.id === g.id && myTurn(g) && !(inPlay(before) && before.turn === g.turn)) play("turn", at);
+      // a chime when your turn starts, and an alert if the page is hidden
+      if (before && before.id === g.id && myTurn(g) && !(inPlay(before) && before.turn === g.turn)) {
+        play("turn", at);
+        announce("your turn");
+        alertOn("your turn");
+      }
+      if (!myOwe(before) && myOwe(g)) alertOn("give a card for your match");
+      if (before && before.id !== g.id && g.me !== null) alertOn("a new game started");
+    }
+
+    // screen readers hear each new event, your own included (UI-42)
+    function announce(text) {
+      const el = $("announce");
+      // a changed text is read again even when it repeats
+      el.textContent = el.textContent === text ? `${text}.` : text;
     }
 
     // ---------------------------------------------------------------- selection
@@ -718,8 +1034,12 @@
         claiming = null;
         render();
       }
-      if (!data.ok) toast(data.code === "too_late" ? "too late, someone matched first"
-        : data.code === "stale" ? "the turn moved on; check the table and choose again" : data.message);
+      if (data.ok) return;
+      // a match that lost to a faster one says by how much (UI-43)
+      if (data.code === "too_late") {
+        return toast(/^too late: /.test(data.message || "") ? data.message : "too late, someone matched first");
+      }
+      toast(data.code === "stale" ? "the turn moved on; check the table and choose again" : data.message);
     }
 
     function onSlot(seat, slot) {
@@ -764,13 +1084,19 @@
         const a = { type: "match", seq: g.discard_seq, seat, slot };
         // a waiting move is not used by a tap; say so where it could be
         // mistaken for one (UI-22)
-        const waiting = myTurn(g) && g.stage.kind === "earned" ? ` this is a match attempt, not ${MOVE_INFO[g.stage.mv].label}.` : "";
+        const earned = myTurn(g) && g.stage.kind === "earned" ? ` this is a match attempt, not ${MOVE_INFO[g.stage.mv].label}.` : "";
+        if (!mine && !g.seats[g.me].slots.some((s) => s !== null)) return toast("you have no card to give");
+        // fast match sends on the tap, with no confirm (UI-40)
+        if (fast) {
+          send(a);
+          matchMode = false;
+          return render();
+        }
         if (!mine) {
-          if (!g.seats[g.me].slots.some((s) => s !== null)) return toast("you have no card to give");
-          return confirmAction(a, `match ${seatOwner(g, seat)} card ${slot + 1} with the ${g.discard_top}?${waiting} ` +
+          return confirmAction(a, `match ${seatOwner(g, seat)} card ${slot + 1} with the ${g.discard_top}?${earned} ` +
             `if you're right, you then give them one of your cards.`, k);
         }
-        return confirmAction(a, `match your card ${slot + 1} with the ${g.discard_top}?${waiting}`, k);
+        return confirmAction(a, `match your card ${slot + 1} with the ${g.discard_top}?${earned}`, k);
       }
     }
 
@@ -835,10 +1161,14 @@
       if (missed !== null) label += ", missed match";
       if (watched) label += ", being peeked at";
       if (pending) label += ", matching";
+      // your own note of what a face down card is (SET-17)
+      const noted = v === null && marksOn() ? markAt(seat, slot) : null;
+      if (noted !== null) label += `, marked ${noted}`;
       const lock = g.seats[seat].locked ? `<span class="lock">locked</span>` : "";
       const badge = watched ? `<span class="eye-badge"><svg viewBox="0 0 34 16" aria-hidden="true">${eye(17, 8, "#2f6fd6")}</svg></span>` : "";
+      const mark = noted !== null ? `<span class="mark">${noted}?</span>` : "";
       return `<button class="card${v === null ? " down" : ""}${chosen ? " sel" : ""}${pending ? " claiming" : ""}${peeked ? " peeked" : ""}${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">` +
-        (v === null ? back() : face(v)) + no + lock + badge + `</button>`;
+        (v === null ? back() : face(v)) + no + lock + badge + mark + `</button>`;
     }
 
     // the near row holds slots 1 to floor(n / 2), the rows behind it the
@@ -862,11 +1192,38 @@
       if (s.forfeited) tag = " (out)";
       else if (g.status === "peeking") tag = s.ready ? " (ready)" : " (peeking)";
       if (s.score !== null && s.score !== undefined) tag = ` <span class="score${s.won ? " won" : ""}">${s.score}${s.won ? " won" : ""}</span>`;
+      // the running total coming into this game, in a room playing to a target (SET-14)
+      const target = view.room.settings && view.room.settings.target_score;
+      const total = target && s.score === null ? ` <span class="total" title="running total">${s.carry || 0}/${target}</span>` : "";
       const slots = s.slots.map((_, i) => slotButton(g, seat, i, slotPos(g, seat, i, s.slots.length))).join("");
       const cols = columns(g);
-      return `<div class="hand${mine ? " mine" : ""}${g.turn === seat && inPlay(g) ? " turn" : ""}" data-hand="${seat}">` +
-        `<div class="who"><span class="dot${p.present ? " on" : ""}"></span>${esc(mine ? "you" : p.name || "?")}${tag}</div>` +
+      return `<div class="hand${mine ? " mine" : ""}${g.turn === seat && inPlay(g) ? " turn" : ""}" data-hand="${seat}"${seatStyle(seat)}>` +
+        `<div class="who"><span class="dot${p.present ? " on" : ""}"></span>${esc(mine ? "you" : p.name || "?")}${tag}${total}</div>` +
         `<div class="slots${cols > 3 ? " wide" : ""}" style="--cols: ${cols}">${slots}</div></div>`;
+    }
+
+    // other hands around the table, clockwise from your left (UI-36): a
+    // wide screen seats them on the left, across, and right; a narrow one
+    // stacks them above the piles
+    function opponents(g) {
+      const n = g.seats.length;
+      const from = g.me === null ? 0 : g.me + 1;
+      const order = [];
+      for (let i = 0; i < n; i++) if ((from + i) % n !== g.me) order.push((from + i) % n);
+      const side = order.length < 3 ? 0 : Math.floor(order.length / 3);
+      const left = order.slice(0, side);
+      const right = order.slice(order.length - side);
+      const top = order.slice(side, order.length - side);
+      const group = (cls, seats) => `<div class="side ${cls}">${seats.map((i) => hand(g, i, false)).join("")}</div>`;
+      return `<div class="opponents">${group("left", left)}${group("top", top)}${group("right", right)}</div>`;
+    }
+
+    // the newest discards under the top card, all of them public (RULE-28)
+    function recentDiscards(g) {
+      const older = (g.discard_recent || []).slice(1);
+      if (!older.length) return "";
+      return `<div class="recent" aria-label="earlier discards, newest first: ${older.join(", ")}">` +
+        `<span>before</span>${older.map((v) => `<span class="card mini">${face(v)}</span>`).join("")}</div>`;
     }
 
     // the handlers read the current view, since an unchanged table keeps
@@ -877,21 +1234,47 @@
         paint(t, `<p>No game yet. The host starts one once at least two players are here.</p>`);
         return;
       }
-      const others = g.seats.map((_, i) => i).filter((i) => i !== g.me).map((i) => hand(g, i, false)).join("");
       const top = g.discard_top;
       const card = g.stage.kind === "drawn" && myTurn(g) ? drawnCard(g) : null;
       const drawn = card === null ? ""
         : `<div class="pile"><span class="card" id="drawn">${face(card)}</span><span>drawn</span></div>`;
+      // a matchable discard glows, fading as it ages (UI-41)
+      const live = g.matchable && top !== null && canMatchAny(g) ? " live" : "";
       const fresh = paint(t,
-        `<div class="opponents">${others}</div>` +
-        `<div class="center">` +
+        opponents(g) +
+        `<div class="center"><div class="piles">` +
         `<div class="pile"><button class="card${fxClass("deck")}" id="deck" aria-label="draw pile, ${g.deck_count} cards">${back()}</button><span>${g.deck_count} left</span></div>` +
-        `<div class="pile"><button class="card${fxClass("discard")}" id="discard" aria-label="discard pile${top === null ? ", empty" : ", " + cardLabel(top)}">${top === null ? "" : face(top)}</button><span>${g.matchable ? "matchable" : "discard"}</span></div>` +
-        drawn + `</div>` +
+        `<div class="pile"><button class="card${live}${fxClass("discard")}" id="discard" data-seq="${g.discard_seq}" aria-label="discard pile${top === null ? ", empty" : ", " + cardLabel(top)}">${top === null ? "" : face(top)}</button><span>${g.matchable ? "matchable" : "discard"}</span></div>` +
+        drawn + `</div>${recentDiscards(g)}</div>` +
         (g.me !== null ? hand(g, g.me, true) : ""));
+      glow();
       if (!fresh) return;
-      t.querySelectorAll("button[data-seat]").forEach((b) =>
-        b.addEventListener("click", () => onSlot(Number(b.dataset.seat), Number(b.dataset.slot))));
+      t.querySelectorAll("button[data-seat]").forEach((b) => {
+        const seat = Number(b.dataset.seat);
+        const slot = Number(b.dataset.slot);
+        b.addEventListener("click", () => {
+          // the click that ends a long press is not a tap
+          const held = pressed && pressed.seat === seat && pressed.slot === slot && Date.now() - pressed.at < 1000;
+          pressed = null;
+          if (!held) onSlot(seat, slot);
+        });
+        // a long press or right click marks the card (SET-17)
+        b.addEventListener("contextmenu", (e) => {
+          if (!marksOn()) return;
+          e.preventDefault();
+          openMarks(seat, slot);
+        });
+        b.addEventListener("pointerdown", () => {
+          if (!marksOn()) return;
+          const timer = win.setTimeout(() => {
+            pressed = { seat, slot, at: Date.now() };
+            openMarks(seat, slot);
+          }, LONG_PRESS_MS);
+          const cancel = () => win.clearTimeout(timer);
+          b.addEventListener("pointerup", cancel, { once: true });
+          b.addEventListener("pointerleave", cancel, { once: true });
+        });
+      });
       $("deck").addEventListener("click", () => {
         const g = game();
         if (myTurn(g) && g.stage.kind === "start") confirmAction({ type: "draw" }, "draw from the deck?", turnKey(g));
@@ -1071,15 +1454,19 @@
       const ul = $("members");
       const host = view.room.host;
       const amHost = !watching && host === me;
-      const sig = JSON.stringify([host, amHost, view.members]);
+      const g = game();
+      const seats = g ? g.seats.map((s) => s.player) : [];
+      const sig = JSON.stringify([host, amHost, view.members, seats]);
       if (painted.get("members") === sig) return;
       painted.set("members", sig);
       ul.innerHTML = "";
       for (const m of view.members) {
         if (m.left && !m.removed) continue;
         const li = doc.createElement("li");
-        const tags = [m.id === host ? "host" : "", m.id === me ? "you" : "", m.removed ? "removed" : ""].filter(Boolean).join(", ");
-        li.innerHTML = `<span class="dot${m.present ? " on" : ""}"></span><span>${esc(m.name)}</span><span class="tag">${esc(tags)}</span>`;
+        const tags = [m.id === host ? "host" : "", m.id === me ? "you" : "", m.bot ? `bot, ${m.bot_level || "normal"}` : "", m.removed ? "removed" : ""].filter(Boolean).join(", ");
+        const seat = seats.indexOf(m.id);
+        li.innerHTML = `<span class="dot${m.present ? " on" : ""}"></span>${seat >= 0 ? `<span class="chip"${seatStyle(seat)}></span>` : ""}` +
+          `<span>${esc(m.name)}</span><span class="tag">${esc(tags)}</span>`;
         if (amHost && m.id !== me) {
           if (m.removed) {
             li.append(button("unban", () => api("POST", `/komino/api/rooms/${code}/unban`, { player: m.id }).then(applyView).catch((e) => toast(e.message)), { cls: "small" }));
@@ -1112,7 +1499,9 @@
         case "look_swap": return `${who} swapped with ${owner(p.target_seat)} card ${p.target_slot + 1}`;
         case "skip": return `${who} skipped the move`;
         case "match": {
-          if (p.ok) return `${who} matched ${owner(p.seat)} ${p.value}`;
+          // how fast the match was, as the server timed it (UI-43)
+          const fast = typeof p.reaction_ms === "number" ? ` in ${p.reaction_ms}ms` : "";
+          if (p.ok) return `${who} matched ${owner(p.seat)} ${p.value}${fast}`;
           const value = typeof p.value === "number" ? `, a ${p.value},` : "";
           return `${who} missed a match on ${owner(p.seat)} card ${p.slot + 1}${value} and took a penalty`;
         }
@@ -1121,13 +1510,92 @@
         case "forfeit": return `${who} left the game`;
         case "away_skip": return `${who} ${e.player === me ? "were" : "was"} away; turn skipped`;
         case "timeout_skip": return `${who} ran out of time; turn skipped`;
-        case "scored": return `game over: ${(p.winners || []).map((w) => (w === me ? "you" : nameOf(w))).join(", ") || "no winner"}`;
+        case "scored": {
+          const names = (ids) => (ids || []).map((w) => (w === me ? "you" : nameOf(w))).join(", ");
+          const match = p.match_over ? `; match won by ${names(p.match_winners)}` : "";
+          return `game over: ${names(p.winners) || "no winner"}${match}`;
+        }
       }
       return e.kind;
     }
 
     function renderLog(g) {
-      paint($("log"), (view.events || []).map((e) => `<li>${esc(describe(e, g))}</li>`).join(""));
+      paint($("log"), (view.events || []).map((e) => {
+        const seat = seatOfPlayer(g, e.player);
+        return `<li${seatStyle(seat)}${seat >= 0 ? ` class="by"` : ""}>${esc(describe(e, g))}</li>`;
+      }).join(""));
+    }
+
+    // ---------------------------------------------------------------- summary
+    //
+    // At the end of a game: each player's score, running total, and what
+    // they did, with the match so far as a chart (UI-38).
+
+    function renderSummary(g) {
+      const el = $("summary");
+      if (!g || g.status !== "scored") {
+        el.hidden = true;
+        return paint(el, "");
+      }
+      el.hidden = false;
+      const s = view.room.settings || {};
+      const history = view.room.history || [];
+      const name = (seat) => (g.seats[seat].player === me && g.me !== null ? "you" : nameOf(g.seats[seat].player));
+      const totals = Boolean(s.target_score) || history.length > 1;
+      const order = g.seats.map((_, i) => i).sort((a, b) => {
+        const sa = g.seats[a].forfeited ? Infinity : g.seats[a].score;
+        const sb = g.seats[b].forfeited ? Infinity : g.seats[b].score;
+        return sa - sb || a - b;
+      });
+      const rows = order.map((i) => {
+        const seat = g.seats[i];
+        const t = seat.tally || {};
+        const won = [seat.won ? "won" : "", seat.match_won ? "won the match" : ""].filter(Boolean).join(", ");
+        return `<tr${seatStyle(i)}><td><span class="chip"></span>${esc(name(i))}${won ? ` <span class="won">${won}</span>` : ""}</td>` +
+          `<td>${seat.forfeited ? "out" : seat.score}</td>${totals ? `<td>${seat.total === null || seat.total === undefined ? "" : seat.total}</td>` : ""}` +
+          `<td>${t.matches || 0}</td><td>${t.misses || 0}</td><td>${t.penalties || 0}</td><td>${t.specials || 0}</td></tr>`;
+      }).join("");
+      let result = "";
+      if (g.match_over) {
+        const w = g.seats.map((x, i) => i).filter((i) => g.seats[i].match_won).map(name);
+        result = `match over: ${w.join(", ")} won the match. the next game starts a new one.`;
+      } else if (s.target_score) {
+        result = `playing to ${s.target_score}. the match goes on.`;
+      }
+      paint(el, `<h2>game over</h2>${result ? `<p class="match-result">${esc(result)}</p>` : ""}` +
+        `<div class="scroll"><table class="stats"><tr><th>player</th><th>score</th>${totals ? "<th>total</th>" : ""}` +
+        `<th>matches</th><th>missed</th><th>penalties</th><th>specials</th></tr>${rows}</table></div>` +
+        chart(g, history, s.target_score));
+    }
+
+    // running totals game by game, one line per player
+    function chart(g, history, target) {
+      if (history.length < 2) return "";
+      const players = [];
+      for (const e of history) for (const p of Object.keys(e.totals || {})) if (!players.includes(p)) players.push(p);
+      const values = history.flatMap((e) => Object.values(e.totals || {}));
+      const top = Math.max(target || 0, ...values, 1);
+      const W = 320;
+      const H = 140;
+      const pad = 18;
+      const x = (i) => pad + (i * (W - 2 * pad)) / (history.length - 1);
+      const y = (v) => H - pad - (Math.max(0, v) * (H - 2 * pad)) / top;
+      const color = (p) => {
+        const seat = seatOfPlayer(g, p);
+        return seat >= 0 ? SEAT_COLORS[seat % SEAT_COLORS.length] : "#999";
+      };
+      const lines = players.map((p) => {
+        const pts = history.map((e, i) => (e.totals && typeof e.totals[p] === "number" ? `${x(i).toFixed(1)},${y(e.totals[p]).toFixed(1)}` : null))
+          .filter(Boolean).join(" ");
+        return `<polyline points="${pts}" fill="none" stroke="${color(p)}" stroke-width="2.5"/>`;
+      }).join("");
+      const goal = target
+        ? `<line x1="${pad}" x2="${W - pad}" y1="${y(target)}" y2="${y(target)}" stroke="currentColor" stroke-dasharray="4 4" opacity=".5"/>` +
+          `<text x="${W - pad}" y="${y(target) - 4}" text-anchor="end" font-size="10" fill="currentColor">${target}</text>` : "";
+      const legend = players.map((p) => `<span style="--seat: ${color(p)}"><span class="chip"></span>${esc(p === me ? "you" : nameOf(p))}</span>`).join("");
+      return `<figure class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="running totals over ${history.length} games">` +
+        `<line x1="${pad}" x2="${W - pad}" y1="${H - pad}" y2="${H - pad}" stroke="currentColor" opacity=".3"/>${goal}${lines}</svg>` +
+        `<figcaption>${legend}</figcaption></figure>`;
     }
 
     // e.g. "6 cards, 60s turns, 30s away grace, peeks until hidden" (SET-4)
@@ -1139,7 +1607,11 @@
         `${s.away_grace_secs}s away grace`,
         s.reveal_secs ? `${s.reveal_secs}s peeks` : "peeks until hidden",
         s.show_misses === false ? "misses hidden" : "misses shown",
-      ].join(", ");
+        s.target_score ? `play to ${s.target_score}` : "",
+        s.caller_penalty ? `+${s.caller_penalty} for a losing call` : "",
+        s.target_score && s.exact_reset ? "exact target halves" : "",
+        s.memory_marks ? "marks allowed" : "",
+      ].filter(Boolean).join(", ");
     }
 
     function renderStats() {
@@ -1162,6 +1634,8 @@
       $("settings").textContent = settingsText(view.room.settings);
       const amHost = !watching && view.room.host === me;
       const canStart = amHost && (!g || g.status === "scored");
+      // bots join the next game (BOT-1)
+      $("bots").hidden = !amHost;
       $("start").hidden = !canStart;
       $("start").textContent = g ? "next game" : "start game";
       const n = view.observers || 0;
@@ -1171,7 +1645,9 @@
       renderTable(g);
       renderPrompt(g);
       renderControls(g);
-      $("actionbar").hidden = !$("prompt").textContent && !$("controls").children.length;
+      renderTip(g);
+      $("actionbar").hidden = !$("prompt").textContent && !$("controls").children.length && $("tip").hidden;
+      renderSummary(g);
       renderMembers();
       renderLog(g);
       renderStats();
@@ -1183,10 +1659,11 @@
       if (typeof v.server_now === "number") skew = v.server_now - Date.now();
       const g = game();
       if (g && (!shown || shown.game !== g.id || shown.seq !== g.discard_seq)) {
-        shown = { game: g.id, seq: g.discard_seq, at: clock() };
+        shown = { game: g.id, seq: g.discard_seq, at: clock(), wall: Date.now() };
       }
       // a pending match ends with its result, or once its discard is gone
       if (claiming && (!g || g.discard_seq !== claiming.seq)) claiming = null;
+      if (!watching) loadMarks(g);
       // a pending action that no longer applies is dropped, with the reason
       if (!myOwe(before) && myOwe(g)) toast("your match was right: now tap one of your cards to give");
       if (sel && g) {
@@ -1257,6 +1734,36 @@
       disconnect();
     }
 
+    // keyboard shortcuts (UI-39): letters press the matching control, digits
+    // tap your own cards; nothing fires while typing or with a dialog open
+    function onKey(e) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target;
+      if (t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName || "")) return;
+      if (e.key === "?") {
+        if ($("guide").hidden) openGuide();
+        return;
+      }
+      if (!$("confirm").hidden || !$("guide").hidden || !$("marks").hidden || !code) return;
+      const g = game();
+      const key = e.key.toLowerCase();
+      if (KEYS[key]) {
+        const b = [...$("controls").querySelectorAll("button")].find((b) => KEYS[key](b.textContent));
+        if (b && !b.disabled) {
+          e.preventDefault();
+          b.click();
+        }
+        return;
+      }
+      if (/^[0-9]$/.test(e.key) && g && g.me !== null && !watching) {
+        const slot = e.key === "0" ? 9 : Number(e.key) - 1;
+        if (filled(g, g.me, slot) || myOwe(g)) {
+          e.preventDefault();
+          onSlot(g.me, slot);
+        }
+      }
+    }
+
     // ---------------------------------------------------------------- wiring
 
     function wire() {
@@ -1271,10 +1778,33 @@
       });
       doc.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
+        if (!$("marks").hidden) return closeMarks();
         if (!$("guide").hidden) return closeGuide();
         clearSel();
       });
+      doc.addEventListener("keydown", onKey);
       $("guide-btn").addEventListener("click", openGuide);
+      $("marks-clear").addEventListener("click", () => pickMark(null));
+      $("marks-cancel").addEventListener("click", closeMarks);
+      $("marks").addEventListener("click", (e) => {
+        if (e.target === $("marks")) closeMarks();
+      });
+      $("fast").addEventListener("click", () => setFast(!fast));
+      $("alerts").addEventListener("click", () => setAlerts(!alerts));
+      $("tip-ok").addEventListener("click", () => {
+        const t = $("tip").dataset.tip;
+        if (t && tipsSeen) tipsSeen.add(t);
+        saveTips();
+        render();
+      });
+      $("tip-off").addEventListener("click", () => {
+        tipsSeen = null;
+        saveTips();
+        render();
+      });
+      doc.addEventListener("visibilitychange", () => {
+        if (!pageHidden()) alertOff();
+      });
       $("guide-close").addEventListener("click", closeGuide);
       $("guide").addEventListener("click", (e) => {
         if (e.target === $("guide")) closeGuide();
@@ -1302,6 +1832,10 @@
           away_grace_secs: Number($("set-away").value),
           reveal_secs: secs("set-reveal"),
           show_misses: $("set-misses").value === "shown",
+          target_score: secs("set-target"),
+          caller_penalty: Number($("set-penalty").value),
+          exact_reset: $("set-exact").value === "on",
+          memory_marks: $("set-marks").value === "on",
         };
         try {
           const v = await api("POST", "/komino/api/rooms", settings);
@@ -1326,6 +1860,11 @@
       $("copy").addEventListener("click", copy(() => view.room.url));
       $("copy-watch").addEventListener("click", copy(() => view.room.watch_url));
       $("start").addEventListener("click", () => send({ type: "start" }));
+      $("add-bot").addEventListener("click", () =>
+        api("POST", `/komino/api/rooms/${code}/bots`, { level: $("bot-level").value }).then((v) => {
+          applyView(v);
+          toast("bot added; it plays from the next game");
+        }).catch((e) => toast(e.message)));
       $("leave").addEventListener("click", async () => {
         if (!win.confirm("leave this room? if you are in a game you forfeit it.")) return;
         await api("POST", `/komino/api/rooms/${code}/leave`).catch(() => {});

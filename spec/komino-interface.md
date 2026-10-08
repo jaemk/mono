@@ -73,7 +73,8 @@ dialog is the "confirm bar" referred to below.
 
 ### UI-11
 UI-10 applies to: drawing, taking the discard, swapping, discarding, using each special move
-(and skipping one), matching, giving a card, and pressing ready. Matching another player's
+(and skipping one), matching (unless fast match is on, UI-40), giving a card, and pressing
+ready. Matching another player's
 card confirms at once, saying a right match is followed by giving a card. Once a right match
 leaves a card owed (RULE-19), the matcher's taps on their own cards pick the card to give,
 each confirmed; taps on other hands do nothing until it is given. The prompt (UI-33) says so
@@ -118,13 +119,69 @@ do next (the step of your turn, or a card you owe). The bar sticks to the bottom
 while the table runs past it, and is hidden when there is nothing to show (as on the watch
 page).
 
+### UI-40
+A `fast match` toggle in the room bar, kept in browser storage and off by default, makes a tap
+on a face down card send its match at once, with no confirm (an exception to UI-10). Giving a
+card and every turn action still confirm. Storage that is missing or throws leaves it off.
+
+### UI-39
+Keyboard shortcuts press the control whose label they name: `d` draw, `t` take, `x` discard,
+`u` use the move, `e` end turn, skip move, or keep my cards, `m` match or cancel match, `h`
+hide card, `r` ready, `k` KOMINO. `1`-`9` tap your own card of that number (`0` is 10), and
+`?` opens the guide. Keys do nothing while typing in a field, with a modifier held, or while a
+dialog is open, where Enter confirms and Escape cancels.
+
+## Table look
+
+### UI-36
+Each seat has a color, in seat order. It underlines the seat's name over its hand, marks its
+lines in the log and its captions, outlines the cards its events send flying, and shows as a
+chip next to seated members. On screens 900px and wider, the other hands sit around the table
+clockwise from your left: a third on the left, a third on the right, the rest across. Narrower
+screens stack them above the piles in the same order.
+
+### UI-41
+While the top discard can be matched, it glows and the glow fades over 6 seconds. A re-render
+continues the glow where it was; a new discard starts it over.
+
+### UI-43
+The log and captions give each match's reaction time as the server timed it (`bob matched your
+4 in 180ms`). A match that lost the race to a faster one says by how much (`too late: a match
+120ms faster got there first`).
+
+## Alerts and help
+
+### UI-35
+When your turn starts, a right match leaves you a card to give, or a new game starts, a phone
+vibrates. If the page is hidden, the title reads `(!) your turn - komino` (or the reason) and
+the icon shows a red dot until the page is shown again. An `alerts` toggle in the room bar,
+kept in browser storage and off by default, also shows a browser notification then; turning
+it on asks for permission once. A notification the browser refuses is ignored.
+
+### UI-37
+On a player's first games, a tip above the prompt explains the step they are at: the opening
+peek, drawing, a drawn card, matching, an earned move, giving a card, and calling KOMINO. Each
+shows until `got it`, once per browser; `no more tips` turns them all off. Observers see none.
+
+### UI-38
+When a game is scored, a summary under the table lists each player by score: score, running
+total (with a target, or after two games), matches, misses, penalty cards, and special moves.
+A finished match names its winners; a room playing to a target says the match goes on. With
+two or more games in the match, a chart draws each player's running total by game, with the
+target as a dashed line.
+
+### UI-42
+A visually hidden polite live region reads each new event aloud, your own included, and `your
+turn` when your turn starts.
+
 ## Guide
 
 ### UI-34
 A `rules` button in the header opens a modal guide to the game: goal, setup, turns, each
-special card with its face, matching (including giving a card), komino, and scoring. In a
-room it uses the room's settings (hand size and near row, turn limit, away grace, peek time,
-and whether misses are shown); in the lobby it names them as room choices. Close, Escape, or
+special card with its face, matching (including giving a card), komino, scoring, matches over
+several games, memory marks, and the keyboard shortcuts. In a room it uses the room's settings
+(hand size and near row, turn limit, away grace, peek time, whether misses are shown, target,
+caller penalty, exact reset, and marks); in the lobby it names them as room choices. Close, Escape, or
 tapping the backdrop closes it, and Escape closes it before any open confirm.
 
 ## Komino button

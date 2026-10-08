@@ -1,3 +1,4 @@
+use crate::bot::Level;
 use crate::game::{Action, Secret, Settings};
 use crate::lag::{self, Rtt, Seen};
 use crate::models::{self, Acted, ApiError, ClientAction, Player, Result, Room, Snapshot};
@@ -186,6 +187,37 @@ pub async fn remove_member(
     let (player, jar) = identify(&state, jar).await?;
     let room = models::room_by_code(&state.db, &code).await?;
     models::remove(&state.db, &room, &player.id, &req.player).await?;
+    let view = room_view(&state, &room, &player.id).await?;
+    Ok((jar, Json(view)).into_response())
+}
+
+/// A new bot's level (BOT-5): `{"level": "easy" | "normal" | "hard"}`, or an
+/// empty body for normal.
+fn parse_level(body: &[u8]) -> Result<Level> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Level::default());
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| ApiError::invalid(format!("bad body: {e}")))?;
+    match v.get("level") {
+        None | Some(serde_json::Value::Null) => Ok(Level::default()),
+        Some(l) => l
+            .as_str()
+            .and_then(Level::parse)
+            .ok_or_else(|| ApiError::invalid("level must be easy, normal, or hard")),
+    }
+}
+
+pub async fn add_bot(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+    body: Bytes,
+) -> Result<Response> {
+    let level = parse_level(&body)?;
+    let (player, jar) = identify(&state, jar).await?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    models::add_bot(&state.db, &room, &player.id, level).await?;
     let view = room_view(&state, &room, &player.id).await?;
     Ok((jar, Json(view)).into_response())
 }
@@ -601,6 +633,18 @@ mod tests {
         let db = access_error(&ApiError::from(sqlx::Error::PoolTimedOut));
         assert_eq!(db["type"], "error");
         assert_eq!(db["code"], "error");
+    }
+
+    #[test]
+    fn bot_levels_parse_from_an_optional_body() {
+        assert_eq!(parse_level(b"").unwrap(), Level::Normal);
+        assert_eq!(parse_level(b"{}").unwrap(), Level::Normal);
+        assert_eq!(parse_level(br#"{"level": null}"#).unwrap(), Level::Normal);
+        assert_eq!(parse_level(br#"{"level": "easy"}"#).unwrap(), Level::Easy);
+        assert_eq!(parse_level(br#"{"level": "hard"}"#).unwrap(), Level::Hard);
+        for bad in [&br#"{"level": "expert"}"#[..], br#"{"level": 3}"#, b"{"] {
+            assert_eq!(parse_level(bad).unwrap_err().code, "invalid");
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! state; each action locks the game row, applies the rules engine, and saves
 //! state, events, and stats in one transaction that also notifies the room.
 
+use crate::bot;
 use crate::game::{self, Action, Game, Outcome, Reject, Secret, Settings, Stat};
 use axum::{
     http::StatusCode,
@@ -206,11 +207,19 @@ pub struct Room {
     pub host: String,
     pub last_winner: Option<String>,
     pub settings: Settings,
+    /// One entry per scored game, oldest first (SET-14): `{m, over, totals,
+    /// scores}`, totals and scores keyed by player id.
+    pub history: Vec<Value>,
 }
 
+/// Games kept in a room's history.
+const HISTORY_KEPT: usize = 50;
+
+/// The room columns every room read takes, prefixed `r.`.
 const ROOM_COLUMNS: &str =
-    "id, code, host_player_id, last_winner, hand_size, away_grace_secs, turn_limit_secs, reveal_secs,
-     show_misses";
+    "r.id, r.code, r.host_player_id, r.last_winner, r.hand_size, r.away_grace_secs,
+     r.turn_limit_secs, r.reveal_secs, r.show_misses, r.target_score, r.caller_penalty,
+     r.exact_reset, r.memory_marks, r.history";
 
 fn room_from_row(row: &sqlx::postgres::PgRow) -> Room {
     Room {
@@ -224,7 +233,61 @@ fn room_from_row(row: &sqlx::postgres::PgRow) -> Room {
             turn_limit_secs: row.get::<Option<i32>, _>("turn_limit_secs").map(Into::into),
             reveal_secs: row.get::<Option<i32>, _>("reveal_secs").map(Into::into),
             show_misses: row.get("show_misses"),
+            target_score: row.get::<Option<i32>, _>("target_score").map(Into::into),
+            caller_penalty: row.get::<i32, _>("caller_penalty").into(),
+            exact_reset: row.get("exact_reset"),
+            memory_marks: row.get("memory_marks"),
         },
+        history: json_array(row.get("history")),
+    }
+}
+
+impl Room {
+    /// The match the next game belongs to and each player's running total
+    /// coming into it (SET-14). A finished match starts the next from zero;
+    /// a player new to a running match starts level with its highest total,
+    /// so sitting out the early games is no advantage.
+    fn carry(&self) -> (u32, impl Fn(&str) -> i32 + '_) {
+        let last = self.history.last();
+        let m = last.and_then(|e| e["m"].as_u64()).unwrap_or(0) as u32;
+        let over = last.is_none_or(|e| e["over"] == true);
+        let totals = last.filter(|_| !over).map(|e| &e["totals"]);
+        let highest = totals
+            .and_then(Value::as_object)
+            .and_then(|t| t.values().filter_map(Value::as_i64).max())
+            .unwrap_or(0) as i32;
+        let carry = move |player: &str| match totals {
+            Some(t) => t[player].as_i64().map(|n| n as i32).unwrap_or(highest),
+            None => 0,
+        };
+        (if over { m + 1 } else { m }, carry)
+    }
+
+    /// The games of the newest match, oldest first, for the room view.
+    fn match_history(&self) -> Vec<&Value> {
+        let m = self.history.last().map(|e| &e["m"]);
+        self.history.iter().filter(|e| Some(&e["m"]) == m).collect()
+    }
+
+    /// The history with `game`'s result appended, when it was just scored.
+    fn history_after(&self, game: &Game) -> Value {
+        let by_player = |f: &dyn Fn(&game::Seat) -> Option<i32>| -> Value {
+            game.seats
+                .iter()
+                .filter_map(|s| f(s).map(|n| (s.player.clone(), json!(n))))
+                .collect::<serde_json::Map<_, _>>()
+                .into()
+        };
+        let mut history = self.history.clone();
+        history.push(json!({
+            "m": game.match_no,
+            "over": game.match_over,
+            "totals": by_player(&|s| s.total),
+            "scores": by_player(&|s| s.score),
+        }));
+        let extra = history.len().saturating_sub(HISTORY_KEPT);
+        history.drain(..extra);
+        Value::Array(history)
     }
 }
 
@@ -258,8 +321,9 @@ pub async fn create_room(db: &DbPool, host: &str, settings: Settings) -> Result<
         let mut tx = db.begin().await?;
         let id: Option<i64> = sqlx::query_scalar(
             "INSERT INTO rooms (code, host_player_id, hand_size, away_grace_secs,
-                                turn_limit_secs, reveal_secs, show_misses)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                turn_limit_secs, reveal_secs, show_misses, target_score,
+                                caller_penalty, exact_reset, memory_marks)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              ON CONFLICT (code) DO NOTHING RETURNING id",
         )
         .bind(&code)
@@ -269,6 +333,10 @@ pub async fn create_room(db: &DbPool, host: &str, settings: Settings) -> Result<
         .bind(settings.turn_limit_secs.map(|s| s as i32))
         .bind(settings.reveal_secs.map(|s| s as i32))
         .bind(settings.show_misses)
+        .bind(settings.target_score.map(|s| s as i32))
+        .bind(settings.caller_penalty as i32)
+        .bind(settings.exact_reset)
+        .bind(settings.memory_marks)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(id) = id else { continue };
@@ -288,6 +356,7 @@ pub async fn create_room(db: &DbPool, host: &str, settings: Settings) -> Result<
             host: host.to_string(),
             last_winner: None,
             settings,
+            history: vec![],
         });
     }
     Err(ApiError::new(
@@ -299,17 +368,19 @@ pub async fn create_room(db: &DbPool, host: &str, settings: Settings) -> Result<
 
 pub async fn room_by_code(db: &DbPool, raw: &str) -> Result<Room> {
     let code = normalize_code(raw).ok_or_else(ApiError::not_found)?;
-    let row = sqlx::query(&format!("SELECT {ROOM_COLUMNS} FROM rooms WHERE code = $1"))
-        .bind(&code)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
+    let row = sqlx::query(&format!(
+        "SELECT {ROOM_COLUMNS} FROM rooms r WHERE r.code = $1"
+    ))
+    .bind(&code)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
     Ok(room_from_row(&row))
 }
 
 async fn lock_room(tx: &mut Tx<'_>, room_id: i64) -> Result<Room> {
     let row = sqlx::query(&format!(
-        "SELECT {ROOM_COLUMNS} FROM rooms WHERE id = $1 FOR UPDATE"
+        "SELECT {ROOM_COLUMNS} FROM rooms r WHERE r.id = $1 FOR UPDATE"
     ))
     .bind(room_id)
     .fetch_optional(&mut **tx)
@@ -321,13 +392,11 @@ async fn lock_room(tx: &mut Tx<'_>, room_id: i64) -> Result<Room> {
 /// Lock the room row and read `player`'s membership in the same round trip,
 /// then require them to be a current member.
 async fn lock_room_as(tx: &mut Tx<'_>, room_id: i64, player: &str) -> Result<Room> {
-    let row = sqlx::query(
-        "SELECT r.id, r.code, r.host_player_id, r.last_winner, r.hand_size, r.away_grace_secs,
-                r.turn_limit_secs, r.reveal_secs, r.show_misses, m.removed,
-                m.left_at IS NOT NULL AS gone
+    let row = sqlx::query(&format!(
+        "SELECT {ROOM_COLUMNS}, m.removed, m.left_at IS NOT NULL AS gone
          FROM rooms r LEFT JOIN room_members m ON m.room_id = r.id AND m.player_id = $2
-         WHERE r.id = $1 FOR UPDATE OF r",
-    )
+         WHERE r.id = $1 FOR UPDATE OF r"
+    ))
     .bind(room_id)
     .bind(player)
     .fetch_optional(&mut **tx)
@@ -523,11 +592,13 @@ pub async fn leave(db: &DbPool, room: &Room, player: &str) -> Result<()> {
     .execute(&mut *tx)
     .await?;
     if room.host == player {
-        // longest-standing present member first, then anyone still here
+        // longest-standing present member first, then anyone still here;
+        // never a bot (BOT-2)
         let next: Option<String> = sqlx::query_scalar(
-            "SELECT player_id FROM room_members
-             WHERE room_id = $1 AND player_id <> $2 AND left_at IS NULL AND NOT removed
-             ORDER BY coalesce(present_until > now(), false) DESC, joined
+            "SELECT m.player_id FROM room_members m JOIN players p ON p.id = m.player_id
+             WHERE m.room_id = $1 AND m.player_id <> $2 AND m.left_at IS NULL AND NOT m.removed
+               AND NOT p.bot
+             ORDER BY coalesce(m.present_until > now(), false) DESC, m.joined
              LIMIT 1",
         )
         .bind(room.id)
@@ -557,9 +628,12 @@ pub async fn remove(db: &DbPool, room: &Room, host: &str, target: &str) -> Resul
         return Err(ApiError::invalid("the host cannot remove themselves"));
     }
     forfeit(&mut tx, &room, target).await?;
+    // a removed bot just leaves, with nothing to unban (BOT-2)
     let n = sqlx::query(
-        "UPDATE room_members SET removed = true, present_until = NULL
-         WHERE room_id = $1 AND player_id = $2",
+        "UPDATE room_members m SET removed = NOT p.bot, present_until = NULL,
+             left_at = CASE WHEN p.bot THEN now() ELSE m.left_at END
+         FROM players p
+         WHERE m.room_id = $1 AND m.player_id = $2 AND p.id = m.player_id",
     )
     .bind(room.id)
     .bind(target)
@@ -569,6 +643,62 @@ pub async fn remove(db: &DbPool, room: &Room, host: &str, target: &str) -> Resul
     if n == 0 {
         return Err(ApiError::invalid("that player is not in this room"));
     }
+    notify(&mut tx, room.id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Names bots are given, with a number when one is taken.
+const BOT_NAMES: [&str; 8] = ["ava", "ben", "cleo", "dex", "ezra", "fay", "gus", "hana"];
+
+/// Add a computer player at `level` to the room (BOT-1, BOT-5). Bots are
+/// always present, so the next game seats them like anyone here.
+pub async fn add_bot(db: &DbPool, room: &Room, host: &str, level: bot::Level) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let room = lock_room(&mut tx, room.id).await?;
+    if room.host != host {
+        return Err(ApiError::forbidden("only the host can add bots"));
+    }
+    let members: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT p.name, p.bot FROM room_members m JOIN players p ON p.id = m.player_id
+         WHERE m.room_id = $1 AND m.left_at IS NULL AND NOT m.removed",
+    )
+    .bind(room.id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let bots = members.iter().filter(|(_, bot)| *bot).count();
+    let names: Vec<String> = members.into_iter().map(|(n, _)| n).collect();
+    if bots >= game::MAX_SEATS - 1 {
+        return Err(ApiError::invalid(format!(
+            "a room can have at most {} bots",
+            game::MAX_SEATS - 1
+        )));
+    }
+    let name = (0..)
+        .map(|i| {
+            let base = BOT_NAMES[i % BOT_NAMES.len()];
+            match i / BOT_NAMES.len() {
+                0 => format!("bot {base}"),
+                n => format!("bot {base} {}", n + 1),
+            }
+        })
+        .find(|n| !names.contains(n))
+        .expect("an unused bot name");
+    let id = format!("bot-{}", uuid::Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO players (id, name, bot, bot_level) VALUES ($1, $2, true, $3)")
+        .bind(&id)
+        .bind(&name)
+        .bind(level.as_str())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO room_members (room_id, player_id, present_until)
+         VALUES ($1, $2, 'infinity')",
+    )
+    .bind(room.id)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
     notify(&mut tx, room.id).await?;
     tx.commit().await?;
     Ok(())
@@ -652,7 +782,8 @@ static SAVE_SQL: LazyLock<String> = LazyLock::new(|| {
              FROM jsonb_to_recordset($6) AS s(player text, {typed})
              ON CONFLICT (room_id, player_id) DO UPDATE SET {sums}
          ), r AS (
-             UPDATE rooms SET last_active = now(), last_winner = coalesce($7, last_winner)
+             UPDATE rooms SET last_active = now(), last_winner = coalesce($7, last_winner),
+                 history = coalesce($9, history)
              WHERE id = $5
          )
          SELECT pg_notify($8, $5::text) FROM g"
@@ -702,6 +833,12 @@ async fn save(
         .map(|e| json!({ "player": e.player, "kind": e.kind, "payload": e.payload }))
         .collect();
     let winner = game.winners().first().map(|w| w.to_string());
+    // the game just scored adds its result to the room's history (SET-14)
+    let history = out
+        .events
+        .iter()
+        .any(|e| e.kind == "scored")
+        .then(|| room.history_after(game));
     sqlx::query(&SAVE_SQL)
         .bind(serde_json::to_value(game)?)
         .bind(game.status.as_str())
@@ -711,6 +848,7 @@ async fn save(
         .bind(stat_rows(&out.stats))
         .bind(winner)
         .bind(NOTIFY_CHANNEL)
+        .bind(history)
         .fetch_one(&mut **tx)
         .await?;
     Ok(())
@@ -723,18 +861,28 @@ async fn start_game(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<()> {
     if lock_game(tx, room.id).await?.is_some() {
         return Err(ApiError::invalid("a game is already in progress"));
     }
-    let players: Vec<String> = sqlx::query_scalar(
-        "SELECT player_id FROM room_members
-         WHERE room_id = $1 AND left_at IS NULL AND NOT removed AND present_until > now()
-         ORDER BY joined LIMIT $2",
+    // each seat's player, and its level when it is a bot
+    let seated: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT m.player_id, CASE WHEN p.bot THEN p.bot_level END
+         FROM room_members m JOIN players p ON p.id = m.player_id
+         WHERE m.room_id = $1 AND m.left_at IS NULL AND NOT m.removed AND m.present_until > now()
+         ORDER BY m.joined LIMIT $2",
     )
     .bind(room.id)
     .bind(game::MAX_SEATS as i64)
     .fetch_all(&mut **tx)
     .await?;
-    if players.len() < 2 {
+    if seated.len() < 2 {
         return Err(ApiError::invalid("at least 2 present players are needed"));
     }
+    let bots: Vec<(String, bot::Level)> = seated
+        .iter()
+        .filter_map(|(p, level)| {
+            let level = level.as_deref()?;
+            Some((p.clone(), bot::Level::parse(level).unwrap_or_default()))
+        })
+        .collect();
+    let players: Vec<String> = seated.into_iter().map(|(p, _)| p).collect();
     let (game, out) = {
         use rand::seq::SliceRandom;
         let mut rng = rand::rng();
@@ -748,7 +896,10 @@ async fn start_game(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<()> {
             Some(winner) => winner + 1,
             None => rng.random_range(0..players.len()),
         };
-        let game = Game::new(players, deck, first, now_ms(), room.settings);
+        let mut game = Game::new(players, deck, first, now_ms(), room.settings);
+        let (match_no, carry) = room.carry();
+        game.carry_in(match_no, carry);
+        game.seat_bots(|p| bots.iter().find(|(b, _)| b == p).map(|(_, l)| *l));
         let mut out = Outcome::default();
         out.events.push(game::Event {
             player: Some(player.to_string()),
@@ -1038,12 +1189,18 @@ pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
     sqlx::query("DELETE FROM room_observers WHERE until <= now()")
         .execute(db)
         .await?;
-    Ok(
-        sqlx::query("DELETE FROM rooms WHERE last_active < now() - interval '30 days'")
-            .execute(db)
-            .await?
-            .rows_affected(),
+    let rooms = sqlx::query("DELETE FROM rooms WHERE last_active < now() - interval '30 days'")
+        .execute(db)
+        .await?
+        .rows_affected();
+    // a bot lives only as long as a room it is in (BOT-1)
+    sqlx::query(
+        "DELETE FROM players p WHERE p.bot
+         AND NOT EXISTS (SELECT 1 FROM room_members m WHERE m.player_id = p.id)",
     )
+    .execute(db)
+    .await?;
+    Ok(rooms)
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,14 +1231,14 @@ static SNAPSHOT_SQL: LazyLock<String> = LazyLock::new(|| {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "SELECT r.id, r.code, r.host_player_id, r.last_winner, r.hand_size, r.away_grace_secs,
-                r.turn_limit_secs, r.reveal_secs, r.show_misses,
+        "SELECT {ROOM_COLUMNS},
                 (SELECT count(*) FROM room_observers o
                  WHERE o.room_id = r.id AND o.until > now()) AS observers,
                 (SELECT coalesce(jsonb_agg(jsonb_build_object(
                      'id', m.player_id, 'name', p.name, 'removed', m.removed,
                      'left', m.left_at IS NOT NULL,
-                     'present', coalesce(m.present_until > now(), false)
+                     'present', coalesce(m.present_until > now(), false), 'bot', p.bot,
+                     'bot_level', CASE WHEN p.bot THEN p.bot_level END
                  ) ORDER BY m.joined), '[]')
                  FROM room_members m JOIN players p ON p.id = m.player_id
                  WHERE m.room_id = r.id) AS members,
@@ -1186,6 +1343,7 @@ impl Snapshot {
                 "url": format!("{base_url}/komino/r/{}", room.code),
                 "watch_url": format!("{base_url}/komino/r/{}/watch", room.code),
                 "settings": room.settings,
+                "history": room.match_history(),
             },
             "me": viewer,
             "observer": viewer.is_none(),

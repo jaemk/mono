@@ -34,6 +34,7 @@ where
         .route("/api/rooms/{code}/leave", post(handlers::leave_room))
         .route("/api/rooms/{code}/remove", post(handlers::remove_member))
         .route("/api/rooms/{code}/unban", post(handlers::unban_member))
+        .route("/api/rooms/{code}/bots", post(handlers::add_bot))
         .route("/api/rooms/{code}/action", post(handlers::action))
         .nest_service("/static", ServeDir::new("crates/komino/assets/static"))
 }

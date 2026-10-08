@@ -4,6 +4,7 @@
 //! A `Game` is stored whole as jsonb on the `games` row; field names are part
 //! of that stored format.
 
+use crate::bot;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -19,6 +20,10 @@ const SETTLED_KEPT: usize = 32;
 /// How long a matcher has to give a card for a match on another player's
 /// card before one is given for them (RULE-19).
 pub const GIVE_MS: i64 = 15_000;
+/// How many of the newest discards the view lists (RULE-28).
+pub const DISCARD_RECENT: usize = 10;
+/// How long a bot waits before each step of its turn (BOT-4).
+pub const BOT_STEP_MS: i64 = 1_200;
 
 /// A deal that leaves fewer cards than this to draw is played with two decks
 /// (SET-7).
@@ -58,6 +63,15 @@ pub struct Settings {
     pub reveal_secs: Option<i64>,
     /// Show everyone the value of a card a failed match targeted (SET-13).
     pub show_misses: bool,
+    /// Play a match of games until a running total reaches this (SET-14);
+    /// `None` keeps totals running without an end.
+    pub target_score: Option<i64>,
+    /// Points added to a caller who does not win (SET-15).
+    pub caller_penalty: i64,
+    /// A running total that lands exactly on the target is halved (SET-16).
+    pub exact_reset: bool,
+    /// Players may mark cards with the value they think they hold (SET-17).
+    pub memory_marks: bool,
 }
 
 impl Default for Settings {
@@ -68,6 +82,10 @@ impl Default for Settings {
             turn_limit_secs: None,
             reveal_secs: Some(15),
             show_misses: true,
+            target_score: None,
+            caller_penalty: 0,
+            exact_reset: false,
+            memory_marks: false,
         }
     }
 }
@@ -98,6 +116,12 @@ impl Settings {
         }
         if self.reveal_secs.is_some_and(|s| !(1..=60).contains(&s)) {
             return Err("reveal_secs must be 1 to 60, or null".into());
+        }
+        if self.target_score.is_some_and(|s| !(25..=500).contains(&s)) {
+            return Err("target_score must be 25 to 500, or null".into());
+        }
+        if !(0..=50).contains(&self.caller_penalty) {
+            return Err("caller_penalty must be 0 to 50".into());
         }
         Ok(())
     }
@@ -193,6 +217,29 @@ pub struct Seat {
     pub turns: u32,
     pub score: Option<i32>,
     pub won: bool,
+    /// The running total brought into this game (SET-14).
+    #[serde(default)]
+    pub carry: i32,
+    /// `carry` plus this game's score, once scored.
+    #[serde(default)]
+    pub total: Option<i32>,
+    /// Won the match this game ended (SET-14).
+    #[serde(default)]
+    pub match_won: bool,
+    #[serde(default)]
+    pub tally: Tally,
+    /// A computer player (BOT-1).
+    #[serde(default)]
+    pub bot: bool,
+}
+
+/// What a seat did this game, for the end of game summary (UI-38).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tally {
+    pub matches: u32,
+    pub misses: u32,
+    pub penalties: u32,
+    pub specials: u32,
 }
 
 /// A card value shown to one player until `until`, or until they hide it
@@ -322,6 +369,19 @@ pub struct Game {
     /// Cards matchers still owe for correct matches (RULE-19).
     #[serde(default)]
     pub owed: Vec<Owed>,
+    /// Which of the room's matches this game belongs to (SET-14).
+    #[serde(default)]
+    pub match_no: u32,
+    /// Some running total reached the target when this game was scored.
+    #[serde(default)]
+    pub match_over: bool,
+    /// Each bot's memory of the table (BOT-3). Never in a view.
+    #[serde(default)]
+    pub minds: Vec<bot::Mind>,
+    /// The turn token a bot is to act on and when it was first seen, so
+    /// bots take a step at a time at a human pace (BOT-4).
+    #[serde(default)]
+    pub bot_clock: Option<(u64, i64)>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -510,6 +570,11 @@ impl Game {
                 turns: 0,
                 score: None,
                 won: false,
+                carry: 0,
+                total: None,
+                match_won: false,
+                tally: Tally::default(),
+                bot: false,
             })
             .collect();
         for _ in 0..settings.hand_size {
@@ -544,6 +609,137 @@ impl Game {
             claim_deadline: None,
             settled: vec![],
             owed: vec![],
+            match_no: 0,
+            match_over: false,
+            minds: vec![],
+            bot_clock: None,
+        }
+    }
+
+    /// Mark the seats `level` names as bots, each at its level and starting
+    /// from its own opening cards (BOT-3, BOT-5).
+    pub fn seat_bots(&mut self, level: impl Fn(&str) -> Option<bot::Level>) {
+        let opening = self.settings.opening_slots();
+        for (i, seat) in self.seats.iter_mut().enumerate() {
+            let Some(level) = level(&seat.player) else {
+                continue;
+            };
+            seat.bot = true;
+            let cards = opening
+                .clone()
+                .filter_map(|n| seat.slots.get(n).copied().flatten().map(|v| (n, v)));
+            self.minds
+                .push(bot::Mind::new(&seat.player, i, level, cards));
+        }
+    }
+
+    /// Let every bot learn from what just happened.
+    fn observe(&mut self, events: &[Event], rng: &mut impl rand::Rng) {
+        if self.minds.is_empty() {
+            return;
+        }
+        let mut minds = std::mem::take(&mut self.minds);
+        for e in events {
+            for mind in minds.iter_mut() {
+                mind.observe(e, self, rng);
+            }
+        }
+        self.minds = minds;
+    }
+
+    /// One round of bot play (BOT-4): readying, giving owed cards, and
+    /// matches they are sure of, then one step of a bot's turn once it has
+    /// waited [`BOT_STEP_MS`].
+    fn drive_bots(&mut self, now: i64, rng: &mut impl rand::Rng, out: &mut Outcome) {
+        if self.minds.is_empty() || self.status == Status::Scored {
+            return;
+        }
+        for i in 0..self.minds.len() {
+            let (player, seat) = (self.minds[i].player.clone(), self.minds[i].seat);
+            if self.seats[seat].forfeited {
+                continue;
+            }
+            if self.status == Status::Peeking && !self.seats[seat].ready {
+                self.bot_act(&player, Action::Ready, None, now, rng, out);
+            }
+            if self.owed.iter().any(|o| o.player == player) {
+                if let Some(a) = bot::give_action(self, &self.minds[i]) {
+                    self.bot_act(&player, a, None, now, rng, out);
+                }
+            }
+            // a bot reacts no faster than its level allows, timed honestly
+            let reaction = self.minds[i].level.reaction_ms();
+            let waited = self.discard_at.is_some_and(|at| now - at >= reaction);
+            if waited && !self.claims.iter().any(|c| c.player == player) {
+                if let Some(a) = bot::match_action(self, &self.minds[i]) {
+                    self.bot_act(&player, a, None, now, rng, out);
+                }
+            }
+        }
+        if !self.status.in_play() || !self.seats[self.turn].bot {
+            return;
+        }
+        match self.bot_clock {
+            Some((seq, since)) if seq == self.turn_seq => {
+                if now - since < BOT_STEP_MS {
+                    return;
+                }
+            }
+            _ => {
+                self.bot_clock = Some((self.turn_seq, now));
+                out.changed = true;
+                return;
+            }
+        }
+        let player = self.seats[self.turn].player.clone();
+        let Some(i) = self.minds.iter().position(|m| m.player == player) else {
+            return;
+        };
+        let turn = self.turn;
+        let seq = Some(self.turn_seq);
+        let a = bot::turn_action(self, &self.minds[i], rng);
+        let fallback = if self.stage == Stage::Start {
+            Action::Draw
+        } else {
+            Action::Skip
+        };
+        if !self.bot_act(&player, a, seq, now, rng, out) {
+            self.bot_act(&player, fallback, seq, now, rng, out);
+        }
+        self.bot_clock = Some((self.turn_seq, now));
+        out.changed = true;
+        if self.turn != turn || !self.status.in_play() {
+            self.minds[i].forget(rng);
+        }
+    }
+
+    /// Apply a bot's action as any player's, adding what it did to `out`.
+    fn bot_act(
+        &mut self,
+        player: &str,
+        a: Action,
+        turn_seq: Option<u64>,
+        now: i64,
+        rng: &mut impl rand::Rng,
+        out: &mut Outcome,
+    ) -> bool {
+        match self.apply_timed(player, a, turn_seq, None, now, rng) {
+            Ok(o) => {
+                out.events.extend(o.events);
+                out.stats.extend(o.stats);
+                out.changed = true;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Start every seat from the running total the room carries for it
+    /// (SET-14).
+    pub fn carry_in(&mut self, match_no: u32, carry: impl Fn(&str) -> i32) {
+        self.match_no = match_no;
+        for seat in self.seats.iter_mut() {
+            seat.carry = carry(&seat.player);
         }
     }
 
@@ -632,7 +828,7 @@ impl Game {
     }
 
     /// Whether the turn player at `seat` may call komino now (RULE-22).
-    fn may_call(&self, seat: usize) -> Result<(), Reject> {
+    pub(crate) fn may_call(&self, seat: usize) -> Result<(), Reject> {
         if self.status != Status::Playing {
             return Err(Reject::invalid("komino was already called"));
         }
@@ -766,6 +962,7 @@ impl Game {
         let before = self.turn_marker();
         let out = self.apply_inner(player, action, reaction_ms, now, rng)?;
         self.bump_turn_seq(before);
+        self.observe(&out.events, rng);
         Ok(out)
     }
 
@@ -903,6 +1100,7 @@ impl Game {
                     value,
                     until: self.settings.reveal_secs.map(|s| now + s * 1000),
                 });
+                self.seats[me].tally.specials += 1;
                 out.stat(player, Stat::SpecialMoves, 1);
                 out.stat(player, Stat::CardsInteracted, 1);
                 out.event(Some(player), "peek", json!({ "seat": seat, "slot": slot }));
@@ -929,6 +1127,7 @@ impl Game {
                 let mine = self.require_filled(me, slot)?;
                 let theirs = self.require_target(me, seat, target_slot)?;
                 self.exchange((me, slot, mine), (seat, target_slot, theirs));
+                self.seats[me].tally.specials += 1;
                 out.stat(player, Stat::SpecialMoves, 1);
                 out.stat(player, Stat::CardsInteracted, 2);
                 out.event(
@@ -1075,24 +1274,35 @@ impl Game {
         }
         let mut claims = std::mem::take(&mut self.claims);
         claims.sort_by_key(|c| (c.reaction_ms, c.at));
+        // the reaction of the claim that matched this discard, if one did
+        let mut beaten_by: Option<i64> = None;
         for c in claims {
+            let seq = self.discard_seq;
             let result = match self.seat_of(&c.player).filter(|&s| self.active(s)) {
                 None => Err(Reject::new(
                     "not_seated",
                     "you are not playing in this game",
                 )),
-                Some(me) => self.do_match(
-                    me,
-                    &c.player,
-                    c.seq,
-                    c.seat,
-                    c.slot,
-                    c.give_slot,
-                    now,
-                    rng,
-                    out,
-                ),
+                Some(me) => self.do_match(me, &c, now, rng, out),
             };
+            // a later claim on the same discard says by how much it lost
+            let result = match (result, beaten_by) {
+                (Err(r), Some(best)) if r.code == "too_late" => {
+                    let by = c.reaction_ms - best;
+                    Err(Reject::new(
+                        "too_late",
+                        if by > 0 {
+                            format!("too late: a match {by}ms faster got there first")
+                        } else {
+                            "too late: an equally fast match arrived first".to_string()
+                        },
+                    ))
+                }
+                (result, _) => result,
+            };
+            if result.is_ok() && self.discard_seq != seq && beaten_by.is_none() {
+                beaten_by = Some(c.reaction_ms);
+            }
             self.record(Settled::new(c.id, result));
         }
         out.changed = true;
@@ -1100,6 +1310,12 @@ impl Game {
 
     /// Settle the pending claims once their window has closed.
     pub fn settle(&mut self, now: i64, rng: &mut impl rand::Rng) -> Outcome {
+        let out = self.settle_due(now, rng);
+        self.observe(&out.events, rng);
+        out
+    }
+
+    fn settle_due(&mut self, now: i64, rng: &mut impl rand::Rng) -> Outcome {
         let mut out = Outcome::default();
         if self.claim_deadline.is_some_and(|d| now >= d) {
             self.settle_claims(now, rng, &mut out);
@@ -1189,20 +1405,16 @@ impl Game {
         Ok((card, give_slot.filter(|_| seat != me)))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn do_match(
         &mut self,
         me: usize,
-        player: &str,
-        seq: u64,
-        seat: usize,
-        slot: usize,
-        give_slot: Option<usize>,
+        c: &Claim,
         now: i64,
         rng: &mut impl rand::Rng,
         out: &mut Outcome,
     ) -> Result<(), Reject> {
-        let (card, give) = self.check_match(me, seq, seat, slot, give_slot)?;
+        let (player, seat, slot) = (c.player.as_str(), c.seat, c.slot);
+        let (card, give) = self.check_match(me, c.seq, seat, slot, c.give_slot)?;
         out.stat(player, Stat::CardsInteracted, 1);
         let top = *self.discard.last().expect("matchable implies a discard");
         if card == top {
@@ -1225,20 +1437,24 @@ impl Game {
                     deadline: now + GIVE_MS,
                 });
             }
+            self.seats[me].tally.matches += 1;
             out.stat(player, Stat::Matches, 1);
             out.event(
                 Some(player),
                 "match",
-                json!({ "ok": true, "seat": seat, "slot": slot, "value": card, "give_slot": give, "owes": owes }),
+                json!({ "ok": true, "seat": seat, "slot": slot, "value": card, "give_slot": give,
+                        "owes": owes, "reaction_ms": c.reaction_ms }),
             );
         } else {
             let penalty = self.draw_card(rng);
             if let Some(card) = penalty {
                 self.seats[me].slots.push(Some(card));
+                self.seats[me].tally.penalties += 1;
             }
+            self.seats[me].tally.misses += 1;
             out.stat(player, Stat::FailedMatches, 1);
-            let mut payload =
-                json!({ "ok": false, "seat": seat, "slot": slot, "penalty": penalty.is_some() });
+            let mut payload = json!({ "ok": false, "seat": seat, "slot": slot,
+                                      "penalty": penalty.is_some(), "reaction_ms": c.reaction_ms });
             if self.settings.show_misses {
                 payload["value"] = json!(card);
             }
@@ -1252,6 +1468,8 @@ impl Game {
         let before = self.turn_marker();
         let out = self.forfeit_inner(player, now);
         self.bump_turn_seq(before);
+        // a forfeit teaches no card values, so no chance is drawn
+        self.observe(&out.events, &mut rand::rng());
         out
     }
 
@@ -1315,8 +1533,11 @@ impl Game {
         rng: &mut impl rand::Rng,
     ) -> Outcome {
         let before = self.turn_marker();
-        let out = self.tick_inner(now, present, rng);
+        let mut out = self.tick_inner(now, present, rng);
         self.bump_turn_seq(before);
+        self.observe(&out.events, rng);
+        // bots act on the table the timers left (BOT-4)
+        self.drive_bots(now, rng, &mut out);
         out
     }
 
@@ -1326,7 +1547,7 @@ impl Game {
         present: &dyn Fn(&str) -> bool,
         rng: &mut impl rand::Rng,
     ) -> Outcome {
-        let mut out = self.settle(now, rng);
+        let mut out = self.settle_due(now, rng);
         self.settle_owed(Some(now), &mut out);
         match self.status {
             Status::Peeking => {
@@ -1402,6 +1623,13 @@ impl Game {
         for &w in &winners {
             self.seats[w].won = true;
         }
+        // a caller who did not win pays the room's penalty (SET-15)
+        if let Some(c) = caller.filter(|c| !winners.contains(c)) {
+            if let Some(score) = self.seats[c].score.as_mut() {
+                *score += self.settings.caller_penalty as i32;
+            }
+        }
+        let match_winners = self.total_up();
         self.status = Status::Scored;
         self.stage = Stage::Start;
         self.calling = false;
@@ -1417,11 +1645,49 @@ impl Game {
                 }
             }
         }
-        let winners: Vec<&str> = winners
-            .iter()
-            .map(|&w| self.seats[w].player.as_str())
+        let names = |seats: &[usize]| -> Vec<&str> {
+            seats
+                .iter()
+                .map(|&w| self.seats[w].player.as_str())
+                .collect()
+        };
+        out.event(
+            None,
+            "scored",
+            json!({ "winners": names(&winners), "match_over": self.match_over,
+                    "match_winners": names(&match_winners) }),
+        );
+    }
+
+    /// Add each seat's score to its running total and decide whether the
+    /// match is over: some total at or past the target (SET-14), after a
+    /// total landing exactly on it is halved (SET-16). Returns the match
+    /// winners, the lowest totals, when it is.
+    fn total_up(&mut self) -> Vec<usize> {
+        let target = self.settings.target_score.map(|t| t as i32);
+        let exact_reset = self.settings.exact_reset;
+        for seat in self.seats.iter_mut() {
+            let mut total = seat.carry + seat.score.unwrap_or(0);
+            if exact_reset && Some(total) == target {
+                total /= 2;
+            }
+            seat.total = Some(total);
+        }
+        let playing: Vec<usize> = (0..self.seats.len()).filter(|&s| self.active(s)).collect();
+        let total = |s: usize| self.seats[s].total.unwrap_or(i32::MAX);
+        self.match_over = target.is_some_and(|t| playing.iter().any(|&s| total(s) >= t));
+        if !self.match_over {
+            return vec![];
+        }
+        let best = playing.iter().map(|&s| total(s)).min();
+        let winners: Vec<usize> = playing
+            .into_iter()
+            .filter(|&s| Some(total(s)) == best)
             .collect();
-        out.event(None, "scored", json!({ "winners": winners }));
+        for &w in &winners {
+            self.seats[w].match_won = true;
+        }
+        winners
     }
 
     /// The winners of a finished game.
@@ -1509,6 +1775,11 @@ impl Game {
                     "score": s.score,
                     "won": s.won,
                     "locked": self.locked(i),
+                    "carry": s.carry,
+                    "total": s.total,
+                    "match_won": s.match_won,
+                    "tally": s.tally,
+                    "bot": s.bot,
                 })
             })
             .collect();
@@ -1551,6 +1822,9 @@ impl Game {
             "final_remaining": self.final_remaining,
             "discard_top": self.discard.last(),
             "discard_count": self.discard.len(),
+            // every discard is face up, so the newest few are public (RULE-28)
+            "discard_recent": self.discard.iter().rev().take(DISCARD_RECENT).collect::<Vec<_>>(),
+            "match_over": self.match_over,
             "discard_seq": self.discard_seq,
             "matchable": self.matchable,
             "deck_count": self.deck.len(),
@@ -2506,6 +2780,593 @@ mod tests {
     }
 
     #[test]
+    fn a_caller_who_does_not_win_pays_the_room_penalty() {
+        let mut g = playing(&[[1; 4], [1; 4], [2; 4]], 5, &[9, 9, 9, 9, 9]);
+        g.settings.caller_penalty = 10;
+        for p in ["p0", "p1", "p2"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+            act(&mut g, p, Action::Skip);
+        }
+        act(&mut g, "p0", Action::Komino);
+        for p in ["p1", "p2"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+            act(&mut g, p, Action::Skip);
+        }
+        g.tick(SCORE_DELAY_MS, &|_| true, &mut rng());
+        assert_eq!(g.winners(), vec!["p1"]);
+        let scores: Vec<_> = g.seats.iter().map(|s| s.score).collect();
+        assert_eq!(scores, [Some(14), Some(4), Some(8)]);
+    }
+
+    /// Score `hands` straight away, carrying `carry` in, under `settings`.
+    fn score_now(hands: &[[i8; 4]], carry: &[i32], settings: Settings) -> (Game, Outcome) {
+        let mut g = playing(hands, 0, &[]);
+        g.settings = settings;
+        g.carry_in(3, |p| carry[p[1..].parse::<usize>().unwrap()]);
+        g.status = Status::Scoring;
+        g.score_at = Some(0);
+        let out = g.tick(0, &|_| true, &mut rng());
+        assert_eq!(g.status, Status::Scored);
+        (g, out)
+    }
+
+    #[test]
+    fn running_totals_end_a_match_at_the_target() {
+        let target = Settings {
+            target_score: Some(50),
+            ..Settings::default()
+        };
+        // nobody reaches 50: the match goes on
+        let (g, out) = score_now(&[[1; 4], [5; 4]], &[10, 20], target);
+        let totals: Vec<_> = g.seats.iter().map(|s| s.total).collect();
+        assert_eq!(totals, [Some(14), Some(40)]);
+        assert_eq!(g.match_no, 3);
+        assert!(!g.match_over);
+        let ev = out.events.iter().find(|e| e.kind == "scored").unwrap();
+        assert_eq!(ev.payload["match_over"], false);
+        assert_eq!(ev.payload["match_winners"], json!([]));
+
+        // p1 reaches it, so the lowest total wins the match
+        let (g, out) = score_now(&[[1; 4], [5; 4], [0; 4]], &[10, 30, 14], target);
+        assert!(g.match_over);
+        let won: Vec<_> = g.seats.iter().map(|s| s.match_won).collect();
+        assert_eq!(won, [true, false, true]);
+        let ev = out.events.iter().find(|e| e.kind == "scored").unwrap();
+        assert_eq!(ev.payload["match_winners"], json!(["p0", "p2"]));
+        let view = g.view("p0", 0);
+        assert_eq!(view["match_over"], true);
+        assert_eq!(view["seats"][1]["total"], 50);
+        assert_eq!(view["seats"][1]["carry"], 30);
+        assert_eq!(view["seats"][0]["match_won"], true);
+
+        // without a target totals keep running and no match ends
+        let (g, _) = score_now(&[[13; 4], [5; 4]], &[400, 0], Settings::default());
+        assert_eq!(g.seats[0].total, Some(452));
+        assert!(!g.match_over);
+    }
+
+    #[test]
+    fn a_total_landing_exactly_on_the_target_is_halved() {
+        let settings = Settings {
+            target_score: Some(50),
+            exact_reset: true,
+            ..Settings::default()
+        };
+        let (g, _) = score_now(&[[1; 4], [5; 4]], &[10, 30], settings);
+        assert_eq!(g.seats[1].total, Some(25));
+        assert!(!g.match_over);
+        // without the option the same total ends the match
+        let (g, _) = score_now(
+            &[[1; 4], [5; 4]],
+            &[10, 30],
+            Settings {
+                exact_reset: false,
+                ..settings
+            },
+        );
+        assert_eq!(g.seats[1].total, Some(50));
+        assert!(g.match_over);
+    }
+
+    #[test]
+    fn each_seat_tallies_its_matches_misses_and_moves() {
+        let mut g = fives();
+        claim(&mut g, "p0", 100, 10, 0, 1); // wrong: a 2
+        claim(&mut g, "p1", 250, 20, 1, 0); // right
+        g.settle(i64::MAX, &mut rng());
+        assert_eq!(
+            g.seats[0].tally,
+            Tally {
+                misses: 1,
+                penalties: 1,
+                ..Tally::default()
+            }
+        );
+        assert_eq!(g.seats[1].tally.matches, 1);
+        assert_eq!(g.view("p0", 0)["seats"][0]["tally"]["misses"], 1);
+
+        let mut g = playing(&[[0; 4], [5; 4]], 1, &[9]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
+        act(&mut g, "p0", Action::Peek { seat: 1, slot: 0 });
+        assert_eq!(g.seats[0].tally.specials, 1);
+    }
+
+    #[test]
+    fn a_late_claim_hears_how_much_faster_the_match_was() {
+        let mut g = fives();
+        let slow = claim(&mut g, "p0", 300, 10, 0, 0);
+        let fast = claim(&mut g, "p1", 180, 20, 1, 0);
+        let out = g.settle(i64::MAX, &mut rng());
+        let err = g.claim_result(&slow).unwrap().unwrap_err();
+        assert_eq!(err.code, "too_late");
+        assert_eq!(
+            err.message,
+            "too late: a match 120ms faster got there first"
+        );
+        assert_eq!(g.claim_result(&fast), Some(Ok(())));
+        let m = out.events.iter().find(|e| e.kind == "match").unwrap();
+        assert_eq!(m.payload["reaction_ms"], 180);
+
+        let mut g = fives();
+        claim(&mut g, "p1", 200, 20, 1, 0);
+        let tied = claim(&mut g, "p0", 200, 30, 0, 0);
+        g.settle(i64::MAX, &mut rng());
+        assert_eq!(
+            g.claim_result(&tied).unwrap().unwrap_err().message,
+            "too late: an equally fast match arrived first"
+        );
+    }
+
+    // ------------------------------------------------------------- bots
+
+    const HARD_REACTION: i64 = 2_000;
+
+    /// A two player game, p1 a bot, past the peek phase with p0 to move.
+    fn with_bot(hands: &[[i8; 4]], starter: i8, draws: &[i8]) -> Game {
+        let mut g = deal(players(hands.len()), stacked(hands, starter, draws));
+        // a hard bot never slips or misremembers, so its play is exact
+        g.seat_bots(|p| (p == "p1").then_some(bot::Level::Hard));
+        for p in players(hands.len()).iter().filter(|p| *p != "p1") {
+            g.apply(p, Action::Ready, None, 0, &mut rng()).unwrap();
+        }
+        // the bot readies itself on the first tick
+        g.tick(0, &present, &mut rng());
+        assert!(g.seats[1].ready);
+        assert_eq!(g.status, Status::Playing);
+        g
+    }
+
+    fn mind(g: &Game, p: &str) -> bot::Mind {
+        g.minds.iter().find(|m| m.player == p).unwrap().clone()
+    }
+
+    #[test]
+    fn a_bot_knows_only_its_opening_cards() {
+        let g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[]);
+        assert!(g.seats[1].bot);
+        assert!(!g.seats[0].bot);
+        let m = mind(&g, "p1");
+        assert_eq!(m.seat, 1);
+        let mut known: Vec<_> = m.known.iter().map(|k| (k.seat, k.slot, k.v)).collect();
+        known.sort();
+        assert_eq!(known, [(1, 0, 6), (1, 1, 7)]);
+        assert_eq!(g.view("p0", 0)["seats"][1]["bot"], true);
+        // minds never reach a view
+        assert!(!g.view("p0", 0).to_string().contains("known"));
+    }
+
+    #[test]
+    fn a_bot_steps_through_its_turn_at_a_human_pace() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[4, 12]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        assert_eq!(g.turn, 1);
+        // the first tick only starts the bot's clock
+        let out = g.tick(1_000, &present, &mut rng());
+        assert!(out.changed);
+        assert!(out.events.is_empty());
+        let out = g.tick(1_000 + BOT_STEP_MS - 1, &present, &mut rng());
+        assert!(!out.changed);
+        let out = g.tick(1_000 + BOT_STEP_MS, &present, &mut rng());
+        let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
+        // the bot holds 6 7 8 9 and knows 6 and 7: it draws the 12
+        assert_eq!(kinds, ["draw"]);
+        // a 12 is no good to keep, so it discards it for the blind swap,
+        // giving away a high card it knows
+        g.tick(1_000 + 2 * BOT_STEP_MS, &present, &mut rng());
+        assert_eq!(
+            g.stage,
+            Stage::Earned {
+                mv: Move::BlindSwap
+            }
+        );
+        g.tick(1_000 + 3 * BOT_STEP_MS, &present, &mut rng());
+        assert_eq!(
+            g.stage,
+            Stage::Special {
+                mv: Move::BlindSwap
+            }
+        );
+        let out = g.tick(1_000 + 4 * BOT_STEP_MS, &present, &mut rng());
+        let swap = out.events.iter().find(|e| e.kind == "blind_swap").unwrap();
+        assert_eq!(swap.payload["seat"], 1);
+        assert_eq!(swap.payload["slot"], 1);
+        assert_eq!(g.turn, 0);
+        // the bot's 7 went to p0; its memory followed the card there, unless
+        // it forgot it as the turn ended
+        let m = mind(&g, "p1");
+        let target = (
+            swap.payload["target_seat"].as_u64().unwrap() as usize,
+            swap.payload["target_slot"].as_u64().unwrap() as usize,
+        );
+        assert!(matches!(m.get(target.0, target.1), Some(7) | None));
+        assert_eq!(m.get(1, 1), None);
+    }
+
+    #[test]
+    fn a_bot_takes_a_low_discard_and_swaps_it_for_its_worst_card() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [13, 2, 8, 9]], 0, &[0]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        for i in 1..=3 {
+            g.tick(i * BOT_STEP_MS, &present, &mut rng());
+        }
+        // it knew its 13 and took the 0 for it
+        assert_eq!(g.seats[1].slots[0], Some(0));
+        assert_eq!(g.discard.last(), Some(&13));
+        let m = mind(&g, "p1");
+        assert_eq!(m.get(1, 0), Some(0));
+    }
+
+    #[test]
+    fn a_bot_matches_only_cards_it_knows_and_no_faster_than_its_reaction() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[7]);
+        let seq = g.turn_seq;
+        g.apply("p0", Action::Draw, Some(seq), 1_000, &mut rng())
+            .unwrap();
+        let seq = g.turn_seq;
+        g.apply("p0", Action::Discard, Some(seq), 1_000, &mut rng())
+            .unwrap();
+        // the 7 earned p0 a move, so the turn stays with p0
+        g.tick(1_000 + HARD_REACTION - 1, &present, &mut rng());
+        assert!(g.claims.is_empty());
+        g.tick(1_000 + HARD_REACTION, &present, &mut rng());
+        assert_eq!(g.claims.len(), 1);
+        assert_eq!(g.claims[0].player, "p1");
+        assert_eq!(g.claims[0].reaction_ms, HARD_REACTION);
+        let out = g.tick(
+            1_000 + HARD_REACTION + MATCH_WINDOW_MS,
+            &present,
+            &mut rng(),
+        );
+        let m = out.events.iter().find(|e| e.kind == "match").unwrap();
+        assert_eq!(m.payload["ok"], true);
+        assert_eq!(g.seats[1].slots[1], None);
+        assert_eq!(mind(&g, "p1").get(1, 1), None);
+
+        // a 4 it has never seen gets no match from it
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[4]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        g.tick(10_000, &present, &mut rng());
+        assert!(g.claims.iter().all(|c| c.player != "p1"));
+    }
+
+    #[test]
+    fn a_bot_matches_a_card_shown_by_a_miss_and_gives_its_worst() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 13, 8, 9]], 0, &[3, 1]);
+        // p0 misses on its own 5, which the room shows everyone
+        g.settings.show_misses = true;
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        let seq = g.discard_seq;
+        act(
+            &mut g,
+            "p0",
+            Action::Match {
+                seq,
+                seat: 0,
+                slot: 0,
+                give_slot: None,
+            },
+        );
+        assert_eq!(mind(&g, "p1").get(0, 0), Some(5));
+        // later a 5 lands: the bot matches p0's 5, giving away its known 13
+        g.push_discard(5, 20_000);
+        g.tick(20_000 + HARD_REACTION, &present, &mut rng());
+        let claim = &g.claims[0];
+        assert_eq!((claim.seat, claim.slot, claim.give_slot), (0, 0, Some(1)));
+    }
+
+    #[test]
+    fn a_bot_gives_its_worst_card_when_it_owes_one() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[]);
+        g.owed.push(Owed {
+            player: "p1".into(),
+            seat: 0,
+            slot: 0,
+            deadline: i64::MAX,
+        });
+        g.seats[0].slots[0] = None;
+        let out = g.tick(0, &present, &mut rng());
+        let give = out.events.iter().find(|e| e.kind == "give").unwrap();
+        // it knows its 6 and 7 and counts unseen cards as 6, so the 7 goes
+        assert_eq!(give.payload["slot"], 1);
+        assert_eq!(g.seats[0].slots[0], Some(7));
+        assert_eq!(mind(&g, "p1").get(0, 0), Some(7));
+    }
+
+    #[test]
+    fn a_bot_peeks_at_what_it_does_not_know_and_remembers_it() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[4, 8]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        // the bot draws an 8, which earns peek own
+        for i in 1..=5 {
+            g.tick(i * BOT_STEP_MS, &present, &mut rng());
+        }
+        let m = mind(&g, "p1");
+        assert_eq!(m.get(1, 2), Some(8));
+        assert_eq!(g.seats[1].tally.specials, 1);
+    }
+
+    #[test]
+    fn bots_alone_play_a_game_to_the_end() {
+        for seed in 0..5 {
+            let mut deck = deck_for(4, 4);
+            use rand::seq::SliceRandom;
+            let mut r = rand::rngs::StdRng::seed_from_u64(seed);
+            deck.shuffle(&mut r);
+            let mut g = Game::new(players(4), deck, 0, 0, Settings::default());
+            // one of each level, so every level's play is exercised
+            let levels = [bot::Level::Easy, bot::Level::Normal, bot::Level::Hard];
+            g.seat_bots(|p| Some(levels[p[1..].parse::<usize>().unwrap() % 3]));
+            let mut now = 0;
+            while g.status != Status::Scored && now < 3_600_000 {
+                now += 1_000;
+                g.tick(now, &present, &mut r);
+            }
+            assert_eq!(g.status, Status::Scored, "seed {seed} never finished");
+            assert!(g.caller.is_some(), "seed {seed} ended without a call");
+            assert!(!g.winners().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_bot_forgets_by_its_level() {
+        // (others kept, own kept) of 200 each, after one forget
+        let kept = |level| {
+            let mut m = bot::Mind::new("p1", 1, level, std::iter::empty());
+            for slot in 0..200 {
+                m.known.push(bot::Known {
+                    seat: 0,
+                    slot,
+                    v: 3,
+                });
+                m.known.push(bot::Known {
+                    seat: 1,
+                    slot,
+                    v: 3,
+                });
+            }
+            m.forget(&mut rng());
+            let n = |seat| m.known.iter().filter(|k| k.seat == seat).count();
+            (n(0), n(1))
+        };
+        let (easy, easy_own) = kept(bot::Level::Easy);
+        let (normal, normal_own) = kept(bot::Level::Normal);
+        let (hard, hard_own) = kept(bot::Level::Hard);
+        assert!((100..160).contains(&easy), "easy kept {easy}");
+        assert!((150..190).contains(&normal), "normal kept {normal}");
+        assert!((180..200).contains(&hard), "hard kept {hard}");
+        // easy and normal bots forget some of their own cards; hard never does
+        assert!(
+            (160..200).contains(&easy_own),
+            "easy kept {easy_own} of its own"
+        );
+        assert!(
+            (185..200).contains(&normal_own),
+            "normal kept {normal_own} of its own"
+        );
+        assert_eq!(hard_own, 200);
+    }
+
+    #[test]
+    fn bot_levels_set_reaction_misremembering_and_names() {
+        use bot::Level;
+        assert_eq!(
+            [Level::Easy, Level::Normal, Level::Hard].map(|l| l.reaction_ms()),
+            [3_000, 2_000, 2_000]
+        );
+        for l in [Level::Easy, Level::Normal, Level::Hard] {
+            assert_eq!(Level::parse(l.as_str()), Some(l));
+        }
+        assert_eq!(Level::parse("expert"), None);
+        assert_eq!(Level::default(), Level::Normal);
+        // minds saved before levels play at normal
+        let m: bot::Mind =
+            serde_json::from_value(json!({ "player": "p1", "seat": 1, "known": [] })).unwrap();
+        assert_eq!(m.level, Level::Normal);
+
+        // an easy bot sometimes learns a card one off; a hard one never does
+        let g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[]);
+        let miss = Event {
+            player: Some("p0".into()),
+            kind: "match",
+            payload: json!({ "ok": false, "seat": 0, "slot": 0, "value": 5 }),
+        };
+        let mut r = rng();
+        let mut wrong = |level| {
+            (0..400)
+                .filter(|_| {
+                    let mut m = bot::Mind::new("p1", 1, level, std::iter::empty());
+                    m.observe(&miss, &g, &mut r);
+                    let v = m.get(0, 0).unwrap();
+                    assert!((4..=6).contains(&v));
+                    v != 5
+                })
+                .count()
+        };
+        let easy = wrong(Level::Easy);
+        assert!((30..100).contains(&easy), "easy misremembered {easy}");
+        assert_eq!(wrong(Level::Hard), 0);
+        // a -1 is only ever remembered as a 0, a 13 as a 12
+        for (v, off) in [(-1, 0), (13, 12)] {
+            let shown = Event {
+                player: Some("p0".into()),
+                kind: "match",
+                payload: json!({ "ok": false, "seat": 0, "slot": 0, "value": v }),
+            };
+            for _ in 0..200 {
+                let mut m = bot::Mind::new("p1", 1, Level::Easy, std::iter::empty());
+                m.observe(&shown, &g, &mut r);
+                let got = m.get(0, 0).unwrap();
+                assert!(got == v || got == off, "{v} remembered as {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_easy_bot_waits_longer_to_match() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9]], 0, &[7]);
+        g.minds[0].level = bot::Level::Easy;
+        let seq = g.turn_seq;
+        g.apply("p0", Action::Draw, Some(seq), 0, &mut rng())
+            .unwrap();
+        let seq = g.turn_seq;
+        g.apply("p0", Action::Discard, Some(seq), 0, &mut rng())
+            .unwrap();
+        g.tick(2_999, &present, &mut rng());
+        assert!(g.claims.is_empty());
+        g.tick(3_000, &present, &mut rng());
+        assert_eq!(g.claims.len(), 1);
+    }
+
+    #[test]
+    fn a_bots_memory_follows_takes_swaps_and_forfeits() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [6, 7, 8, 9], [1, 1, 1, 1]], 0, &[]);
+        let mut m = mind(&g, "p1");
+        let e = |player: &str, kind, payload| Event {
+            player: Some(player.into()),
+            kind,
+            payload,
+        };
+        // p0 takes the 0 from the pile and swaps it into slot 2: public
+        m.observe(&e("p0", "take", json!({ "value": 0 })), &g, &mut rng());
+        m.observe(
+            &e(
+                "p0",
+                "swap",
+                json!({ "seat": 0, "slot": 2, "discarded": 3 }),
+            ),
+            &g,
+            &mut rng(),
+        );
+        assert_eq!(m.get(0, 2), Some(0));
+        // a drawn card swapped in is not
+        m.observe(
+            &e(
+                "p0",
+                "swap",
+                json!({ "seat": 0, "slot": 2, "discarded": 0 }),
+            ),
+            &g,
+            &mut rng(),
+        );
+        assert_eq!(m.get(0, 2), None);
+        // the bot's own swap: it knows what it put there
+        g.seats[1].slots[3] = Some(2);
+        m.observe(
+            &e(
+                "p1",
+                "swap",
+                json!({ "seat": 1, "slot": 3, "discarded": 9 }),
+            ),
+            &g,
+            &mut rng(),
+        );
+        assert_eq!(m.get(1, 3), Some(2));
+        // a blind swap trades what it knows of the two slots
+        m.observe(
+            &e(
+                "p0",
+                "blind_swap",
+                json!({ "seat": 0, "slot": 2, "target_seat": 1, "target_slot": 0 }),
+            ),
+            &g,
+            &mut rng(),
+        );
+        assert_eq!((m.get(0, 2), m.get(1, 0)), (Some(6), None));
+        // someone else's peek teaches it nothing
+        m.observe(
+            &e("p0", "peek", json!({ "seat": 1, "slot": 2 })),
+            &g,
+            &mut rng(),
+        );
+        assert_eq!(m.get(1, 2), None);
+        // a seat that leaves takes its cards with it
+        m.observe(&e("p2", "forfeit", json!({ "seat": 2 })), &g, &mut rng());
+        m.known.push(bot::Known {
+            seat: 2,
+            slot: 0,
+            v: 1,
+        });
+        m.observe(&e("p2", "forfeit", json!({ "seat": 2 })), &g, &mut rng());
+        assert_eq!(m.get(2, 0), None);
+        // malformed events change nothing
+        let before = m.clone();
+        for kind in ["swap", "peek", "give", "match", "forfeit", "draw"] {
+            m.observe(&e("p0", kind, json!({})), &g, &mut rng());
+        }
+        assert_eq!(m, before);
+    }
+
+    #[test]
+    fn a_bot_calls_komino_once_its_total_looks_low() {
+        let mut g = with_bot(&[[5, 2, 3, 4], [0, 1, 0, 1]], 0, &[9, 9, 9]);
+        // it has seen all four of its cards
+        g.minds[0].known = (0..4)
+            .map(|slot| bot::Known {
+                seat: 1,
+                slot,
+                v: g.seats[1].slots[slot].unwrap(),
+            })
+            .collect();
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Skip);
+        // before everyone has played it can't call, so it plays a turn
+        for i in 1..=5 {
+            g.tick(i * BOT_STEP_MS, &present, &mut rng());
+        }
+        assert_eq!(g.turn, 0);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::Skip);
+        g.tick(10 * BOT_STEP_MS, &present, &mut rng());
+        g.tick(11 * BOT_STEP_MS, &present, &mut rng());
+        assert_eq!(g.caller, Some(1));
+    }
+
+    #[test]
+    fn the_view_lists_the_newest_discards() {
+        let mut g = playing(&[[5, 2, 3, 4], [6, 6, 7, 8]], 0, &[1, 2, 3]);
+        assert_eq!(g.view("p0", 0)["discard_recent"], json!([0]));
+        for p in ["p0", "p1", "p0"] {
+            act(&mut g, p, Action::Draw);
+            act(&mut g, p, Action::Discard);
+        }
+        assert_eq!(g.view("p1", 0)["discard_recent"], json!([3, 2, 1, 0]));
+        g.discard = (0..13).collect();
+        let recent = g.observer_view(0)["discard_recent"].clone();
+        assert_eq!(recent, json!([12, 11, 10, 9, 8, 7, 6, 5, 4, 3]));
+    }
+
+    #[test]
     fn ties_among_other_players_share_the_win() {
         let mut g = playing(&[[3; 4], [1; 4], [1; 4]], 5, &[9, 9, 9, 9, 9]);
         for p in ["p0", "p1", "p2"] {
@@ -2738,8 +3599,21 @@ mod tests {
             turn_limit_secs: Some(10),
             reveal_secs: Some(60),
             show_misses: false,
+            target_score: Some(500),
+            caller_penalty: 50,
+            exact_reset: true,
+            memory_marks: true,
         };
         assert_eq!(ok.validate(), Ok(()));
+        assert_eq!(
+            Settings {
+                target_score: Some(25),
+                caller_penalty: 0,
+                ..ok
+            }
+            .validate(),
+            Ok(())
+        );
         let bad = [
             Settings { hand_size: 3, ..ok },
             Settings {
@@ -2756,6 +3630,22 @@ mod tests {
             },
             Settings {
                 reveal_secs: Some(0),
+                ..ok
+            },
+            Settings {
+                target_score: Some(24),
+                ..ok
+            },
+            Settings {
+                target_score: Some(501),
+                ..ok
+            },
+            Settings {
+                caller_penalty: -1,
+                ..ok
+            },
+            Settings {
+                caller_penalty: 51,
                 ..ok
             },
         ];

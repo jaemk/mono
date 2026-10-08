@@ -49,6 +49,29 @@ test("the guide follows the defaults when the room kept them", async (t) => {
     "Everyone sees that card's value."]) assert.ok(text.includes(want), `missing: ${want}`);
 });
 
+test("the guide explains match play, marks, and the keys as the room sets them", async (t) => {
+  const page = await inRoom(t, { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15, show_misses: true,
+    target_score: 100, caller_penalty: 10, exact_reset: true, memory_marks: true });
+  page.$("guide-btn").click();
+  const text = guideText(page);
+  for (const want of [
+    "Once a total reaches 100, the lowest total wins the match",
+    "A caller who does not win adds 10 points to their score.",
+    "A total that lands exactly on 100 is halved.",
+    "Press and hold a card (or right click it)",
+    "d draw, t take, x discard",
+  ]) assert.ok(text.includes(want), `missing: ${want}`);
+
+  page.$("guide-close").click();
+  page.push(makeView(makeGame(), { room: room({ hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15,
+    show_misses: true, target_score: null, caller_penalty: 0, exact_reset: true, memory_marks: false }) }));
+  page.$("guide-btn").click();
+  const plain = guideText(page);
+  assert.ok(plain.includes("Scores add up to running totals from game to game, with no target."));
+  assert.ok(plain.includes("This room does not allow memory marks."));
+  assert.ok(!plain.includes("is halved"));
+});
+
 test("every special card is shown with its move", async (t) => {
   const page = await inRoom(t, { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15, show_misses: true });
   page.$("guide-btn").click();
@@ -85,5 +108,6 @@ test("in the lobby the guide names the settings as room choices", async (t) => {
   assert.equal(page.$("guide-room").textContent, "rooms choose the hand size, timers, and peek time");
   const text = guideText(page);
   for (const want of ["the room's hand size of cards (4 to 10)", "A room can set a turn limit",
-    "for the room's peek time", "A room can also show everyone the card's value."]) assert.ok(text.includes(want), `missing: ${want}`);
+    "for the room's peek time", "A room can also show everyone the card's value.", "A room can play to a target",
+    "A room can let players mark cards"]) assert.ok(text.includes(want), `missing: ${want}`);
 });

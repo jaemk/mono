@@ -10,7 +10,8 @@ test("create sends the default settings", async (t) => {
   page.$("create").click();
   await flush();
   assert.deepEqual(page.callsTo("POST /komino/api/rooms")[0].body,
-    { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15, show_misses: true });
+    { hand_size: 4, turn_limit_secs: null, away_grace_secs: 30, reveal_secs: 15, show_misses: true,
+      target_score: null, caller_penalty: 0, exact_reset: false, memory_marks: false });
   assert.equal(page.location.href, "/komino/r/QWERTY");
 });
 
@@ -22,10 +23,15 @@ test("create sends the chosen settings", async (t) => {
   page.$("set-away").value = "120";
   page.$("set-reveal").value = "5";
   page.$("set-misses").value = "hidden";
+  page.$("set-target").value = "100";
+  page.$("set-penalty").value = "10";
+  page.$("set-exact").value = "on";
+  page.$("set-marks").value = "on";
   page.$("create").click();
   await flush();
   assert.deepEqual(page.callsTo("POST /komino/api/rooms")[0].body,
-    { hand_size: 9, turn_limit_secs: 90, away_grace_secs: 120, reveal_secs: 5, show_misses: false });
+    { hand_size: 9, turn_limit_secs: 90, away_grace_secs: 120, reveal_secs: 5, show_misses: false,
+      target_score: 100, caller_penalty: 10, exact_reset: true, memory_marks: true });
 });
 
 test("the room shows its settings", async (t) => {
@@ -39,6 +45,11 @@ test("the room shows its settings", async (t) => {
   other.room.settings = { hand_size: 4, away_grace_secs: 15, turn_limit_secs: null, reveal_secs: 10, show_misses: false };
   page.push(other);
   assert.equal(page.$("settings").textContent, "4 cards, no turn limit, 15s away grace, 10s peeks, misses hidden");
+  const match = makeView();
+  match.room.settings = { ...other.room.settings, target_score: 100, caller_penalty: 10, exact_reset: true, memory_marks: true };
+  page.push(match);
+  assert.equal(page.$("settings").textContent, "4 cards, no turn limit, 15s away grace, 10s peeks, misses hidden, " +
+    "play to 100, +10 for a losing call, exact target halves, marks allowed");
   // a view without settings shows nothing
   page.push(makeView());
   assert.equal(page.$("settings").textContent, "");

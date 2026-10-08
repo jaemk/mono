@@ -19,6 +19,7 @@ can be built). Keep each row's status current with `spec.py set`.
 | Komino Observers | done | [komino-observers.md](komino-observers.md) |
 | Komino Sealed Reveals | done | [komino-sealed-reveals.md](komino-sealed-reveals.md) |
 | Komino Settings | done | [komino-settings.md](komino-settings.md) |
+| Komino Bots | done | [komino-bots.md](komino-bots.md) |
 
 ## Conventions
 
