@@ -138,6 +138,17 @@
       corner(v, ink, false) + corner(v, ink, true) + center + `</svg>`;
   }
 
+  // a small face too narrow for corners or a symbol shows just the value,
+  // since several values share a move (UI-44)
+  function miniFace(v) {
+    const mv = MOVES[v];
+    const ink = mv ? MOVE_INFO[mv].color : "#1f1d1a";
+    const bg = mv ? "#fff" : v <= 0 ? "var(--card-low)" : "var(--card)";
+    return `<svg viewBox="0 0 70 100" aria-hidden="true" font-family="system-ui, sans-serif">` +
+      `<rect x="1" y="1" width="68" height="98" rx="7" fill="${bg}" stroke="${mv ? ink : "#bdb6a6"}" stroke-width="${mv ? 5 : 2}"/>` +
+      `<text x="35" y="66" text-anchor="middle" font-size="44" font-weight="700" fill="${ink}">${v}</text></svg>`;
+  }
+
   function back() {
     return `<svg viewBox="0 0 70 100" aria-hidden="true">` +
       `<rect x="1" y="1" width="68" height="98" rx="7" fill="var(--back)" stroke="#0003" stroke-width="2"/>` +
@@ -1223,7 +1234,7 @@
       const older = (g.discard_recent || []).slice(1);
       if (!older.length) return "";
       return `<div class="recent" aria-label="earlier discards, newest first: ${older.join(", ")}">` +
-        `<span>before</span>${older.map((v) => `<span class="card mini">${face(v)}</span>`).join("")}</div>`;
+        `<span>before</span>${older.map((v) => `<span class="card mini">${miniFace(v)}</span>`).join("")}</div>`;
     }
 
     // the handlers read the current view, since an unchanged table keeps

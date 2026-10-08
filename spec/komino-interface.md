@@ -144,6 +144,10 @@ screens stack them above the piles in the same order.
 While the top discard can be matched, it glows and the glow fades over 6 seconds. A re-render
 continues the glow where it was; a new discard starts it over.
 
+### UI-44
+The earlier discards next to the piles show each card's value, in its move's color for a special
+card, since several values share a move.
+
 ### UI-43
 The log and captions give each match's reaction time as the server timed it (`bob matched your
 4 in 180ms`). A match that lost the race to a faster one says by how much (`too late: a match

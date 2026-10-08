@@ -345,7 +345,7 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   for (const id of ["fast", "alerts", "tip", "summary", "marks", "announce", "favicon", "set-target", "set-penalty", "set-exact", "set-marks"]) {
     assert.match(page, new RegExp(`id="${id}"`), `komino page #${id}`);
   }
-  for (const word of ["memory_marks", "discard_recent", "match_over", "onKey"]) assert.match(script, new RegExp(word), `komino app.js ${word}`);
+  for (const word of ["memory_marks", "discard_recent", "miniFace", "match_over", "onKey"]) assert.match(script, new RegExp(word), `komino app.js ${word}`);
 
   const server = await host.json("GET", "/komino/api/key");
   assert.match(server.kid, /^[0-9a-f]{16}$/);

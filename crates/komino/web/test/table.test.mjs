@@ -73,6 +73,8 @@ test("the discards before the top one are shown, newest first (RULE-28)", async 
   const recent = page.doc.querySelector(".recent");
   assert.equal(recent.getAttribute("aria-label"), "earlier discards, newest first: 9, 2, 13");
   assert.equal(recent.querySelectorAll(".card.mini svg").length, 3);
+  // each shows its value, a special card's too, not just its move (UI-44)
+  assert.deepEqual([...recent.querySelectorAll(".card.mini svg text")].map((n) => n.textContent), ["9", "2", "13"]);
   page.push(makeView(makeGame({ discard_recent: [4] })));
   assert.equal(page.doc.querySelector(".recent"), null);
   page.push(makeView(makeGame()));

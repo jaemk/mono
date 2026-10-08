@@ -317,7 +317,6 @@ button.card:disabled { opacity: 1; cursor: default; }
 .recent { display: flex; gap: 3px; align-items: center; font-size: 11px; opacity: .85; flex-wrap: wrap; justify-content: center; }
 .recent > span:first-child { margin-right: 4px; }
 .card.mini { width: 22px; height: 31px; }
-.card.mini svg .corner { display: none; }
 
 /* a matchable discard glows, fading as it ages (UI-41) */
 #discard.live { animation: glow 6s linear forwards; }
