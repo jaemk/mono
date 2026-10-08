@@ -90,4 +90,5 @@ The host can unban a removed member from a list of removed players in the room s
 
 ### ROOM-20
 If the host leaves the room (ROOM-15), the host role passes to the longest-standing present
-member. A host who is merely `away` keeps the role.
+member. A host who is merely `away` keeps the role. A host who leaves an otherwise empty room
+keeps the role only until someone joins: the next member to join becomes host.

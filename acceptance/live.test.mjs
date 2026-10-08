@@ -578,6 +578,22 @@ test("komino holds a discarded special move for matches and takes komino mid tur
   assert.ok(ids.every((id, i) => i === 0 || ids[i - 1] > id), "events come newest first by id");
 });
 
+test("komino hands an emptied room to the next joiner", async (t) => {
+  const host = new Client();
+  const guest = new Client();
+  await expectStatus(await host.get("/komino"), 200, "komino page");
+  await expectStatus(await guest.get("/komino"), 200, "komino page");
+  const room = await host.json("POST", "/komino/api/rooms");
+  const code = room.room.code;
+  t.after(async () => {
+    await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+  });
+  await host.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+  const joined = await guest.json("POST", `/komino/api/rooms/${code}/join`);
+  const me = await guest.json("GET", "/komino/api/me");
+  assert.equal(joined.room.host, me.id, "the joiner hosts a room its host left empty");
+});
+
 test("komino rejects unknown rooms", async () => {
   const c = new Client();
   await c.json("GET", "/komino/api/rooms/ZZZZZZ/watch", {}, 404);

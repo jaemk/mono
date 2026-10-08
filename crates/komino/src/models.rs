@@ -440,7 +440,9 @@ pub async fn release_observer(db: &DbPool, room_id: i64, id: &str) -> Result<()>
 
 /// Add a member, or bring a returning one back. Removed players stay out.
 /// One statement: the upsert skips a removed member, and only a join touches
-/// the room and notifies.
+/// the room and notifies. A join into a room whose host has left takes the
+/// host role, so a room emptied by its host is not stuck without one
+/// (ROOM-20).
 pub async fn join(db: &DbPool, room: &Room, player: &str) -> Result<()> {
     let joined = sqlx::query(
         "WITH j AS (
@@ -451,7 +453,13 @@ pub async fn join(db: &DbPool, room: &Room, player: &str) -> Result<()> {
              WHERE NOT room_members.removed
              RETURNING room_id
          ), r AS (
-             UPDATE rooms SET last_active = now() WHERE id IN (SELECT room_id FROM j)
+             UPDATE rooms SET last_active = now(),
+                 host_player_id = CASE WHEN EXISTS (
+                     SELECT 1 FROM room_members h
+                     WHERE h.room_id = rooms.id AND h.player_id = rooms.host_player_id
+                       AND h.left_at IS NULL AND NOT h.removed
+                 ) THEN host_player_id ELSE $2 END
+             WHERE id IN (SELECT room_id FROM j)
          )
          SELECT pg_notify($4, $1::text) FROM j",
     )
@@ -567,10 +575,11 @@ pub async fn remove(db: &DbPool, room: &Room, host: &str, target: &str) -> Resul
 }
 
 pub async fn unban(db: &DbPool, room: &Room, host: &str, target: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let room = lock_room(&mut tx, room.id).await?;
     if room.host != host {
         return Err(ApiError::forbidden("only the host can unban players"));
     }
-    let mut tx = db.begin().await?;
     // an unbanned player rejoins through the share link like anyone else
     sqlx::query(
         "UPDATE room_members SET removed = false, left_at = now()

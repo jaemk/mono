@@ -762,6 +762,30 @@ async fn test_leaving_host_hands_off_and_ends_a_two_player_game() {
     assert_eq!(row["forfeits"], 1);
 }
 
+#[tokio::test]
+async fn test_joining_a_room_its_host_left_empty_takes_the_host_role() {
+    let state = get_state().await;
+    let host = client(&state);
+    let code = create_room(&host).await;
+    host.post(&format!("/api/rooms/{code}/leave"))
+        .await
+        .assert_status_ok();
+    let guest = client(&state);
+    guest
+        .post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["room"]["host"], me(&guest).await);
+
+    // the old host comes back as a plain member
+    host.post(&format!("/api/rooms/{code}/join"))
+        .await
+        .assert_status_ok();
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["room"]["host"], me(&guest).await);
+}
+
 /// An action through one connection reaches another player's socket through
 /// postgres notify, and socket actions get a result back.
 #[tokio::test]
