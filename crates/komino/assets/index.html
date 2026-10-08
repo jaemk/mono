@@ -9,6 +9,7 @@
 <body>
   <header class="bar">
     <a class="brand" href="/komino">komino</a>
+    <button id="guide-btn" class="small guide-btn">rules</button>
     <label class="name">
       <span>name</span>
       <input id="name" maxlength="24" autocomplete="off">
@@ -82,7 +83,10 @@
       <section id="table" class="table"></section>
       <div id="caption" class="caption" aria-live="polite" hidden></div>
     </div>
-    <section id="controls" class="controls"></section>
+    <div id="actionbar" class="actionbar" hidden>
+      <div id="prompt" class="prompt" aria-live="polite"></div>
+      <section id="controls" class="controls"></section>
+    </div>
     <div id="confirm" class="confirm-backdrop" hidden>
       <div class="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
         <p id="confirm-text"></p>
@@ -115,6 +119,19 @@
       <a href="/komino">back to komino</a>
     </section>
   </main>
+
+  <div id="guide" class="confirm-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+      <div class="modal-head">
+        <div>
+          <h2 id="guide-title">how to play</h2>
+          <div id="guide-room" class="guide-room"></div>
+        </div>
+        <button id="guide-close" class="small">close</button>
+      </div>
+      <div id="guide-body" class="guide"></div>
+    </div>
+  </div>
 
   <div id="toast" class="toast" role="status" hidden></div>
   <div id="fx" class="fx-layer" aria-hidden="true"></div>

@@ -206,6 +206,7 @@ test("the log describes every event kind", async (t) => {
     [{ kind: "skip", player: "p1" }, "bob skipped the move"],
     [{ kind: "match", player: "p1", payload: { ok: true, seat: 1, value: 4 } }, "bob matched bob's 4"],
     [{ kind: "match", player: "p1", payload: { ok: false, seat: 0, slot: 2 } }, "bob missed a match on your card 3 and took a penalty"],
+    [{ kind: "give", player: "p1", payload: { seat: 1, slot: 2, target_seat: 0, target_slot: 0 } }, "bob gave card 3 to your card 1"],
     [{ kind: "komino", player: "p1" }, "bob called KOMINO"],
     [{ kind: "forfeit", player: "p9" }, "someone left the game"],
     [{ kind: "away_skip", player: "p1" }, "bob was away; turn skipped"],

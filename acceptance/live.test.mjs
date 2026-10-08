@@ -338,6 +338,9 @@ test("komino plays a sealed round with an observer watching", async (t) => {
   assert.match(script, /reaction_ms/, "komino app.js reports match reaction times");
   assert.match(script, /show_misses/, "komino app.js sends the missed match setting");
   assert.match(page, /id="set-misses"/, "komino page offers the missed match setting");
+  // the sticky action bar and the rules guide (UI-33, UI-34)
+  for (const id of ["actionbar", "prompt", "guide-btn", "guide"]) assert.match(page, new RegExp(`id="${id}"`), `komino page #${id}`);
+  assert.match(script, /guideHtml/, "komino app.js builds the rules guide");
 
   const server = await host.json("GET", "/komino/api/key");
   assert.match(server.kid, /^[0-9a-f]{16}$/);
@@ -440,6 +443,32 @@ test("komino plays a sealed round with an observer watching", async (t) => {
     assert.equal(matched.payload.value, mine, "a shown miss names the card");
     const seen = await guest.json("GET", `/komino/api/rooms/${code}`);
     assert.equal(seen.events.find((e) => e.kind === "match").payload.value, mine);
+  }
+
+  // a match on another hand needs no card to give up front; a right one
+  // leaves the slot owed until the matcher gives a card (RULE-19)
+  const guestSeat = 1 - hostSeat;
+  const handBefore = view.game.seats[hostSeat].slots.length;
+  view = await host.json("POST", `/komino/api/rooms/${code}/action`, {
+    json: { type: "match", seq: view.game.discard_seq, seat: guestSeat, slot: 3 },
+  });
+  const onGuest = view.events.find((e) => e.kind === "match" && e.payload.seat === guestSeat);
+  assert.ok(onGuest, "the match on the guest's card should land");
+  if (onGuest.payload.ok) {
+    assert.equal(onGuest.payload.owes, true);
+    assert.equal(view.game.seats[guestSeat].slots[3], null);
+    assert.equal(view.game.owed.length, 1);
+    assert.deepEqual({ ...view.game.owed[0], deadline: 0 }, { from: hostSeat, seat: guestSeat, slot: 3, deadline: 0 });
+    // only the matcher gives
+    await guest.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "give", slot: 0 } }, 400);
+    view = await host.json("POST", `/komino/api/rooms/${code}/action`, { json: { type: "give", slot: 0 } });
+    assert.equal(view.events[0].kind, "give");
+    assert.deepEqual(view.game.owed, []);
+    assert.equal(view.game.seats[hostSeat].slots[0], null);
+    assert.notEqual(view.game.seats[guestSeat].slots[3], null);
+  } else {
+    assert.equal(view.game.seats[hostSeat].slots.length, handBefore + (onGuest.payload.penalty ? 1 : 0));
+    assert.deepEqual(view.game.owed, []);
   }
 });
 

@@ -146,6 +146,11 @@ test("each event kind has its marks, flights, and sound", async (t) => {
   assert.equal(r.flights, 2);
   assert.ok(page.$("caption").firstElementChild.classList.contains("about-you"));
   clearFx();
+  // a card given after the match lands face down in the emptied slot
+  const g = play("give", { seat: 1, slot: 3, target_seat: 0, target_slot: 1 });
+  assert.deepEqual(g, { marked: ["0:1 fx-flip"], sounds: ["noise"], flights: 1 });
+  assert.ok(page.$("caption").firstElementChild.classList.contains("about-you"));
+  clearFx();
   // a miss with a penalty card lands in the new last slot
   const five = makeGame({ turn: 1, seats: [seat("p0"), seat("p1", ["x", "x", "x", "x", "x"])] });
   assert.deepEqual(play("match", { ok: false, seat: 0, slot: 2, penalty: true }, "p1", five),

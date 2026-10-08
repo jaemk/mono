@@ -23,6 +23,8 @@
   const CAPTION_MS = 3000;
   // how long a missed card shows its value, in rooms that show misses
   const MISS_SHOW_MS = 3000;
+  // how long a matcher has to give a card (game.rs GIVE_MS)
+  const GIVE_SECS = 15;
   const SOUND_KEY = "komino.sound";
 
   const esc = (s) =>
@@ -191,6 +193,60 @@
   // or repeated confirm is refused instead of applied to a moved-on turn
   const TURN_ACTIONS = ["draw", "take", "swap", "discard", "use_special", "komino", "peek", "blind_swap", "look_swap", "skip"];
 
+  // ---------------------------------------------------------------- guide
+  //
+  // The rules as the room plays them (UI-34): the settings fill in hand
+  // size, timers, peek time, and misses; without a room (the lobby) the
+  // guide names them as room choices.
+
+  const MOVE_TEXT = {
+    peek_own: "look at one of your own cards.",
+    peek_other: "look at one card in another player's hand.",
+    blind_swap: "swap one of your cards with another player's card, without seeing either.",
+    look_swap: "look at any one card, then swap it with one of yours or keep your cards.",
+  };
+
+  function guideHtml(s) {
+    const hand = s ? s.hand_size : null;
+    const near = hand ? Math.floor(hand / 2) : null;
+    const dealt = hand ? `${hand} cards` : "the room's hand size of cards (4 to 10)";
+    const nearRow = near ? `cards 1 to ${near}` : "the half nearest you";
+    const turnLimit = !s ? "A room can set a turn limit; a turn that runs past it is skipped."
+      : s.turn_limit_secs ? `Each turn must end within ${s.turn_limit_secs} seconds or it is skipped.` : "Turns have no time limit.";
+    const away = s ? `${s.away_grace_secs} seconds` : "the room's away grace";
+    const peek = !s ? "for the room's peek time, or until you press hide card"
+      : s.reveal_secs ? `for ${s.reveal_secs} seconds, or until you press hide card` : "until you press hide card";
+    const miss = !s ? "A room can also show everyone the card's value."
+      : s.show_misses === false ? "Nobody learns that card's value, you included." : "Everyone sees that card's value.";
+    const moves = [[7, 8], [9, 10], [11, 12], [13]].map((vals) => {
+      const mv = MOVES[vals[0]];
+      return `<li><span class="guide-cards">${vals.map((v) => `<span class="card">${face(v)}</span>`).join("")}</span>` +
+        `<span><strong>${vals.join(", ")}: ${MOVE_INFO[mv].label}</strong>. ${MOVE_TEXT[mv]}</span></li>`;
+    }).join("");
+    return `<h3>goal</h3><p>Finish with the lowest total. Each game is one round.</p>` +
+      `<h3>setup</h3><p>Everyone is dealt ${dealt} face down in two rows. You see your near row (${nearRow}) ` +
+      `until you press ready or 30 seconds pass, so memorize it.</p>` +
+      `<h3>your turn</h3><ol><li>Draw from the deck (only you see it) or take the top discard (everyone sees it).</li>` +
+      `<li>A drawn card is swapped into one of your slots, discarding the card it replaces, or discarded. ` +
+      `A taken card must be swapped in.</li></ol><p>${turnLimit} If you are away when your turn comes, it is skipped after ${away}.</p>` +
+      `<h3>special cards</h3><p>Discarding one of these straight from the deck earns its move. Taking it from the ` +
+      `discard pile, or swapping it out of your hand, does not.</p><ul class="guide-moves">${moves}</ul>` +
+      `<p>The move does not start on its own. After the discard, everyone (you included) can still match it, ` +
+      `and tapping a card is a match attempt. Press <strong>use &lt;move&gt;</strong> to start the move, or ` +
+      `<strong>end turn</strong> to pass it up. A peeked card stays face up ${peek}.</p>` +
+      `<h3>matching</h3><p>Whenever the discard pile says matchable, anyone can tap a face-down card in any hand ` +
+      `that they think has the same value, then confirm. The fastest reaction wins.</p>` +
+      `<ul><li>Right: the card goes onto the discard pile. If it was another player's card, you then tap one of ` +
+      `your own cards to give them in its place. You have ${GIVE_SECS} seconds, then your highest card is given for you.</li>` +
+      `<li>Wrong: the card stays, and you take a penalty card from the deck face down. ${miss}</li></ul>` +
+      `<h3>komino</h3><p>Once everyone has had a turn, you can call KOMINO on your turn. Everyone else gets one ` +
+      `more turn and your cards are locked: nobody can swap, peek at, or match them. If you do not have the ` +
+      `strictly lowest total, you cannot win.</p>` +
+      `<h3>scoring</h3><p>Each card counts its value, so -1 is the best card and 13 the worst. The lowest total ` +
+      `wins and ties share the win. With many players or large hands a second deck is added, so there are ` +
+      `always at least 20 cards to draw.</p>`;
+  }
+
   function createKomino(win) {
     const doc = win.document;
     const $ = (id) => doc.getElementById(id);
@@ -269,6 +325,21 @@
     }
     function matchKey(g) {
       return `m:${g.id}:${g.discard_seq}:${g.matchable}`;
+    }
+    // the card this player owes for a right match on another hand (RULE-19)
+    function myOwe(g) {
+      if (watching || !g || g.me === null) return null;
+      return (g.owed || []).find((o) => o.from === g.me) || null;
+    }
+    function oweKey(g) {
+      const o = myOwe(g);
+      return o ? `o:${g.id}:${o.seat}:${o.slot}` : "o:none";
+    }
+    // a pending selection still applies while its key is unchanged
+    function keyNow(g, key) {
+      if (key.startsWith("m:")) return matchKey(g);
+      if (key.startsWith("o:")) return oweKey(g);
+      return turnKey(g);
     }
     // peeks end at the server's deadline, read against the server clock; a
     // peek with no deadline lasts until hidden (SET-11)
@@ -548,6 +619,12 @@
           }
           return play("match", at);
         }
+        case "give": {
+          const target = slot(p.target_seat, p.target_slot);
+          mark(target, "fx-flip");
+          fly(slot(p.seat, p.slot), target, back());
+          return play("slide", at);
+        }
         case "komino":
           mark("status", "fx-flash");
           return play("komino", at);
@@ -561,7 +638,7 @@
     function aboutMe(e, g) {
       const p = e.payload || {};
       if (g.me === null) return false;
-      if (e.kind === "blind_swap" || e.kind === "look_swap") return p.target_seat === g.me;
+      if (e.kind === "blind_swap" || e.kind === "look_swap" || e.kind === "give") return p.target_seat === g.me;
       return (e.kind === "peek" || e.kind === "match") && p.seat === g.me;
     }
 
@@ -651,11 +728,12 @@
       const mine = seat === g.me;
       const st = g.stage;
 
-      // a match waiting for the card to give away
-      if (sel && sel.giving) {
+      // a right match on another hand waits for the card to give (RULE-19)
+      const owe = myOwe(g);
+      if (owe) {
         if (!mine || !filled(g, seat, slot)) return toast("tap one of your own cards to give");
-        const a = Object.assign({}, sel.action, { give_slot: slot });
-        return confirmAction(a, `match ${seatOwner(g, a.seat)} card ${a.slot + 1} with the ${g.discard_top}, giving your card ${slot + 1}?`, sel.key);
+        return confirmAction({ type: "give", slot },
+          `give your card ${slot + 1} to ${seatOwner(g, owe.seat)} card ${owe.slot + 1}?`, oweKey(g));
       }
       // the second half of a blind swap
       if (sel && sel.blind) {
@@ -684,12 +762,15 @@
       if (canMatch(g)) {
         const k = matchKey(g);
         const a = { type: "match", seq: g.discard_seq, seat, slot };
+        // a waiting move is not used by a tap; say so where it could be
+        // mistaken for one (UI-22)
+        const waiting = myTurn(g) && g.stage.kind === "earned" ? ` this is a match attempt, not ${MOVE_INFO[g.stage.mv].label}.` : "";
         if (!mine) {
           if (!g.seats[g.me].slots.some((s) => s !== null)) return toast("you have no card to give");
-          setSel({ key: k, giving: true, action: a });
-          return toast("now tap one of your cards to give");
+          return confirmAction(a, `match ${seatOwner(g, seat)} card ${slot + 1} with the ${g.discard_top}?${waiting} ` +
+            `if you're right, you then give them one of your cards.`, k);
         }
-        return confirmAction(a, `match your card ${slot + 1} with the ${g.discard_top}?`, k);
+        return confirmAction(a, `match your card ${slot + 1} with the ${g.discard_top}?${waiting}`, k);
       }
     }
 
@@ -702,6 +783,7 @@
       switch (a.type) {
         case "swap":
         case "look_swap":
+        case "give":
           return seat === g.me && a.slot === slot;
         case "peek":
           return a.seat === seat && a.slot === slot;
@@ -736,7 +818,12 @@
       const s = g.seats[seat].slots[slot];
       const fxc = fxClass(`s:${seat}:${slot}`);
       const no = `<span class="slot-no">${slot + 1}</span>`;
-      if (s === null) return `<span class="card empty${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="empty slot">${no}</span>`;
+      if (s === null) {
+        // a slot a right match emptied, waiting for the matcher's card
+        const o = (g.owed || []).find((o) => o.seat === seat && o.slot === slot);
+        const label = o ? `${seatOwner(g, seat)} card ${slot + 1}, waiting for ${o.from === g.me ? "your" : `${nameOf(g.seats[o.from].player)}'s`} card` : "empty slot";
+        return `<span class="card empty${o ? " owed" : ""}${fxc}"${pos} data-seat="${seat}" data-slot="${slot}" aria-label="${esc(label)}">${no}</span>`;
+      }
       const own = visibleValue(g, seat, slot);
       const missed = own === null ? fxShown(`s:${seat}:${slot}`) : null;
       const v = own === null ? missed : own;
@@ -844,7 +931,6 @@
         text = `${turnName} turn`;
         if (g.turn_deadline) text += ` (${secondsLeft(g.turn_deadline)}s left)`;
         if (g.away_deadline) text += ` (away, skipping in ${secondsLeft(g.away_deadline)}s)`;
-        if (myTurn(g)) text += hint(g);
       } else if (g.status === "scoring") {
         text = `scoring in ${secondsLeft(g.score_at)}s, last chance to match`;
       } else {
@@ -858,23 +944,43 @@
       el.classList.toggle("fx-flash", fx.has("status"));
     }
 
+    // what to do next, shown above the action buttons (UI-33); a card owed
+    // for a match comes first, since it can fall due on anyone's turn
     function hint(g) {
-      const st = g.stage;
-      if (sel && sel.blind) return ": now tap another player's card";
-      if (st.kind === "start") return ": draw from the deck or take the discard";
-      if (st.kind === "drawn") return ": tap one of your cards to swap, or discard";
-      if (st.kind === "taken") return ": tap one of your cards to swap";
-      if (st.kind === "earned") return `: match the discard, use ${MOVE_INFO[st.mv].label}, or end your turn`;
-      if (st.kind === "special") {
-        return {
-          peek_own: ": tap one of your cards to peek",
-          peek_other: ": tap another player's card to peek",
-          blind_swap: ": tap your card, then another player's card",
-          look_swap: ": tap any card to look at it",
-        }[st.mv] + ", or skip";
+      const owe = myOwe(g);
+      if (owe) {
+        return { owe: true, text: `your match was right: tap one of your cards to give to ${seatOwner(g, owe.seat)} card ${owe.slot + 1} ` +
+          `(${secondsLeft(owe.deadline)}s, then your highest card is given)` };
       }
-      if (st.kind === "looked") return ": tap your card to swap with it, or keep yours";
-      return "";
+      if (!myTurn(g)) return null;
+      const st = g.stage;
+      const say = (text) => ({ text });
+      if (sel && sel.blind) return say("now tap another player's card");
+      if (st.kind === "start") return say("draw from the deck or take the discard");
+      if (st.kind === "drawn") return say("tap one of your cards to swap, or discard");
+      if (st.kind === "taken") return say("tap one of your cards to swap");
+      if (st.kind === "earned") {
+        const label = MOVE_INFO[st.mv].label;
+        return say(`${label} is earned but not started: press use ${label} to start it, or end turn. ` +
+          `tapping a card now is a match attempt on the ${g.discard_top}`);
+      }
+      if (st.kind === "special") {
+        return say({
+          peek_own: "tap one of your cards to peek",
+          peek_other: "tap another player's card to peek",
+          blind_swap: "tap your card, then another player's card",
+          look_swap: "tap any card to look at it",
+        }[st.mv] + ", or skip");
+      }
+      if (st.kind === "looked") return say("tap your card to swap with it, or keep yours");
+      return null;
+    }
+
+    function renderPrompt(g) {
+      const h = !watching && g && g.me !== null && g.status !== "scored" ? hint(g) : null;
+      const el = $("prompt");
+      el.textContent = h ? h.text : "";
+      el.classList.toggle("owe", Boolean(h && h.owe));
     }
 
     function button(label, onClick, opts) {
@@ -916,13 +1022,15 @@
         }
         if (st.kind === "drawn") {
           const card = drawnCard(g);
-          const move = card !== null && MOVES[card] ? `? you can match first, then use ${MOVE_INFO[MOVES[card]].label}` : "?";
+          const move = card !== null && MOVES[card]
+            ? `? ${MOVE_INFO[MOVES[card]].label} does not start on its own: press use ${MOVE_INFO[MOVES[card]].label} after, or end turn` : "?";
           add(card === null ? "discard" : `discard ${card}`,
             () => confirmAction({ type: "discard" }, `discard ${heldName(g)}${move}`, k));
         }
         if (st.kind === "earned") {
           const label = MOVE_INFO[st.mv].label;
-          add(`use ${label}`, () => confirmAction({ type: "use_special" }, `use ${label} now?`, k), { cls: "primary" });
+          add(`use ${label}`, () => confirmAction({ type: "use_special" }, `start ${label} now? you then pick its card${st.mv === "blind_swap" ? "s" : ""}.`, k),
+            { cls: `primary move-${st.mv}` });
           add("end turn", () => confirmAction({ type: "skip" }, `end your turn without using ${label}?`, k));
         }
         if (st.kind === "special") add("skip move", () => confirmAction({ type: "skip" }, "skip the special move?", k));
@@ -1008,6 +1116,7 @@
           const value = typeof p.value === "number" ? `, a ${p.value},` : "";
           return `${who} missed a match on ${owner(p.seat)} card ${p.slot + 1}${value} and took a penalty`;
         }
+        case "give": return `${who} gave card ${p.slot + 1} to ${owner(p.target_seat)} card ${p.target_slot + 1}`;
         case "komino": return `${who} called KOMINO`;
         case "forfeit": return `${who} left the game`;
         case "away_skip": return `${who} ${e.player === me ? "were" : "was"} away; turn skipped`;
@@ -1060,7 +1169,9 @@
       $("observers").textContent = `${n} watching`;
       renderStatus(g);
       renderTable(g);
+      renderPrompt(g);
       renderControls(g);
+      $("actionbar").hidden = !$("prompt").textContent && !$("controls").children.length;
       renderMembers();
       renderLog(g);
       renderStats();
@@ -1077,9 +1188,9 @@
       // a pending match ends with its result, or once its discard is gone
       if (claiming && (!g || g.discard_seq !== claiming.seq)) claiming = null;
       // a pending action that no longer applies is dropped, with the reason
+      if (!myOwe(before) && myOwe(g)) toast("your match was right: now tap one of your cards to give");
       if (sel && g) {
-        const now = sel.key.startsWith("m:") ? matchKey(g) : turnKey(g);
-        if (now !== sel.key) {
+        if (keyNow(g, sel.key) !== sel.key) {
           sel = null;
           matchMode = false;
           hideConfirm();
@@ -1125,6 +1236,18 @@
       }
     }
 
+    // the rules as this room plays them, read when opened (UI-34)
+    function openGuide() {
+      const s = view && view.room ? view.room.settings : null;
+      $("guide-body").innerHTML = guideHtml(s || null);
+      $("guide-room").textContent = s ? "as this room plays" : "rooms choose the hand size, timers, and peek time";
+      $("guide").hidden = false;
+      $("guide-close").focus();
+    }
+    function closeGuide() {
+      $("guide").hidden = true;
+    }
+
     function gone(title, text) {
       $("lobby").hidden = true;
       $("room").hidden = true;
@@ -1147,7 +1270,14 @@
         if (e.target === $("confirm")) clearSel();
       });
       doc.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") clearSel();
+        if (e.key !== "Escape") return;
+        if (!$("guide").hidden) return closeGuide();
+        clearSel();
+      });
+      $("guide-btn").addEventListener("click", openGuide);
+      $("guide-close").addEventListener("click", closeGuide);
+      $("guide").addEventListener("click", (e) => {
+        if (e.target === $("guide")) closeGuide();
       });
       doc.addEventListener("pointerdown", unlock, true);
       doc.addEventListener("keydown", unlock, true);
@@ -1249,7 +1379,7 @@
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createKomino, face, back, cardLabel, openSealed, importServerKey, b64d, b64e };
+    module.exports = { createKomino, face, back, cardLabel, guideHtml, openSealed, importServerKey, b64d, b64e };
   } else {
     createKomino(root).start();
   }

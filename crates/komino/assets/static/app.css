@@ -144,10 +144,30 @@ main { max-width: 980px; margin: 0 auto; padding: 12px 16px 120px; }
   background: none; color: #fff; font-size: 18px; line-height: 1;
 }
 .card.empty .slot-no { color: rgba(255,255,255,.35); }
+/* emptied by a right match, waiting for the matcher's card (RULE-19) */
+.card.empty.owed {
+  border-color: transparent; outline: 3px dashed var(--select); outline-offset: 2px;
+  animation: claiming .5s ease-in-out infinite alternate;
+}
+.card.empty.owed .slot-no { color: var(--select); }
 button.card:not(:disabled):hover { transform: translateY(-2px); }
 button.card:disabled { opacity: 1; cursor: default; }
 
-.controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 12px 0; }
+/* the prompt and action buttons stick to the bottom of the screen while the
+   table runs past it (UI-33) */
+.actionbar {
+  position: sticky; bottom: 0; z-index: 6;
+  margin: 12px -16px 0; padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--bg); border-top: 1px solid var(--line); box-shadow: 0 -6px 14px rgba(0,0,0,.12);
+}
+.prompt { text-align: center; font-weight: 600; margin: 0 0 8px; }
+.prompt:empty { display: none; }
+.prompt.owe { color: var(--accent); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 0; }
+.controls .move-peek_own { background: #2f6fd6; border-color: #2f6fd6; }
+.controls .move-peek_other { background: #e07a1f; border-color: #e07a1f; }
+.controls .move-blind_swap { background: #7b4bc9; border-color: #7b4bc9; }
+.controls .move-look_swap { background: #d0393b; border-color: #d0393b; }
 .controls .komino-btn {
   font-weight: 800; letter-spacing: .08em; background: var(--accent); color: #fff; border-color: var(--accent);
   padding: 10px 22px;
@@ -166,6 +186,23 @@ button.card:disabled { opacity: 1; cursor: default; }
 .confirm p { margin: 0 0 18px; font-size: 19px; font-weight: 600; text-align: center; }
 .confirm-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .confirm-buttons button { min-height: 52px; font-size: 18px; font-weight: 600; }
+/* the rules guide (UI-34) */
+.guide-btn { margin-left: auto; }
+.modal {
+  width: min(560px, 100%); max-height: calc(100vh - 32px); overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  padding: 18px 20px; box-shadow: 0 12px 40px rgba(0,0,0,.4);
+}
+.modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.modal-head h2 { margin: 0; font-size: 20px; }
+.guide-room { font-size: 12px; color: var(--muted); }
+.guide h3 { margin: 16px 0 4px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.guide p, .guide ul, .guide ol { margin: 4px 0; }
+.guide ul, .guide ol { padding-left: 20px; }
+.guide .guide-moves { list-style: none; padding: 0; display: grid; gap: 8px; margin: 8px 0; }
+.guide-moves li { display: flex; gap: 10px; align-items: center; }
+.guide-cards { display: flex; gap: 4px; flex: none; }
+.guide-cards .card { width: 34px; height: 48px; }
 .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 640px) { .columns { grid-template-columns: 1fr; gap: 0; } }
 .members { list-style: none; margin: 0; padding: 0; }
@@ -243,5 +280,5 @@ button.card:disabled { opacity: 1; cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .card[class*="fx-"], .status.fx-flash { animation: none; outline: 3px solid var(--select); outline-offset: 2px; }
   .ghost { display: none; }
-  .caption div, .eye-badge, .card.claiming { animation: none; }
+  .caption div, .eye-badge, .card.claiming, .card.empty.owed { animation: none; }
 }

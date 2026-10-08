@@ -106,6 +106,13 @@ A correct match moves the selected card onto the discard pile. If the card came 
 player's hand, the matcher then gives one of their own cards (chosen without looking) into the
 vacated slot of that player. A player with no cards left cannot match another player's card.
 
+The card to give is chosen after the match lands (`give`), not with it: the slot stays empty
+and the view's `owed` names it, the matcher's seat, and a deadline 15 seconds out. At the
+deadline, or when the game is scored, the matcher's highest card is given for them (the
+lowest numbered slot among equal values); a matcher with no cards left gives nothing. While a card is owed, its matcher cannot match
+another player's card. A forfeit by either player drops the debt. A match may still name
+`give_slot` up front, which gives that card with the match.
+
 ### RULE-20
 An incorrect match leaves the selected card where it was and adds the top card of the draw pile
 face down to the matcher's hand as a penalty, in a new slot they have not seen. A room can

@@ -30,6 +30,8 @@ test("observers get no controls, no confirm, and no host buttons", async (t) => 
   t.after(page.stop);
   page.live();
   assert.deepEqual(page.controls(), []);
+  // nothing to do, so no action bar either (UI-33)
+  assert.equal(page.$("actionbar").hidden, true);
   assert.equal(page.$("start").hidden, true);
   assert.equal(page.$("members").querySelectorAll("button").length, 0);
   page.slot(0, 0).click();

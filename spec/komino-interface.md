@@ -73,13 +73,21 @@ dialog is the "confirm bar" referred to below.
 
 ### UI-11
 UI-10 applies to: drawing, taking the discard, swapping, discarding, using each special move
-(and skipping one), matching, and pressing ready. Matching another player's card selects the
-target, then the card to give (RULE-19), then confirms both as one action.
+(and skipping one), matching, giving a card, and pressing ready. Matching another player's
+card confirms at once, saying a right match is followed by giving a card. Once a right match
+leaves a card owed (RULE-19), the matcher's taps on their own cards pick the card to give,
+each confirmed; taps on other hands do nothing until it is given. The prompt (UI-33) says so
+with the seconds left, and the emptied slot shows a dashed outline and reads `waiting for
+<name>'s card` for everyone.
 
 ### UI-22
 While a discarded special move waits (RULE-10), the turn player's taps on cards are matches
-(UI-13), and the controls offer `use <move>` and `end turn`. Once the move is in use, taps
-pick its targets, and a `match <value>` button switches taps back to matching.
+(UI-13), and the controls offer `use <move>`, in the move's color, and `end turn`. Once the
+move is in use, taps pick its targets, and a `match <value>` button switches taps back to
+matching. So the move is not mistaken for already running, the prompt (UI-33) says it is
+earned but not started and that a tap is a match attempt, the discard confirm says the move
+does not start on its own, and a match confirm in this stage says it is a match attempt, not
+the move.
 
 ### UI-12
 Confirmation is client-side only. The server treats each received action as final.
@@ -103,6 +111,21 @@ arrives or the discard changes (RT-16).
 The confirm dialog is centered on the screen over a dimmed backdrop, with full-width confirm
 and cancel buttons at least 48px tall. Confirm takes focus when the dialog opens, so Enter
 confirms; Escape or tapping the backdrop cancels.
+
+### UI-33
+The action buttons sit in an action bar under the table, led by a prompt line saying what to
+do next (the step of your turn, or a card you owe). The bar sticks to the bottom of the screen
+while the table runs past it, and is hidden when there is nothing to show (as on the watch
+page).
+
+## Guide
+
+### UI-34
+A `rules` button in the header opens a modal guide to the game: goal, setup, turns, each
+special card with its face, matching (including giving a card), komino, and scoring. In a
+room it uses the room's settings (hand size and near row, turn limit, away grace, peek time,
+and whether misses are shown); in the lobby it names them as room choices. Close, Escape, or
+tapping the backdrop closes it, and Escape closes it before any open confirm.
 
 ## Komino button
 
@@ -152,6 +175,7 @@ and observer:
 | peek | the peeked card lifts and tilts, as if being looked at |
 | blind swap, look and swap | both cards pulse and fly past each other between the two slots |
 | match | a hit flies the card to the discard (and the given card to the emptied slot); a miss shakes the card, shows its face for 3 seconds when the room shows misses (SET-13), and a penalty card flies from the deck |
+| give | the given card flies face down into the emptied slot, which flips in |
 | komino | the status banner flashes |
 | scored | every card flips face up |
 

@@ -16,6 +16,9 @@ pub const SCORE_DELAY_MS: i64 = 2_000;
 pub const MATCH_WINDOW_MS: i64 = 250;
 /// Settled claim results kept for the claimers waiting on them.
 const SETTLED_KEPT: usize = 32;
+/// How long a matcher has to give a card for a match on another player's
+/// card before one is given for them (RULE-19).
+pub const GIVE_MS: i64 = 15_000;
 
 /// A deal that leaves fewer cards than this to draw is played with two decks
 /// (SET-7).
@@ -230,6 +233,17 @@ pub struct Claim {
     pub at: i64,
 }
 
+/// A card a matcher owes for matching another player's card: it goes into
+/// the slot the match emptied (RULE-19).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Owed {
+    pub player: String,
+    pub seat: usize,
+    pub slot: usize,
+    /// When a card is given for the matcher if they have not chosen one.
+    pub deadline: i64,
+}
+
 /// How a settled claim ended, read back by the claimer waiting on it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settled {
@@ -305,6 +319,9 @@ pub struct Game {
     /// The newest settled claims, oldest first.
     #[serde(default)]
     pub settled: Vec<Settled>,
+    /// Cards matchers still owe for correct matches (RULE-19).
+    #[serde(default)]
+    pub owed: Vec<Owed>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -335,11 +352,17 @@ pub enum Action {
         slot: Option<usize>,
     },
     Skip,
+    /// `give_slot` may be left out of a match on another player's card; the
+    /// card is then given after the match succeeds (`Give`).
     Match {
         seq: u64,
         seat: usize,
         slot: usize,
         give_slot: Option<usize>,
+    },
+    /// Give one of your cards for a correct match you owe one for.
+    Give {
+        slot: usize,
     },
 }
 
@@ -354,7 +377,10 @@ pub enum Secret {
 impl Action {
     /// Actions that only the turn player takes, guarded by `turn_seq`.
     pub fn is_turn_action(&self) -> bool {
-        !matches!(self, Action::Ready | Action::Match { .. } | Action::Hide)
+        !matches!(
+            self,
+            Action::Ready | Action::Match { .. } | Action::Hide | Action::Give { .. }
+        )
     }
 
     /// Actions that can change the top discard or a card a pending claim
@@ -368,6 +394,7 @@ impl Action {
                 | Action::BlindSwap { .. }
                 | Action::LookSwap { .. }
                 | Action::Komino
+                | Action::Give { .. }
         )
     }
 }
@@ -516,6 +543,7 @@ impl Game {
             claims: vec![],
             claim_deadline: None,
             settled: vec![],
+            owed: vec![],
         }
     }
 
@@ -979,8 +1007,61 @@ impl Game {
                 out.claim = Some((id, deadline));
                 out.changed = true;
             }
+            Action::Give { slot } => {
+                let i = self
+                    .owed
+                    .iter()
+                    .position(|o| o.player == player)
+                    .ok_or_else(|| Reject::invalid("you do not owe a card"))?;
+                self.require_filled(me, slot)?;
+                self.give(i, slot, &mut out);
+            }
         }
         Ok(out)
+    }
+
+    /// Settle owed cards: those past their deadline, or all of them when
+    /// `now` is `None`. The matcher's highest card is given for them (the
+    /// lowest slot among equals), so a missed choice never costs their best
+    /// card; a matcher with no cards left owes nothing.
+    fn settle_owed(&mut self, now: Option<i64>, out: &mut Outcome) {
+        while let Some(i) = self
+            .owed
+            .iter()
+            .position(|o| now.is_none_or(|now| now >= o.deadline))
+        {
+            let from = self.seat_of(&self.owed[i].player);
+            let slot = from.and_then(|s| {
+                let slots = &self.seats[s].slots;
+                (0..slots.len())
+                    .filter_map(|i| slots[i].map(|v| (v, std::cmp::Reverse(i))))
+                    .max()
+                    .map(|(_, std::cmp::Reverse(i))| i)
+            });
+            match slot {
+                Some(slot) => self.give(i, slot, out),
+                None => {
+                    self.owed.remove(i);
+                    out.changed = true;
+                }
+            }
+        }
+    }
+
+    /// Move the matcher's `slot` into the slot owed entry `i` names.
+    fn give(&mut self, i: usize, slot: usize, out: &mut Outcome) {
+        let o = self.owed.remove(i);
+        let me = self.seat_of(&o.player).expect("owed by a seated player");
+        let given = self.seats[me].slots[slot].take();
+        self.touch(me, slot);
+        self.seats[o.seat].slots[o.slot] = given;
+        self.touch(o.seat, o.slot);
+        out.stat(&o.player, Stat::CardsInteracted, 1);
+        out.event(
+            Some(&o.player),
+            "give",
+            json!({ "seat": me, "slot": slot, "target_seat": o.seat, "target_slot": o.slot }),
+        );
     }
 
     /// Settle every pending claim now, fastest reaction first (RT-17). Each
@@ -1062,7 +1143,8 @@ impl Game {
     }
 
     /// Whether the player at `me` may match `seat`'s `slot` against discard
-    /// `seq` now. Returns the card and the slot `me` gives in its place.
+    /// `seq` now. Returns the card and the slot `me` gives in its place, if
+    /// chosen up front.
     fn check_match(
         &self,
         me: usize,
@@ -1090,15 +1172,21 @@ impl Game {
             return Err(Reject::invalid("the caller's cards are locked"));
         }
         let card = self.require_filled(seat, slot)?;
-        let give = if seat != me {
-            let give =
-                give_slot.ok_or_else(|| Reject::invalid("choose one of your cards to give"))?;
-            self.require_filled(me, give)?;
-            Some(give)
-        } else {
-            None
-        };
-        Ok((card, give))
+        if seat != me {
+            if self.owed.iter().any(|o| o.player == self.seats[me].player) {
+                return Err(Reject::invalid("give a card for your last match first"));
+            }
+            match give_slot {
+                Some(give) => {
+                    self.require_filled(me, give)?;
+                }
+                None if self.seats[me].slots.iter().all(Option::is_none) => {
+                    return Err(Reject::invalid("you have no card to give"));
+                }
+                None => {}
+            }
+        }
+        Ok((card, give_slot.filter(|_| seat != me)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1127,11 +1215,21 @@ impl Game {
                 self.seats[seat].slots[slot] = given;
                 out.stat(player, Stat::CardsInteracted, 1);
             }
+            // the matcher picks the card to give once the match is in
+            let owes = seat != me && give.is_none();
+            if owes {
+                self.owed.push(Owed {
+                    player: player.to_string(),
+                    seat,
+                    slot,
+                    deadline: now + GIVE_MS,
+                });
+            }
             out.stat(player, Stat::Matches, 1);
             out.event(
                 Some(player),
                 "match",
-                json!({ "ok": true, "seat": seat, "slot": slot, "value": card, "give_slot": give }),
+                json!({ "ok": true, "seat": seat, "slot": slot, "value": card, "give_slot": give, "owes": owes }),
             );
         } else {
             let penalty = self.draw_card(rng);
@@ -1173,6 +1271,8 @@ impl Game {
         );
         self.reveals
             .retain(|r| r.seat != seat && r.player != player);
+        // their cards left play, so they neither give nor receive one
+        self.owed.retain(|o| o.player != player && o.seat != seat);
         self.final_remaining.retain(|&s| s != seat);
         out.stat(player, Stat::Forfeits, 1);
         out.event(Some(player), "forfeit", json!({ "seat": seat }));
@@ -1227,6 +1327,7 @@ impl Game {
         rng: &mut impl rand::Rng,
     ) -> Outcome {
         let mut out = self.settle(now, rng);
+        self.settle_owed(Some(now), &mut out);
         match self.status {
             Status::Peeking => {
                 if self.ready_deadline.is_some_and(|d| now >= d) {
@@ -1281,6 +1382,8 @@ impl Game {
     fn finish(&mut self, out: &mut Outcome) {
         // only a forfeit ends a game with claims still pending
         self.drop_claims(|_| false, Reject::new("too_late", "the game is over"));
+        // every owed card lands before the hands are scored
+        self.settle_owed(None, out);
         for seat in self.seats.iter_mut().filter(|s| !s.forfeited) {
             seat.score = Some(seat.slots.iter().flatten().map(|&v| i32::from(v)).sum());
         }
@@ -1429,6 +1532,14 @@ impl Game {
             .filter(|r| r.live(now))
             .map(|r| json!({ "seat": r.seat, "slot": r.slot, "until": r.until }))
             .collect();
+        // slots waiting for a matcher's card, and who owes it
+        let owed: Vec<Value> = self
+            .owed
+            .iter()
+            .map(|o| {
+                json!({ "from": self.seat_of(&o.player), "seat": o.seat, "slot": o.slot, "deadline": o.deadline })
+            })
+            .collect();
         json!({
             "status": self.status.as_str(),
             "seats": seats,
@@ -1445,6 +1556,7 @@ impl Game {
             "deck_count": self.deck.len(),
             "reveals": reveals,
             "peeked": peeked,
+            "owed": owed,
             "can_call": is_turn && self.may_call(self.turn).is_ok(),
             // a mid turn call stays the caller's until the turn ends
             "calling": is_turn && self.calling,
@@ -1943,13 +2055,7 @@ mod tests {
         act(&mut g, "p0", Action::Draw);
         act(&mut g, "p0", Action::Swap { slot: 3 }); // discards 5
         let seq = g.discard_seq;
-        let no_give = Action::Match {
-            seq,
-            seat: 1,
-            slot: 0,
-            give_slot: None,
-        };
-        assert_eq!(reject(&mut g, "p0", no_give), "invalid");
+        // a give card chosen up front lands with the match
         act(
             &mut g,
             "p0",
@@ -1962,6 +2068,122 @@ mod tests {
         );
         assert_eq!(g.seats[0].slots[0], None);
         assert_eq!(g.seats[1].slots[0], Some(1));
+        assert!(g.owed.is_empty());
+    }
+
+    /// When the card `owing` leaves owed is given for p0: its match settled
+    /// when its window closed.
+    const OWED_DUE: i64 = MATCH_WINDOW_MS + GIVE_MS;
+
+    /// p0 has matched p1's 5 in slot 0 without choosing a card to give.
+    fn owing() -> Game {
+        let mut g = playing(&[[1, 2, 3, 5], [5, 6, 7, 8]], 0, &[9, 6]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Swap { slot: 3 }); // discards 5
+        let seq = g.discard_seq;
+        let out = act(
+            &mut g,
+            "p0",
+            Action::Match {
+                seq,
+                seat: 1,
+                slot: 0,
+                give_slot: None,
+            },
+        );
+        let hit = out.events.iter().find(|e| e.kind == "match").unwrap();
+        assert_eq!(hit.payload["owes"], json!(true));
+        g
+    }
+
+    #[test]
+    fn a_match_on_another_players_card_is_given_for_after_it_lands() {
+        let mut g = owing();
+        assert_eq!(g.seats[1].slots[0], None);
+        assert_eq!(g.discard.last(), Some(&5));
+        assert_eq!(
+            g.owed,
+            vec![Owed {
+                player: "p0".into(),
+                seat: 1,
+                slot: 0,
+                deadline: OWED_DUE
+            }]
+        );
+        let view = g.view("p1", 0);
+        assert_eq!(
+            view["owed"],
+            json!([{ "from": 0, "seat": 1, "slot": 0, "deadline": OWED_DUE }])
+        );
+        // only the matcher gives, and only a card they hold
+        assert_eq!(reject(&mut g, "p1", Action::Give { slot: 1 }), "invalid");
+        g.seats[0].slots[2] = None;
+        assert_eq!(reject(&mut g, "p0", Action::Give { slot: 2 }), "invalid");
+        let out = act(&mut g, "p0", Action::Give { slot: 1 });
+        assert_eq!(g.seats[0].slots[1], None);
+        assert_eq!(g.seats[1].slots[0], Some(2));
+        assert!(g.owed.is_empty());
+        assert_eq!(out.events[0].kind, "give");
+        assert_eq!(
+            out.events[0].payload,
+            json!({ "seat": 0, "slot": 1, "target_seat": 1, "target_slot": 0 })
+        );
+        assert_eq!(reject(&mut g, "p0", Action::Give { slot: 0 }), "invalid");
+    }
+
+    #[test]
+    fn an_owed_card_blocks_matching_other_hands_until_given() {
+        let mut g = owing();
+        // p1 discards the 6 they draw, which p0 then tries for
+        act(&mut g, "p1", Action::Draw);
+        act(&mut g, "p1", Action::Discard);
+        let other = Action::Match {
+            seq: g.discard_seq,
+            seat: 1,
+            slot: 1,
+            give_slot: None,
+        };
+        assert_eq!(reject(&mut g, "p0", other.clone()), "invalid");
+        act(&mut g, "p0", Action::Give { slot: 0 });
+        act(&mut g, "p0", other);
+        assert_eq!(g.seats[1].slots[1], None);
+    }
+
+    #[test]
+    fn an_owed_card_is_given_from_the_highest_value_at_its_deadline() {
+        let mut g = owing();
+        // p0 holds 1, 2, 3, 9; a tied 9 in a later slot loses to slot 4
+        g.seats[0].slots.push(Some(9));
+        assert!(!g
+            .tick(OWED_DUE - 1, &present, &mut rng())
+            .events
+            .iter()
+            .any(|e| e.kind == "give"));
+        let out = g.tick(OWED_DUE, &present, &mut rng());
+        assert!(out.events.iter().any(|e| e.kind == "give"));
+        assert_eq!(g.seats[1].slots[0], Some(9));
+        assert_eq!(g.seats[0].slots[3], None);
+        assert_eq!(g.seats[0].slots[4], Some(9));
+        assert!(g.owed.is_empty());
+    }
+
+    #[test]
+    fn owed_cards_land_before_scoring_and_leave_with_a_forfeit() {
+        let mut g = owing();
+        let mut out = Outcome::default();
+        g.finish(&mut out);
+        assert_eq!(g.seats[1].slots[0], Some(9));
+        assert_eq!(g.seats[1].score, Some(9 + 6 + 7 + 8));
+
+        let mut g = owing();
+        g.forfeit("p1", 0);
+        assert!(g.owed.is_empty());
+        let mut g = owing();
+        g.seats[0].slots = vec![None; 4];
+        g.tick(OWED_DUE, &present, &mut rng());
+        // nothing left to give: the slot stays empty
+        assert!(g.owed.is_empty());
+        assert_eq!(g.seats[1].slots[0], None);
     }
 
     #[test]
@@ -2111,13 +2333,13 @@ mod tests {
             give_slot: None,
         };
         assert_eq!(reject(&mut g, "p0", stale), "too_late");
-        let no_give = Action::Match {
+        let empty = Action::Match {
             seq: g.discard_seq,
             seat: 1,
             slot: 0,
-            give_slot: None,
+            give_slot: Some(9),
         };
-        assert_eq!(reject(&mut g, "p0", no_give), "invalid");
+        assert_eq!(reject(&mut g, "p0", empty), "invalid");
         assert!(g.claims.is_empty());
 
         claim(&mut g, "p0", 100, 10, 0, 0);

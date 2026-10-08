@@ -16,7 +16,10 @@ test("joining loads the room and opens its socket", async (t) => {
   assert.ok(page.calls.some((c) => c.key === "POST /komino/api/rooms/ABCDEF/join"));
   assert.equal(page.$("code").textContent, "ABCDEF");
   assert.equal(page.socket.url, "wss://kominick.com/komino/r/ABCDEF/ws");
-  assert.equal(page.$("status").textContent, "your turn: draw from the deck or take the discard");
+  assert.equal(page.$("status").textContent, "your turn");
+  // what to do next sits above the buttons in the action bar (UI-33)
+  assert.equal(page.$("prompt").textContent, "draw from the deck or take the discard");
+  assert.equal(page.$("actionbar").hidden, false);
   assert.equal(page.doc.querySelectorAll(".hand").length, 2);
   assert.ok(page.doc.querySelector(".hand.mine.turn"));
 });
@@ -91,14 +94,14 @@ test("a drawn card is revealed sealed to the drawer, then swapped or discarded",
   await page.settle(() => page.$("drawn"));
   assert.deepEqual(page.reveals().map((r) => r.what), ["drawn"]);
   assert.ok(page.$("drawn").querySelector("svg"));
-  assert.match(page.$("status").textContent, /tap one of your cards to swap, or discard$/);
+  assert.equal(page.$("prompt").textContent, "tap one of your cards to swap, or discard");
   page.slot(0, 2).click();
   assert.equal(page.confirmText(), "swap the 8 into your card 3?");
   assert.ok(page.slot(0, 2).classList.contains("sel"));
   page.$("confirm-cancel").click();
   assert.equal(page.slot(0, 2).classList.contains("sel"), false);
   page.control("discard 8").click();
-  assert.equal(page.confirmText(), "discard the 8? you can match first, then use peek own");
+  assert.equal(page.confirmText(), "discard the 8? peek own does not start on its own: press use peek own after, or end turn");
   page.ok();
   assert.deepEqual(page.socket.sent, [{ ref: 1, type: "discard", turn_seq: 5 }]);
 });
@@ -135,7 +138,7 @@ test("the drawn card is forgotten once the turn moves on", async (t) => {
 
 test("a taken card must be swapped", async (t) => {
   const page = await playing(t, { stage: { kind: "taken", card: 4 } });
-  assert.match(page.$("status").textContent, /tap one of your cards to swap$/);
+  assert.equal(page.$("prompt").textContent, "tap one of your cards to swap");
   assert.equal(page.control("discard 4"), undefined);
   page.slot(0, 0).click();
   page.ok();
@@ -144,7 +147,7 @@ test("a taken card must be swapped", async (t) => {
 
 test("peek own takes only your own card", async (t) => {
   const page = await playing(t, { stage: { kind: "special", mv: "peek_own" }, matchable: false });
-  assert.match(page.$("status").textContent, /tap one of your cards to peek, or skip$/);
+  assert.equal(page.$("prompt").textContent, "tap one of your cards to peek, or skip");
   page.slot(1, 0).click();
   assert.equal(page.toast(), "that card can't be used for this move");
   assert.equal(page.confirmOpen(), false);
@@ -156,7 +159,7 @@ test("peek own takes only your own card", async (t) => {
 
 test("peek other takes only another player's card", async (t) => {
   const page = await playing(t, { stage: { kind: "special", mv: "peek_other" }, matchable: false });
-  assert.match(page.$("status").textContent, /tap another player's card to peek, or skip$/);
+  assert.equal(page.$("prompt").textContent, "tap another player's card to peek, or skip");
   page.slot(0, 0).click();
   assert.equal(page.toast(), "that card can't be used for this move");
   page.slot(1, 3).click();
@@ -165,7 +168,7 @@ test("peek other takes only another player's card", async (t) => {
 
 test("look and swap looks at any card, then swaps or keeps", async (t) => {
   const page = await playing(t, { stage: { kind: "special", mv: "look_swap" }, matchable: false });
-  assert.match(page.$("status").textContent, /tap any card to look at it, or skip$/);
+  assert.equal(page.$("prompt").textContent, "tap any card to look at it, or skip");
   page.slot(0, 0).click();
   assert.equal(page.confirmText(), "look at your card 1?");
   page.$("confirm-cancel").click();
@@ -174,7 +177,7 @@ test("look and swap looks at any card, then swaps or keeps", async (t) => {
   page.ok();
 
   page.push(makeView(makeGame({ stage: { kind: "looked", seat: 1, slot: 2 }, matchable: false, turn_seq: 6 })));
-  assert.match(page.$("status").textContent, /tap your card to swap with it, or keep yours$/);
+  assert.equal(page.$("prompt").textContent, "tap your card to swap with it, or keep yours");
   page.slot(1, 0).click();
   assert.equal(page.confirmOpen(), false);
   page.slot(0, 3).click();
@@ -191,12 +194,12 @@ test("look and swap looks at any card, then swaps or keeps", async (t) => {
 
 test("blind swap picks your card, then theirs", async (t) => {
   const page = await playing(t, { stage: { kind: "special", mv: "blind_swap" }, matchable: false });
-  assert.match(page.$("status").textContent, /tap your card, then another player's card, or skip$/);
+  assert.equal(page.$("prompt").textContent, "tap your card, then another player's card, or skip");
   page.slot(1, 0).click();
   assert.equal(page.toast(), "that card can't be used for this move");
   page.slot(0, 0).click();
   assert.equal(page.confirmOpen(), false);
-  assert.match(page.$("status").textContent, /now tap another player's card$/);
+  assert.equal(page.$("prompt").textContent, "now tap another player's card");
   assert.ok(page.slot(0, 0).classList.contains("sel"));
   // a second own tap changes the pick
   page.slot(0, 1).click();
@@ -212,22 +215,28 @@ test("blind swap picks your card, then theirs", async (t) => {
 
 test("a discarded special card waits: taps match, and the move is a button", async (t) => {
   const page = await playing(t, { stage: { kind: "earned", mv: "peek_other" }, discard_top: 9 });
-  assert.match(page.$("status").textContent, /your turn: match the discard, use peek other, or end your turn$/);
+  assert.equal(page.$("status").textContent, "your turn");
+  // the prompt says the move has not started and what a tap does (UI-22)
+  assert.equal(page.$("prompt").textContent,
+    "peek other is earned but not started: press use peek other to start it, or end turn. tapping a card now is a match attempt on the 9");
   // no match mode to enter: a tap on a card is already a match
   assert.deepEqual(page.controls(), ["use peek other", "end turn", "KOMINO"]);
+  assert.ok(page.control("use peek other").classList.contains("move-peek_other"));
   page.slot(1, 2).click();
-  assert.equal(page.toast(), "now tap one of your cards to give");
-  page.slot(0, 0).click();
-  assert.equal(page.confirmText(), "match bob's card 3 with the 9, giving your card 1?");
+  assert.equal(page.confirmText(),
+    "match bob's card 3 with the 9? this is a match attempt, not peek other. if you're right, you then give them one of your cards.");
   page.ok();
+  page.slot(0, 1).click();
+  assert.equal(page.confirmText(), "match your card 2 with the 9? this is a match attempt, not peek other.");
+  page.$("confirm-cancel").click();
   page.control("use peek other").click();
-  assert.equal(page.confirmText(), "use peek other now?");
+  assert.equal(page.confirmText(), "start peek other now? you then pick its card.");
   page.ok();
   page.control("end turn").click();
   assert.equal(page.confirmText(), "end your turn without using peek other?");
   page.ok();
   assert.deepEqual(page.socket.sent, [
-    { ref: 1, type: "match", seq: 2, seat: 1, slot: 2, give_slot: 0, reaction_ms: 0 },
+    { ref: 1, type: "match", seq: 2, seat: 1, slot: 2, reaction_ms: 0 },
     { ref: 2, type: "use_special", turn_seq: 5 },
     { ref: 3, type: "skip", turn_seq: 5 },
   ]);

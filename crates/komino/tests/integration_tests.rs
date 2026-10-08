@@ -567,6 +567,42 @@ async fn test_tick_settles_an_abandoned_claim() {
     assert_eq!(view["events"][0]["payload"]["ok"], true);
 }
 
+/// A card a matcher never chose to give is given for them on the timer
+/// pass after its deadline (RULE-19).
+#[tokio::test]
+async fn test_tick_gives_an_owed_card_once_due() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let host_id = me(&host).await;
+    set_game(&state, &code, |g| {
+        g.status = Status::Playing;
+        g.ready_deadline = None;
+        let mine = g.seat_of(&host_id).unwrap();
+        g.seats[mine].slots = vec![None, Some(3), Some(9), Some(4)];
+        g.seats[1 - mine].slots[2] = None;
+        g.owed = vec![komino::game::Owed {
+            player: host_id.clone(),
+            seat: 1 - mine,
+            slot: 2,
+            deadline: 0,
+        }];
+    })
+    .await;
+    komino::models::tick_all(&state.db).await.unwrap();
+    let g = game_state(&state, &code).await;
+    let mine = g.seat_of(&host_id).unwrap();
+    let theirs = 1 - mine;
+    assert!(g.owed.is_empty());
+    // the highest card goes, not the lowest slot
+    assert_eq!(g.seats[mine].slots[2], None);
+    assert_eq!(g.seats[theirs].slots[2], Some(9));
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["events"][0]["kind"], "give");
+}
+
 /// The game row's version, which every save bumps.
 async fn game_version(state: &State, code: &str) -> i64 {
     sqlx::query_scalar(
