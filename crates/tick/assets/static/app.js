@@ -56,6 +56,81 @@
     text: "#8fa99a",
   };
 
+  /**
+   * What each graph and value shows (TICK-26), opened from its i button
+   * (`data-info` names the entry). Each body entry is one paragraph.
+   */
+  const INFO = {
+    status: {
+      title: "Status",
+      body: [
+        "idle: nothing is running. listening: sound is coming in, but no beat rate yet (it needs about 8 beats in a steady rhythm). measuring: the beat rate is known and the averaging window is still filling, so the rate is provisional. locked: the window is full and the rate is settled. analyzed: a finished recording or file is on show instead of live input.",
+      ],
+    },
+    rate: {
+      title: "Rate",
+      body: [
+        "How many seconds a day the watch gains (+, fast) or loses (-, slow) at the rate it is running now. Live, it is fit over the beats in the averaging window, and it is dimmed until that window has filled. For a recording or file, it is one fit over the whole of it.",
+        "It comes from beat timing alone: each beat's time is compared with where a perfect watch at the nominal beat rate would put it, and the slope of that drift is the rate. +10 s/d means each beat comes about 0.012% early.",
+        "As a rough guide, chronometer certification allows -4 to +6 s/d, many modern movements run within about 10 s/d, and older or unserviced watches can be off by 30 s/d or more. Rate changes with position (dial up, crown down, and so on) and with how wound the mainspring is, so time it in a few positions for the full picture.",
+        "A computer's sound card clock can itself be off by a few s/d. Time a watch you trust and enter the difference as mic correction to cancel it out.",
+      ],
+    },
+    "beat-error": {
+      title: "Beat error",
+      body: [
+        "How unevenly the tick and the tock are spaced, in milliseconds. A balance that is in beat swings equally far either side of its rest point, so each beat lands exactly halfway between its neighbours and beat error is 0.",
+        "As a rough guide, under 0.5 ms is very good and under 1 ms is fine. Above about 3 ms a watchmaker would usually put the watch back in beat; a watch far out of beat can stop more easily as it runs down.",
+        "On the beat trace, beat error is the gap between the tick (amber) and tock (teal) lines. It does not affect the rate.",
+      ],
+    },
+    bph: {
+      title: "Beat rate",
+      body: [
+        "Beats per hour: how many ticks and tocks the movement makes in an hour, fixed by its design. Common rates are 18000 (5 a second, many vintage watches), 21600 (6), 28800 (8, most modern watches), and 36000 (10, high beat).",
+        "auto means it was found from the gaps between beats. If it picks the wrong one (say double the real rate, when every tick and tock is heard twice), choose the right rate in the beat rate setting.",
+      ],
+    },
+    beats: {
+      title: "Beats",
+      body: [
+        "Live: the beats counted since the beat rate locked. For a recording or file: the beats in the longest unbroken run, which is what its rate is fit over.",
+        "A missed beat does no harm: each beat is placed by its position in the sequence, so gaps are bridged. Only a silence of more than 3 seconds starts the count over.",
+      ],
+    },
+    input: {
+      title: "Input",
+      body: [
+        "How loud the microphone signal is, in dB below full scale, after a filter that keeps only sound above 2 kHz, where watch ticks are and most room noise is not.",
+        "The grey mark is the noise floor (the room's background level) and the amber mark is the trigger threshold. Ticks should peak past the amber mark while the background stays below it. If they don't, move the watch closer to the microphone or raise the sensitivity.",
+        "Sounds far louder than the ticks (a knock, a bump, a voice) are ignored rather than counted as beats; the line under the meter counts them. If it counts up with every tick instead, quieter sounds are being taken for beats and the real ticks for noise: lower the sensitivity or quiet the room.",
+      ],
+    },
+    "rate-graph": {
+      title: "Rate graph",
+      body: [
+        "The rate over time in s/d. Zero is the line across the middle; fast is above (green tint) and slow below (red tint). Live, time runs left to right with the newest reading at the right edge; for a recording or file, the graph spans the whole recording from its start.",
+        "Each point is the rate over the averaging window ending at that beat, so the line moves smoothly. While the window is still filling, the line is dashed and dim. The vertical scale grows to fit the readings shown.",
+        "A real watch's rate wanders a few s/d from second to second as the gear train turns and the balance swing varies. A longer averaging window smooths that out.",
+      ],
+    },
+    trace: {
+      title: "Beat trace",
+      body: [
+        "One dot per beat, on the same time axis as the rate graph. The height is how early (up) or late (down) the beat came compared with a perfect watch at the nominal beat rate, in milliseconds. Amber dots are ticks and teal dots are tocks.",
+        "A watch on time draws flat lines. A fast watch's beats come earlier and earlier, so the lines climb; a slow watch's lines fall. The steeper the lines, the bigger the rate.",
+        "The gap between the amber and teal lines is the beat error. Dots scattered away from the lines are beats caught on noise or a weak pickup.",
+      ],
+    },
+    scope: {
+      title: "Beat scope",
+      body: [
+        "The sound of the last 16 beats overlaid, aligned where each was detected, from 2 ms before to 30 ms after (filtered above 2 kHz). The newest is brightest; amber is a tick and teal is a tock.",
+        "A clean beat shows a few distinct bursts within some milliseconds of each other: the escapement unlocking, the impulse to the balance, and the drop as the escape wheel locks again. Shapes that overlay neatly mean a steady pickup. Messy or changing shapes mean noise reaching the microphone, or a watch that may need attention. Ticks and tocks looking somewhat different from each other is normal.",
+      ],
+    },
+  };
+
   /** Settings from storage, with anything missing or invalid at its default. */
   function sanitize(s) {
     const out = { ...DEFAULTS };
@@ -136,6 +211,10 @@
       open: $("open"),
       file: $("file"),
       rateLabel: $("rate-label"),
+      info: $("info"),
+      infoTitle: $("info-title"),
+      infoBody: $("info-body"),
+      infoClose: $("info-close"),
       bph: $("set-bph"),
       average: $("set-average"),
       span: $("set-span"),
@@ -842,6 +921,30 @@
     }
 
     // ---------------------------------------------------------------------
+    // info dialogs (TICK-26)
+    // ---------------------------------------------------------------------
+
+    function openInfo(key) {
+      const info = INFO[key];
+      el.infoTitle.textContent = info.title;
+      el.infoBody.replaceChildren(
+        ...info.body.map((text) => {
+          const p = doc.createElement("p");
+          p.textContent = text;
+          return p;
+        }),
+      );
+      if (el.info.showModal) el.info.showModal();
+      else el.info.setAttribute("open", "");
+      el.infoClose.focus();
+    }
+
+    function closeInfo() {
+      if (el.info.close) el.info.close();
+      else el.info.removeAttribute("open");
+    }
+
+    // ---------------------------------------------------------------------
     // wiring
     // ---------------------------------------------------------------------
 
@@ -877,6 +980,18 @@
       el.stop.addEventListener("click", stop);
       el.record.addEventListener("click", startRecording);
       el.open.addEventListener("click", () => el.file.click());
+      for (const b of doc.querySelectorAll("[data-info]")) {
+        b.addEventListener("click", () => openInfo(b.dataset.info));
+      }
+      el.infoClose.addEventListener("click", closeInfo);
+      // a click on the backdrop lands on the dialog itself, not its content
+      el.info.addEventListener("click", (e) => {
+        if (e.target === el.info) closeInfo();
+      });
+      // a native modal closes on escape by itself; this covers the fallback
+      doc.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && el.info.hasAttribute("open")) closeInfo();
+      });
       el.file.addEventListener("change", () => {
         const file = el.file.files && el.file.files[0];
         // cleared so picking the same file again still fires a change
@@ -911,7 +1026,7 @@
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createTick, sanitize, pickRange, fmtRate, toDb, meterPct, encodeWav, DEFAULTS };
+    module.exports = { createTick, sanitize, pickRange, fmtRate, toDb, meterPct, encodeWav, DEFAULTS, INFO };
   } else {
     createTick(root).start();
   }

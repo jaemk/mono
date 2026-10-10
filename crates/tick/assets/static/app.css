@@ -347,6 +347,73 @@ canvas {
   min-height: 1em;
 }
 
+.label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+button.info {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--dim);
+  background: transparent;
+  color: var(--dim);
+  font: italic 700 11px/14px Georgia, "Times New Roman", serif;
+  text-transform: none;
+  letter-spacing: 0;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+button.info:hover,
+button.info:focus-visible {
+  border-color: var(--phosphor);
+  color: var(--phosphor);
+}
+
+.label-row button.info {
+  margin-left: 0;
+}
+
+.info-dialog {
+  width: min(36rem, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  padding: 0;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.info-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.info-content {
+  padding: 16px 20px 18px;
+}
+
+.info-content h3 {
+  margin: 0 0 10px;
+  color: var(--phosphor);
+  font: 600 16px var(--mono);
+}
+
+.info-content p {
+  margin: 0 0 10px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#info-close {
+  margin-top: 4px;
+}
+
 .help {
   margin-top: 18px;
   max-width: 72ch;

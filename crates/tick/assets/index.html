@@ -12,6 +12,7 @@
     <a class="brand" href="/tick">tick</a>
     <span class="sub">watch timegrapher</span>
     <span id="status" class="status" data-state="idle">idle</span>
+    <button class="info" data-info="status" aria-label="about the status">i</button>
   </header>
 
   <main>
@@ -72,29 +73,30 @@
 
     <div class="grid">
       <section class="panel rate-panel">
-        <h2>rate <span class="hint">s/d, fast up, slow down</span></h2>
+        <h2>rate <span class="hint">s/d, fast up, slow down</span>
+          <button class="info" data-info="rate-graph" aria-label="about the rate graph">i</button></h2>
         <canvas id="rate-canvas" width="900" height="280" aria-label="rate over time"></canvas>
       </section>
 
       <section class="panel readout" aria-live="polite">
         <div class="metric big">
-          <span id="rate-label" class="label">rate</span>
+          <span class="label-row"><span id="rate-label" class="label">rate</span><button class="info" data-info="rate" aria-label="about the rate">i</button></span>
           <span class="value"><span id="rate">--</span><span class="unit">s/d</span></span>
         </div>
         <div class="metric">
-          <span class="label">beat error</span>
+          <span class="label-row"><span class="label">beat error</span><button class="info" data-info="beat-error" aria-label="about beat error">i</button></span>
           <span class="value"><span id="beat-error">--</span><span class="unit">ms</span></span>
         </div>
         <div class="metric">
-          <span class="label">beat rate</span>
+          <span class="label-row"><span class="label">beat rate</span><button class="info" data-info="bph" aria-label="about the beat rate">i</button></span>
           <span class="value"><span id="bph">--</span><span class="unit">bph</span></span>
         </div>
         <div class="metric">
-          <span class="label">beats</span>
+          <span class="label-row"><span class="label">beats</span><button class="info" data-info="beats" aria-label="about beats">i</button></span>
           <span class="value"><span id="beats">0</span></span>
         </div>
         <div class="metric input-meter">
-          <span class="label">input <span id="meter-db">--</span></span>
+          <span class="label-row"><span class="label">input <span id="meter-db">--</span></span><button class="info" data-info="input" aria-label="about the input meter">i</button></span>
           <div class="meter" title="input level; marks: noise floor (grey) and trigger threshold (amber)">
             <div id="meter-level" class="meter-level"></div>
             <div id="meter-noise" class="meter-mark noise"></div>
@@ -105,12 +107,14 @@
       </section>
 
       <section class="panel trace-panel">
-        <h2>beat trace <span class="hint">ms early, <i class="even">tick</i> <i class="odd">tock</i></span></h2>
+        <h2>beat trace <span class="hint">ms early, <i class="even">tick</i> <i class="odd">tock</i></span>
+          <button class="info" data-info="trace" aria-label="about the beat trace">i</button></h2>
         <canvas id="trace-canvas" width="900" height="170" aria-label="beat trace"></canvas>
       </section>
 
       <section class="panel scope-panel">
-        <h2>beat scope <span class="hint">last 16, ms from onset</span></h2>
+        <h2>beat scope <span class="hint">last 16, ms from onset</span>
+          <button class="info" data-info="scope" aria-label="about the beat scope">i</button></h2>
         <canvas id="scope-canvas" width="300" height="170" aria-label="beat waveforms"></canvas>
       </section>
     </div>
@@ -129,6 +133,14 @@
       for an audio file you already have. Changing a setting reads the same audio again.
     </p>
   </main>
+
+  <dialog id="info" class="info-dialog" aria-labelledby="info-title">
+    <div class="info-content">
+      <h3 id="info-title"></h3>
+      <div id="info-body"></div>
+      <button id="info-close">close</button>
+    </div>
+  </dialog>
 
   <script src="/tick/static/detector.js"></script>
   <script src="/tick/static/app.js"></script>

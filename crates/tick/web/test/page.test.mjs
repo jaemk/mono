@@ -391,6 +391,56 @@ test("long files are analyzed up to 5 minutes; a newer source wins over a slow d
   assert.match(p.$("error").textContent, /Could not read x\.wav as audio/);
 });
 
+test("each i button explains what it sits on, in a dialog that closes (TICK-26)", () => {
+  const p = boot();
+  const buttons = [...p.win.document.querySelectorAll("[data-info]")];
+  // one button per entry, and every graph and value has one
+  assert.deepEqual(buttons.map((b) => b.dataset.info).sort(), Object.keys(tick.INFO).sort());
+  for (const key of ["status", "rate", "beat-error", "bph", "beats", "input", "rate-graph", "trace", "scope"]) {
+    assert.ok(tick.INFO[key], key);
+  }
+  for (const b of buttons) assert.match(b.getAttribute("aria-label"), /^about /);
+
+  const dialog = p.$("info");
+  for (const b of buttons) {
+    const info = tick.INFO[b.dataset.info];
+    b.dispatchEvent(new p.win.MouseEvent("click"));
+    assert.ok(dialog.hasAttribute("open"), b.dataset.info);
+    assert.equal(p.$("info-title").textContent, info.title);
+    assert.deepEqual(
+      [...p.$("info-body").querySelectorAll("p")].map((x) => x.textContent),
+      info.body,
+    );
+    assert.equal(p.win.document.activeElement, p.$("info-close"));
+    p.click("info-close");
+    assert.ok(!dialog.hasAttribute("open"));
+  }
+
+  // a click in the content keeps it open; one on the backdrop (the dialog
+  // itself) closes it
+  buttons[0].dispatchEvent(new p.win.MouseEvent("click"));
+  p.$("info-body").dispatchEvent(new p.win.MouseEvent("click", { bubbles: true }));
+  assert.ok(dialog.hasAttribute("open"));
+  dialog.dispatchEvent(new p.win.MouseEvent("click"));
+  assert.ok(!dialog.hasAttribute("open"));
+  // escape closes it; other keys and a closed dialog are left alone
+  buttons[0].dispatchEvent(new p.win.MouseEvent("click"));
+  p.win.document.dispatchEvent(new p.win.KeyboardEvent("keydown", { key: "a" }));
+  assert.ok(dialog.hasAttribute("open"));
+  p.win.document.dispatchEvent(new p.win.KeyboardEvent("keydown", { key: "Escape" }));
+  assert.ok(!dialog.hasAttribute("open"));
+  p.win.document.dispatchEvent(new p.win.KeyboardEvent("keydown", { key: "Escape" }));
+  assert.ok(!dialog.hasAttribute("open"));
+
+  // a browser with native modal dialogs uses them
+  const calls = [];
+  dialog.showModal = () => calls.push("showModal");
+  dialog.close = () => calls.push("close");
+  buttons[1].dispatchEvent(new p.win.MouseEvent("click"));
+  p.click("info-close");
+  assert.deepEqual(calls, ["showModal", "close"]);
+});
+
 test("pickRange and fmtRate", () => {
   assert.equal(tick.pickRange(0), 5);
   assert.equal(tick.pickRange(4.3), 5);

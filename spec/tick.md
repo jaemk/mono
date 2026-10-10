@@ -204,6 +204,13 @@ The beat rate select, averaging window, visible span, sensitivity, and mic corre
 `localStorage` under `tick.settings`. Storage that throws or holds bad json falls back to the
 defaults.
 
+### TICK-26
+Each graph (rate, beat trace, beat scope), each readout value (rate, beat error, beat rate,
+beats, input), and the status has a small `i` button. It opens a modal dialog explaining what
+is shown and how to read it, with typical values where they help. The dialog closes with its
+close button, a click on the backdrop, or escape, and falls back to an open attribute where
+the browser has no modal dialog.
+
 ### TICK-19
 Below 640px wide the scope stacks under the beat trace. The graphs redraw at device pixel
 ratio on every animation frame while a source runs.
