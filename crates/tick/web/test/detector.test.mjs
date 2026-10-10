@@ -293,6 +293,52 @@ test("a burst of stray clicks does not relock the beat rate", () => {
   assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - 7) < 0.3);
 });
 
+/**
+ * 20 s of an 18000 bph watch at +100 s/d with clicks about 12 a second at
+ * random, each at `lo` to `hi` of the ticks' level.
+ */
+function clicky(detOpts, lo, hi) {
+  const det = D.createDetector({ sampleRate: SR, ...detOpts });
+  const watch = D.synth({ sampleRate: SR, bph: 18000, rate: 100, amp: 0.05, noise: 0.002 });
+  const click = D.synth({ sampleRate: SR, bph: 12000, start: 0, noise: 0, amp: 0.05 }).next(600);
+  let seed = 5;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const events = [];
+  let nextClick = Math.round(0.5 * SR);
+  let gain = lo;
+  for (let at = 0; at < 20 * SR; at += 2048) {
+    const block = watch.next(2048);
+    for (let j = 0; j < 2048; j++) {
+      const off = at + j - nextClick;
+      if (off >= 0 && off < click.length) block[j] += gain * click[off];
+      if (off === click.length) {
+        nextClick = at + j + Math.round((0.02 + 0.14 * rand()) * SR);
+        gain = lo + (hi - lo) * rand();
+      }
+    }
+    events.push(...det.push(block));
+  }
+  return { det, events };
+}
+
+test("quieter clicks between ticks don't make the ticks look like knocks", () => {
+  // auto: the lock clears the beat peaks, and the clicks come in first
+  const { det, events } = clicky({}, 0.1, 0.2);
+  assert.ok(det.levels().rejected <= 2, `${det.levels().rejected} ticks ignored as loud`);
+  const indexed = events.filter((e) => e.type === "beat" && e.n !== null && !e.replaced);
+  // 5 beats/s for the ~18 s after the lock, nearly all kept
+  assert.ok(indexed.length >= 88, `${indexed.length} beats`);
+  const r = last(events.filter((e) => e.type === "reading"));
+  assert.ok(Math.abs(r.rate - 100) < 1, `rate ${r.rate}`);
+});
+
+test("a fit that indexed clicks as beats starts over instead of reading thousands of s/d", () => {
+  // clicks up to half the ticks' level get some onsets indexed as beats
+  const { events } = clicky({ bph: 18000 }, 0.1, 0.5);
+  const readings = events.filter((e) => e.type === "reading");
+  for (const r of readings) assert.ok(Math.abs(r.rate) <= 1500, `rate ${r.rate} at ${r.t}`);
+});
+
 test("a stray click before a beat does not hold off the beat", () => {
   const det = D.createDetector({ sampleRate: SR });
   const bph = 18000;
@@ -337,6 +383,29 @@ test("robustFit refits until the outliers stop changing", () => {
   const rate = (f) => 86400 * (0.2 / f.b - 1);
   const f = D.robustFit(beats);
   assert.ok(Math.abs(rate(f) - 100) < 1e-6, `robust fit ${rate(f)}`);
+});
+
+test("analyze fits the longest unbroken run of beats", () => {
+  const gen = D.synth({ sampleRate: SR, bph: 21600, rate: -8, beatError: 0.6 });
+  const quiet = D.synth({ sampleRate: SR, amp: 0, noise: 0.002, seed: 9 });
+  // 3 s of beats, a 4 s silence that restarts indexing, then 8 s more
+  const parts = [gen.next(3 * SR), quiet.next(4 * SR), gen.next(8 * SR)];
+  const samples = new Float32Array(15 * SR);
+  parts.reduce((at, p) => (samples.set(p, at), at + p.length), 0);
+  const { summary, duration, events } = D.analyze(samples, { sampleRate: SR, bph: 21600, average: 4 });
+  assert.equal(duration, 15);
+  assert.equal(summary.bph, 21600);
+  assert.equal(summary.auto, false);
+  assert.ok(Math.abs(summary.rate + 8) < 0.3, `rate ${summary.rate}`);
+  assert.ok(Math.abs(summary.beatError - 0.6) < 0.05);
+  // the 8 s run, not the 3 s one
+  assert.ok(summary.span > 7 && summary.span < 8, `span ${summary.span}`);
+  assert.ok(events.filter((e) => e.type === "beat").some((b) => b.n === 0 && b.t > 7));
+
+  // nothing to read
+  const none = D.analyze(new Float32Array(SR), { sampleRate: SR });
+  assert.deepEqual(none, { events: [], duration: 1, summary: null });
+  assert.equal(D.analyze(new Float32Array(48000)).duration, 1);
 });
 
 test("robustFit leaves a beat caught late out of the fit", () => {

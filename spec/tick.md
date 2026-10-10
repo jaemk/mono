@@ -82,8 +82,11 @@ silence that restarts the fit starts the window over.
 ### TICK-20
 Once the beat rate is locked and at least 4 beats are in, an onset peaking over 4x the median
 beat peak is a knock: it is not a beat, is counted as ignored, and the detector listens again
-right away. Six in a row mean the watch itself got louder; the sixth is accepted and the beat
-peaks start over from it.
+right away. Only onsets taken as beats (not ones dropped as noise, TICK-11) count toward the
+beat peaks, so quieter clicks between ticks can't pull the median down until the ticks look
+like knocks. Six loud onsets within 2 seconds mean the watch itself is louder than the beat
+peaks say (moved closer, or the peaks had filled with quieter clicks); the sixth is accepted
+and the beat peaks start over from it.
 
 ### TICK-21
 `sensitivity` sets how far over the noise floor a trigger must reach, as a multiple of it:
@@ -143,7 +146,9 @@ and -1 for odd beats. With nominal period `P`:
 A reading needs at least 6 beats spanning at least 1 second, and is produced on every beat
 after that. Beats that miss the fit by more than 0.5 ms and 5x the median miss (a beat caught
 on its drop sound, a stray click) are left out and the fit is run again, until the beats left
-out stop changing (at most 3 refits), unless fewer than 6 beats would remain.
+out stop changing (at most 3 refits), unless fewer than 6 beats would remain. A fit more than
+1500 s/d off nominal has indexed noise as beats: it gives no reading, and the fit and indexing
+start over from the next beat.
 
 ### TICK-13
 Changing the beat rate, starting a source, or restarting the fit after a relock clears the

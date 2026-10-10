@@ -30,7 +30,11 @@
   // an onset this many times the median beat peak is a knock, not a beat
   const LOUD_MULT = 4;
   const LOUD_MIN_BEATS = 4;
+  // this many loud onsets within LOUD_WINDOW s are the watch, not knocks
   const LOUD_STREAK = 6;
+  const LOUD_WINDOW = 2;
+  // a fit further off nominal than this (s/d) has indexed noise, not a watch
+  const MAX_RATE = 1500;
   // filter settle time before onsets count
   const WARMUP = 0.1;
   const PRE = 0.002;
@@ -208,6 +212,7 @@
     const loudA = Math.exp(-1 / (NOISE_LOUD_TAU * sr));
     const sustainedN = Math.round(SUSTAINED * sr);
     const silenceN = Math.round(MAX_SILENCE * sr);
+    const loudWindowN = Math.round(LOUD_WINDOW * sr);
     const preN = Math.round(PRE * sr);
     const postN = Math.round(POST * sr);
     const lookN = Math.round(LOOKBACK * sr);
@@ -230,7 +235,8 @@
     let pending = [];
     let level = 0;
     let rejected = 0;
-    let loudStreak = 0;
+    // sample positions of recent onsets rejected as loud
+    let loudAt = [];
 
     let period = null;
     let auto = bphSetting === "auto";
@@ -294,6 +300,7 @@
       if (best.score <= AUTO_FIT) lock(best.bph, true);
     }
 
+    /** Take an onset; false when it is dropped as noise rather than a beat. */
     function onBeat(t, peakAmp, wave) {
       if (lastOnset !== null) {
         intervals.push(t - lastOnset);
@@ -304,17 +311,17 @@
       const beat = { type: "beat", t, n: null, parity: null, offsetMs: null, peak: peakAmp, wave };
       if (period === null) {
         events.push(beat);
-        return;
+        return true;
       }
       if (prev && t - prev.t > MAX_SILENCE) resetFit();
       let n = 0;
       if (prev) {
         n = indexAt(t);
-        if (n < prev.n) return;
+        if (n < prev.n) return false;
         if (n === prev.n) {
           // two onsets in one beat: keep the one nearer where the fit
           // expects it (before a fit, the first)
-          if (!model || Math.abs(t - fitAt(model, n)) >= Math.abs(prev.t - fitAt(model, n))) return;
+          if (!model || Math.abs(t - fitAt(model, n)) >= Math.abs(prev.t - fitAt(model, n))) return false;
           beats.pop();
           beat.replaced = true;
         }
@@ -332,6 +339,7 @@
       while (beats.length && beats[0].t < t - average) beats.shift();
       const reading = readingAt(t);
       if (reading) events.push(reading);
+      return true;
     }
 
     function readingAt(t) {
@@ -339,6 +347,12 @@
       if (beats[beats.length - 1].t - beats[0].t < MIN_READ_SPAN) return null;
       const f = robustFit(beats);
       if (!f) return null;
+      if (Math.abs(86400 * (period / f.b - 1)) > MAX_RATE) {
+        // noise got indexed as beats; start the fit over rather than let a
+        // wrong fit index what comes next
+        resetFit();
+        return null;
+      }
       model = f;
       // beats older than the window are dropped, so a full window spans just
       // under it
@@ -387,26 +401,30 @@
       if (pending.length && pos >= pending[0].at + postN) {
         const p = pending.shift();
         const loud = period !== null && peaks.length >= LOUD_MIN_BEATS && p.envPeak > LOUD_MULT * peakRef;
-        if (loud && loudStreak < LOUD_STREAK) {
+        if (loud) loudAt = loudAt.filter((at) => pos - at < loudWindowN);
+        if (loud && loudAt.length < LOUD_STREAK - 1) {
           // a knock: skip it and listen again right away
           rejected++;
-          loudStreak++;
+          loudAt.push(pos);
           armedAt = pos;
         } else {
           if (loud) {
-            // loud every time: the watch itself got louder (moved closer)
+            // loud again and again: the watch itself (moved closer, or the
+            // beat peaks had filled with quieter noise)
             peaks = [];
+            loudAt = [];
           }
-          loudStreak = 0;
           const wave = new Float32Array(preN + postN);
           const start = p.at - preN;
           for (let i = 0; i < wave.length; i++) wave[i] = ring[(start + i) & mask];
-          peaks.push(p.envPeak);
-          if (peaks.length > PEAKS) peaks.shift();
-          const sorted = [...peaks].sort((a, b) => a - b);
-          peakRef = sorted[sorted.length >> 1];
           lastBeatAt = pos;
-          onBeat(timeBeat(p) / sr, p.envPeak, wave);
+          // only onsets taken as beats set the beat peaks
+          if (onBeat(timeBeat(p) / sr, p.envPeak, wave)) {
+            peaks.push(p.envPeak);
+            if (peaks.length > PEAKS) peaks.shift();
+            const sorted = [...peaks].sort((a, b) => a - b);
+            peakRef = sorted[sorted.length >> 1];
+          }
         }
       }
       pos++;
@@ -484,6 +502,56 @@
     };
   }
 
+  /**
+   * Run a whole recording through a detector (TICK-25). Returns the detector's
+   * `events` as live, the recording's `duration` in s, and a `summary` fit
+   * over the longest unbroken run of indexed beats (`{ rate, beatError, bph,
+   * auto, beats, span }`), or null without a reading.
+   */
+  function analyze(samples, opts = {}) {
+    const sr = opts.sampleRate || 48000;
+    const det = createDetector({ ...opts, sampleRate: sr });
+    const events = [];
+    for (let i = 0; i < samples.length; i += 2048) events.push(...det.push(samples.subarray(i, i + 2048)));
+    // runs of indexed beats, split where a lock or a silence restarts indexing
+    let runs = [];
+    let run = [];
+    // a fixed rate locks when the detector is made, before any event
+    let lock = opts.bph && opts.bph !== "auto" ? { bph: opts.bph, auto: false } : null;
+    for (const ev of events) {
+      if (ev.type === "lock") {
+        lock = ev;
+        runs = [];
+        run = [];
+      } else if (ev.type === "beat" && ev.n !== null) {
+        if (ev.replaced) run.pop();
+        else if (run.length && ev.n <= run[run.length - 1].n) {
+          runs.push(run);
+          run = [];
+        }
+        run.push({ t: ev.t, n: ev.n });
+      }
+    }
+    runs.push(run);
+    const best = runs.reduce((a, b) => (b.length > a.length ? b : a));
+    const duration = samples.length / sr;
+    const f = best.length >= MIN_READ_BEATS && best[best.length - 1].t - best[0].t >= MIN_READ_SPAN && robustFit(best);
+    if (!f) return { events, duration, summary: null };
+    const period = periodOf(lock.bph);
+    return {
+      events,
+      duration,
+      summary: {
+        rate: 86400 * (period / f.b - 1) + (opts.correction || 0),
+        beatError: 2 * Math.abs(f.h) * 1000,
+        bph: lock.bph,
+        auto: lock.auto,
+        beats: best.length,
+        span: best[best.length - 1].t - best[0].t,
+      },
+    };
+  }
+
   /** Seeded PRNG (mulberry32) in [0, 1). */
   function prng(seed) {
     let a = seed >>> 0;
@@ -555,7 +623,7 @@
     return { next, sampleRate: sr };
   }
 
-  const api = { BPH, SENSITIVITY, createDetector, synth, scorePeriod, bestBph, fit, robustFit, highpass, periodOf };
+  const api = { BPH, SENSITIVITY, createDetector, analyze, synth, scorePeriod, bestBph, fit, robustFit, highpass, periodOf };
   if (typeof module === "object" && module.exports) {
     module.exports = api;
   } else {

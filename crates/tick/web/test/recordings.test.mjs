@@ -56,6 +56,18 @@ for (const [name, rate, bandLo, bandHi] of [
     assert.ok(det.levels().rejected <= 3);
   });
 
+  test(`${name}: analyze sums up the whole recording`, () => {
+    const { sampleRate, samples } = readWav(name);
+    const a = D.analyze(samples, { sampleRate, correction: 1 });
+    assert.equal(a.duration, 30);
+    assert.equal(a.summary.bph, 18000);
+    assert.equal(a.summary.auto, true);
+    assert.ok(Math.abs(a.summary.rate - 1 - rate) < 1, `rate ${a.summary.rate}`);
+    assert.ok(a.summary.beatError > 3.5 && a.summary.beatError < 4.5);
+    assert.ok(a.summary.beats >= 135 && a.summary.span > 25);
+    assert.ok(a.events.some((e) => e.type === "reading"));
+  });
+
   test(`${name}: every sensitivity reads it`, () => {
     for (const sensitivity of Object.keys(D.SENSITIVITY)) {
       const { of, readings } = run(name, { average: 30, sensitivity });
