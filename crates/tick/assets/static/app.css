@@ -61,16 +61,52 @@ body {
   background: currentColor;
 }
 
-.status[data-state="listening"] {
+.status[data-state="listening"],
+.focus-status[data-state="listening"] {
   color: var(--even);
 }
 
-.status[data-state="measuring"] {
+.status[data-state="measuring"],
+.focus-status[data-state="measuring"] {
   color: var(--odd);
 }
 
-.status[data-state="analyzed"] {
+.status[data-state="analyzed"],
+.focus-status[data-state="analyzed"] {
   color: var(--text);
+}
+
+/* the beat rate opens its picker (TICK-37) */
+.bph-button {
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dashed var(--dim);
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.bph-button[data-doubt] {
+  color: var(--bad);
+  border-bottom-color: var(--bad);
+}
+
+.bph-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.bph-choices button[aria-pressed="true"] {
+  border-color: var(--phosphor);
+  color: var(--phosphor);
+}
+
+.bph-choices #bph-hold {
+  grid-column: 1 / -1;
 }
 
 #rate-label {
@@ -96,7 +132,8 @@ body {
   color: var(--bad);
 }
 
-.status[data-state="locked"] {
+.status[data-state="locked"],
+.focus-status[data-state="locked"] {
   color: var(--phosphor);
 }
 
@@ -589,6 +626,14 @@ button.info:focus-visible {
 
 .focus-sub {
   font-size: min(6vw, 7vh);
+}
+
+.focus-detail {
+  min-height: 1.4em;
+  padding: 0 16px;
+  text-align: center;
+  font-size: 15px;
+  color: var(--dim);
 }
 
 .focus-buttons {

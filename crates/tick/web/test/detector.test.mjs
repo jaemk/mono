@@ -162,6 +162,45 @@ test("auto relocks when the watch changes beat rate", () => {
   assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - 4) < 0.5);
 });
 
+test("auto doubts a rate that stops fitting until it relocks (TICK-37)", () => {
+  const det = D.createDetector({ sampleRate: SR });
+  const a = D.synth({ sampleRate: SR, bph: 28800 });
+  for (let i = 0; i < 6 * SR; i += 2048) det.push(a.next(2048));
+  assert.equal(det.doubt(), false);
+  const b = D.synth({ sampleRate: SR, bph: 18000, rate: 4, start: 0.3 });
+  let doubted = false;
+  let relocked = false;
+  for (let i = 0; i < 12 * SR && !relocked; i += 2048) {
+    relocked = det.push(b.next(2048)).some((e) => e.type === "lock");
+    if (det.doubt()) doubted = true;
+  }
+  assert.ok(doubted, "doubted before relocking");
+  assert.ok(relocked);
+  assert.equal(det.doubt(), false);
+});
+
+test("holding auto's rate keeps its beats and stops auto relocking (TICK-37)", () => {
+  const det = D.createDetector({ sampleRate: SR });
+  const a = D.synth({ sampleRate: SR, bph: 28800 });
+  for (let i = 0; i < 6 * SR; i += 2048) det.push(a.next(2048));
+  assert.deepEqual(det.setBph(28800), [{ type: "lock", bph: 28800, auto: false, kept: true }]);
+  // readings go on with no new lock
+  const more = [];
+  for (let i = 0; i < SR; i += 2048) more.push(...det.push(a.next(2048)));
+  assert.ok(more.some((e) => e.type === "reading"));
+  assert.ok(!more.some((e) => e.type === "lock"));
+  // a different watch no longer moves it, and held is never in doubt
+  const b = D.synth({ sampleRate: SR, bph: 18000, start: 0.3 });
+  const after = [];
+  for (let i = 0; i < 12 * SR; i += 2048) after.push(...det.push(b.next(2048)));
+  assert.ok(!after.some((e) => e.type === "lock"));
+  assert.equal(det.doubt(), false);
+  // another rate than auto's locks afresh
+  const det2 = D.createDetector({ sampleRate: SR });
+  for (let i = 0; i < 6 * SR; i += 2048) det2.push(a.next(2048));
+  assert.deepEqual(det2.setBph(21600), [{ type: "lock", bph: 21600, auto: false }]);
+});
+
 /** Feed blocks from `parts` ([generator, secs] pairs) and collect events. */
 function feedParts(det, parts) {
   const events = [];

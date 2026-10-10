@@ -188,7 +188,8 @@
    * returns the events it produced, in order:
    *
    * - `{ type: "lock", bph, auto }`: the beat rate was chosen (or changed);
-   *   earlier beats no longer count
+   *   earlier beats no longer count, except when `kept` (`setBph` held the
+   *   rate auto had chosen)
    * - `{ type: "beat", t, n, parity, offsetMs, peak, wave }`: one beat; `n`,
    *   `parity`, and `offsetMs` are null until the beat rate is known;
    *   `replaced` marks a better onset for the previous beat's index, which
@@ -475,6 +476,12 @@
         resetFit();
         return [];
       }
+      if (auto && period !== null && Math.round(3600 / period) === bph) {
+        // holding the rate auto chose keeps the beats already indexed
+        auto = false;
+        doubt = false;
+        return [{ type: "lock", bph, auto: false, kept: true }];
+      }
       events = [];
       lock(bph, false);
       return events;
@@ -496,6 +503,8 @@
         mult = SENSITIVITY[name] || SENSITIVITY.normal;
       },
       levels,
+      // auto's rate stopped fitting the beats and it is choosing again
+      doubt: () => auto && doubt,
       time: () => pos / sr,
       sampleRate: sr,
       waveMs: { pre: PRE * 1000, post: POST * 1000 },

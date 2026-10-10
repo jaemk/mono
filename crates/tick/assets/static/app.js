@@ -113,7 +113,7 @@
       title: "Beat rate",
       body: [
         "Beats per hour: how many ticks and tocks the movement makes in an hour, fixed by its design. Common rates are 18000 (5 a second, many vintage watches), 21600 (6), 28800 (8, most modern watches), and 36000 (10, high beat).",
-        "auto means it was found from the gaps between beats. If it picks the wrong one (say double the real rate, when every tick and tock is heard twice), choose the right rate in the beat rate setting.",
+        "auto means it was found from the gaps between beats. If it picks the wrong one (say double the real rate, when every tick and tock is heard twice), click the beat rate and choose the right one. A rate you choose stays; so does auto's choice once you hold it. It turns red when the beats stop fitting auto's choice and auto is finding the rate again.",
       ],
     },
     beats: {
@@ -330,6 +330,13 @@
       focusRate: $("focus-rate"),
       focusTrend: $("focus-trend"),
       focusBeatError: $("focus-beat-error"),
+      focusBph: $("focus-bph"),
+      focusDetail: $("focus-detail"),
+      focusNote: $("focus-note"),
+      bphDialog: $("bph-dialog"),
+      bphNow: $("bph-now"),
+      bphChoices: $("bph-choices"),
+      bphClose: $("bph-close"),
       focusExit: $("focus-exit"),
       focusRun: $("focus-run"),
       focusSettings: $("focus-settings"),
@@ -533,7 +540,7 @@
     function handle(ev) {
       if (ev.type === "lock") {
         locked = { bph: ev.bph, auto: ev.auto };
-        clearData();
+        if (!ev.kept) clearData();
       } else if (ev.type === "beat") {
         heard++;
         waves.push(ev);
@@ -833,17 +840,31 @@
       return settled() ? "locked" : "measuring";
     }
 
+    /** The status in words: the empty rate graph's text, and full screen mode's. */
+    function statusText() {
+      if (!source && analysis) {
+        const s = analysis.summary;
+        return s ? `${s.beats} beats in ${analysis.name}` : `no steady beats found in ${analysis.name}`;
+      }
+      if (!source) return "start the mic, or simulate in the settings";
+      if (!heard) return "listening for beats...";
+      if (!locked) return "ticks heard, finding the beat rate...";
+      if (det.doubt()) return "the beat rate stopped fitting, finding it again...";
+      return settled() ? `${beatCount} beats` : progressText();
+    }
+
     /**
      * The result the positions table would save: one fit over an analyzed
-     * recording, or the latest settled live reading; null if neither.
+     * recording, or the latest live reading (shown, so savable, even before
+     * it settles); null if neither.
      */
     function currentResult() {
       if (analysis && !source) {
         const s = analysis.summary;
-        return s ? { rate: s.rate, beatError: s.beatError, bph: s.bph } : null;
+        return s ? { rate: s.rate, beatError: s.beatError, bph: s.bph, settled: true } : null;
       }
       const r = readings[readings.length - 1];
-      return r && r.settled && locked ? { rate: r.rate, beatError: r.beatError, bph: locked.bph } : null;
+      return r && locked ? { rate: r.rate, beatError: r.beatError, bph: locked.bph, settled: r.settled } : null;
     }
 
     function renderReadout() {
@@ -863,6 +884,7 @@
         if (r) ({ rate, beatError } = r);
         settling = !!r && !r.settled;
         el.bphOut.textContent = locked ? `${locked.bph}${locked.auto ? " auto" : ""}` : "--";
+        if (!locked && settings.bph === "auto" && source) el.bphOut.textContent = "auto";
         el.beatsOut.textContent = String(beatCount);
         el.rateLabel.textContent = "rate";
       }
@@ -893,16 +915,31 @@
         delete el.record.dataset.recording;
         el.record.style.removeProperty("--progress");
       }
+      // red while auto's choice no longer fits the beats (TICK-37)
+      const doubt = !!source && !analysis && det.doubt();
+      if (doubt) el.bphOut.dataset.doubt = "";
+      else delete el.bphOut.dataset.doubt;
+      el.bphOut.title = doubt
+        ? "the beat rate stopped fitting the beats; auto is finding it again (click to choose)"
+        : "choose the beat rate (b)";
       el.sessionAdd.disabled = !currentResult();
+      el.sessionAdd.title = el.sessionAdd.disabled ? "no reading to save yet" : "save the current reading under this position";
+      renderMeter();
       if (!el.focusView.hidden) {
         el.focusStatus.textContent = state;
+        el.focusStatus.dataset.state = state;
+        el.focusDetail.textContent = statusText();
         el.focusRate.textContent = el.rateOut.textContent;
         el.focusRate.dataset.state = el.rateOut.dataset.state;
         el.focusRate.dataset.tolerance = el.rateOut.dataset.tolerance;
         el.focusTrend.textContent = source ? trend(readings) : "";
         el.focusBeatError.textContent = el.beatErrorOut.textContent;
+        el.focusBph.textContent = el.bphOut.textContent;
+        el.focusBph.title = el.bphOut.title;
+        if (doubt) el.focusBph.dataset.doubt = "";
+        else delete el.focusBph.dataset.doubt;
+        el.focusNote.textContent = el.meterNote.textContent;
       }
-      renderMeter();
     }
 
     function renderMeter() {
@@ -1041,12 +1078,7 @@
       if (!visible.length) {
         ctx.textAlign = "center";
         ctx.fillStyle = C.text;
-        let msg = "start the mic or simulate";
-        if (!source && analysis) msg = `no steady beats found in ${analysis.name}`;
-        else if (source && !heard) msg = "listening for beats...";
-        else if (source && !locked) msg = "ticks heard, finding the beat rate...";
-        else if (source) msg = progressText();
-        ctx.fillText(msg, cx, mid - 16);
+        ctx.fillText(statusText(), cx, mid - 16);
         if (source && locked) drawProgress(ctx, cx, mid - 4);
         return;
       }
@@ -1262,6 +1294,58 @@
     }
 
     // ---------------------------------------------------------------------
+    // beat rate picker (TICK-37)
+    // ---------------------------------------------------------------------
+
+    /** Choose the beat rate from the readout: auto, a rate, or hold auto's choice. */
+    function openBph() {
+      const held = settings.bph === "auto" && locked && locked.auto ? locked.bph : null;
+      el.bphNow.textContent =
+        settings.bph !== "auto"
+          ? `set to ${settings.bph} bph; it stays until you pick another or auto`
+          : !source || !det
+            ? "auto: found from the gaps between beats"
+            : det.doubt()
+              ? `auto: ${locked.bph} stopped fitting the beats, finding the rate again`
+              : held
+                ? `auto chose ${held} bph; hold it to stop auto changing it`
+                : "auto: finding the beat rate";
+      const choice = (label, value, pressed) => {
+        const b = doc.createElement("button");
+        b.textContent = label;
+        b.dataset.bph = String(value);
+        b.setAttribute("aria-pressed", String(pressed));
+        b.addEventListener("click", () => pickBph(value));
+        return b;
+      };
+      const choices = [...el.bph.options].map((o) => {
+        const value = o.value === "auto" ? "auto" : Number(o.value);
+        return choice(o.textContent, value, value === settings.bph);
+      });
+      if (held) {
+        const hold = choice(`hold ${held}`, held, false);
+        hold.className = "primary";
+        hold.id = "bph-hold";
+        choices.unshift(hold);
+      }
+      el.bphChoices.replaceChildren(...choices);
+      if (el.bphDialog.showModal) el.bphDialog.showModal();
+      else el.bphDialog.setAttribute("open", "");
+      (held ? choices[0] : el.bphClose).focus();
+    }
+
+    function closeBph() {
+      if (el.bphDialog.close) el.bphDialog.close();
+      else el.bphDialog.removeAttribute("open");
+    }
+
+    function pickBph(value) {
+      closeBph();
+      el.bph.value = String(value);
+      onSetting("bph", value);
+    }
+
+    // ---------------------------------------------------------------------
     // full screen mode (TICK-28)
     // ---------------------------------------------------------------------
 
@@ -1336,15 +1420,16 @@
 
     /** Save the current result under the chosen position, then pick the next free one. */
     function addPosition() {
-      const result = currentResult();
-      if (!result) return;
+      const cur = currentResult();
+      if (!cur) return;
+      const { settled: full, ...result } = cur;
       const pos = el.sessionPos.value;
       session = sortSession([...session.filter((r) => r.pos !== pos), { pos, ...result }]);
       saveSession();
       const order = POSITION_ORDER;
       const next = [...order.slice(order.indexOf(pos) + 1), ...order].find((p) => !session.some((r) => r.pos === p));
       if (next) el.sessionPos.value = next;
-      el.sessionNote.textContent = `saved ${POSITIONS[pos]}`;
+      el.sessionNote.textContent = `saved ${POSITIONS[pos]}${full ? "" : " (before the averaging window filled)"}`;
       renderSession();
     }
 
@@ -1380,10 +1465,12 @@
       if (e.key === "Escape") {
         // a native modal closes on escape by itself; this covers the fallback
         if (el.info.hasAttribute("open")) closeInfo();
+        else if (el.bphDialog.hasAttribute("open")) closeBph();
         else if (!el.focusView.hidden) closeFocus();
         return;
       }
-      if (e.ctrlKey || e.metaKey || e.altKey || el.info.hasAttribute("open")) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (el.info.hasAttribute("open") || el.bphDialog.hasAttribute("open")) return;
       const t = e.target;
       if (t && t.closest && t.closest("input, select, textarea, summary")) return;
       if (e.key === " ") {
@@ -1394,6 +1481,8 @@
         startRecording();
       } else if (e.key === "f") {
         toggleFocus();
+      } else if (e.key === "b") {
+        openBph();
       }
     }
 
@@ -1440,9 +1529,12 @@
       }
       if (det) {
         if (key === "bph") {
+          // a new rate locks (and clears the beats) unless it holds auto's choice
           for (const ev of det.setBph(settings.bph)) handle(ev);
-          if (settings.bph === "auto") locked = null;
-          clearData();
+          if (settings.bph === "auto") {
+            locked = null;
+            clearData();
+          }
         } else if (key === "average") {
           det.setAverage(settings.average);
         } else if (key === "correction") {
@@ -1468,6 +1560,12 @@
       // a click on the backdrop lands on the dialog itself, not its content
       el.info.addEventListener("click", (e) => {
         if (e.target === el.info) closeInfo();
+      });
+      el.bphOut.addEventListener("click", openBph);
+      el.focusBph.addEventListener("click", openBph);
+      el.bphClose.addEventListener("click", closeBph);
+      el.bphDialog.addEventListener("click", (e) => {
+        if (e.target === el.bphDialog) closeBph();
       });
       doc.addEventListener("keydown", onKey);
       for (const type of ["dragenter", "dragover", "dragleave", "drop"]) doc.addEventListener(type, onDrag);

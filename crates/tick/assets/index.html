@@ -114,7 +114,7 @@
         </div>
         <div class="metric">
           <span class="label-row"><span class="label">beat rate</span><button class="info" data-info="bph" aria-label="about the beat rate">i</button></span>
-          <span class="value"><span id="bph">--</span><span class="unit">bph</span></span>
+          <span class="value"><button id="bph" class="bph-button" aria-haspopup="dialog" title="choose the beat rate (b)">--</button><span class="unit">bph</span></span>
         </div>
         <div class="metric">
           <span class="label-row"><span class="label">beats</span><button class="info" data-info="beats" aria-label="about beats">i</button></span>
@@ -190,8 +190,10 @@
     <p class="help">
       To regulate, time the watch in a few positions and save each result under positions; the
       delta between them shows how evenly it runs. Full screen mode shows the rate large enough
-      to read while you work on the watch. Keys: space starts or stops the mic, r records, f
-      toggles full screen mode. To try the page without a watch, use simulate in the settings.
+      to read while you work on the watch. Click the beat rate to change it, or to hold the one
+      auto chose; it shows red while auto is choosing again. Keys: space starts or stops the
+      mic, r records, f toggles full screen mode, b picks the beat rate. To try the page without
+      a watch, use simulate in the settings.
     </p>
   </main>
 
@@ -199,7 +201,10 @@
     <div id="focus-status" class="focus-status">idle</div>
     <div class="focus-rate"><span id="focus-rate">--</span><span id="focus-trend" class="focus-trend"></span></div>
     <div class="focus-unit">s/d</div>
+    <div id="focus-detail" class="focus-detail"></div>
     <div class="focus-sub"><span id="focus-beat-error">--</span> ms beat error</div>
+    <div class="focus-sub"><button id="focus-bph" class="bph-button" aria-haspopup="dialog" title="choose the beat rate (b)">--</button> bph</div>
+    <div id="focus-note" class="focus-detail"></div>
     <div class="focus-buttons">
       <button id="focus-run" class="primary run">start mic</button>
       <button id="focus-exit">exit full screen</button>
@@ -215,6 +220,15 @@
       <h3 id="info-title"></h3>
       <div id="info-body"></div>
       <button id="info-close">close</button>
+    </div>
+  </dialog>
+
+  <dialog id="bph-dialog" class="info-dialog" aria-labelledby="bph-title">
+    <div class="info-content">
+      <h3 id="bph-title">beat rate</h3>
+      <p id="bph-now"></p>
+      <div id="bph-choices" class="bph-choices"></div>
+      <button id="bph-close">close</button>
     </div>
   </dialog>
 

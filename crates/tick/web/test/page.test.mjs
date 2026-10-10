@@ -23,7 +23,7 @@ test("boots idle with defaults and an empty graph", () => {
   assert.equal(p.$("set-correction").value, "0");
   assert.equal(p.$("set-sensitivity").value, "normal");
   const rate = texts(p.ctx("rate-canvas"));
-  assert.ok(rate.includes("start the mic or simulate"));
+  assert.ok(rate.includes("start the mic, or simulate in the settings"));
   // zero in the middle, symmetric labels, fast up and slow down
   for (const label of ["0", "+5", "-5", "+2.5", "-2.5", "fast", "slow", "now", "-60s"]) {
     assert.ok(rate.includes(label), `rate graph labels ${label}`);
@@ -534,7 +534,7 @@ test("simulate locks on and reads the simulated watch", () => {
   assert.equal(p.$("status").textContent, "idle");
   // the last reading stays up after stopping
   assert.notEqual(p.$("rate").textContent, "--");
-  assert.ok(texts(p.ctx("rate-canvas")).every((t) => t !== "start the mic or simulate"));
+  assert.ok(texts(p.ctx("rate-canvas")).every((t) => t !== "start the mic, or simulate in the settings"));
 });
 
 test("changing the beat rate while running relocks and clears the graphs", () => {
@@ -549,7 +549,7 @@ test("changing the beat rate while running relocks and clears the graphs", () =>
   assert.ok(texts(p.ctx("rate-canvas")).includes("measuring: 0.0 of 10 s"));
   assert.ok(callsOf(p.ctx("rate-canvas"), "fillRect").length > 2, "progress bar");
   p.change("set-bph", "auto");
-  assert.equal(p.$("bph").textContent, "--");
+  assert.equal(p.$("bph").textContent, "auto");
   assert.equal(p.$("status").textContent, "listening");
   p.advance(4000);
   p.flush();

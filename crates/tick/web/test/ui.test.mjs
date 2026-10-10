@@ -269,19 +269,24 @@ test("full screen mode shows the rate, beat error, status, and trend, and closes
   assert.equal(view.hidden, true);
 });
 
-test("positions save settled results, sum them up, and persist (TICK-29)", async () => {
+test("positions save the shown result, sum them up, and persist (TICK-29)", async () => {
   const p = boot();
   const add = p.$("session-add");
   assert.equal(add.disabled, true, "nothing to save yet");
+  assert.equal(add.title, "no reading to save yet");
   assert.equal(p.$("session-copy").disabled, true);
   assert.equal(p.$("session-clear").disabled, true);
   assert.equal(p.$("session-avg").textContent, "--");
-  // a reading still settling can't be saved
+  // a reading still settling can be saved, and says so
   p.click("sim");
   p.advance(5000);
   p.flush();
   assert.equal(p.$("status").textContent, "measuring");
-  assert.equal(add.disabled, true);
+  assert.equal(add.disabled, false);
+  p.click("session-add");
+  assert.equal(p.$("session-note").textContent, "saved dial up (before the averaging window filled)");
+  p.click("session-clear");
+  p.$("session-pos").value = "DU";
   p.advance(11000);
   p.flush();
   assert.equal(add.disabled, false);
@@ -586,4 +591,88 @@ test("only the status is a live region, so readings aren't read out on every bea
   p.advance(200);
   p.flush();
   assert.equal(p.$("status").firstChild, node);
+});
+
+test("the beat rate opens a picker that sets it, holds auto's choice, and shows doubt (TICK-37)", async () => {
+  const p = boot();
+  const dialog = p.$("bph-dialog");
+  const isOpen = () => dialog.hasAttribute("open");
+  const choose = (bph) => p.$("bph-choices").querySelector(`[data-bph="${bph}"]`).dispatchEvent(new p.win.MouseEvent("click"));
+  // idle, it says how auto works
+  p.click("bph");
+  assert.equal(p.$("bph-now").textContent, "auto: found from the gaps between beats");
+  assert.equal(p.$("bph-choices").children.length, 9);
+  key(p, "Escape");
+  assert.equal(isOpen(), false);
+
+  fakeAudio(p.win);
+  await p.app.startMic();
+  const feed = (gen, secs) => {
+    for (let i = 0; i < secs * 48000; i += 2048) p.app.feed(gen.next(2048));
+    p.flush();
+  };
+  p.flush();
+  assert.equal(p.$("bph").textContent, "auto");
+  p.click("bph");
+  assert.equal(isOpen(), true);
+  assert.equal(p.$("bph-now").textContent, "auto: finding the beat rate");
+  assert.equal(p.$("bph-hold"), null);
+  // other keys wait while it is open; the backdrop closes it
+  key(p, "f");
+  assert.equal(p.$("focus-view").hidden, true);
+  dialog.dispatchEvent(new p.win.MouseEvent("click"));
+  assert.equal(isOpen(), false);
+
+  const watch = D.synth({ sampleRate: 48000, bph: 28800, seed: 3 });
+  feed(watch, 6);
+  assert.equal(p.$("bph").textContent, "28800 auto");
+  const shown = p.app.state().readings.length;
+  key(p, "b");
+  assert.equal(p.$("bph-now").textContent, "auto chose 28800 bph; hold it to stop auto changing it");
+  assert.equal(p.$("bph-choices").querySelector('[data-bph="auto"]').getAttribute("aria-pressed"), "true");
+  p.click("bph-hold");
+  assert.equal(isOpen(), false);
+  assert.equal(p.app.state().settings.bph, 28800);
+  assert.equal(p.$("set-bph").value, "28800");
+  assert.equal(p.$("bph").textContent, "28800");
+  assert.equal(p.app.state().readings.length, shown, "holding keeps the readings");
+
+  // a chosen rate stays until another is picked
+  p.click("bph");
+  assert.equal(p.$("bph-now").textContent, "set to 28800 bph; it stays until you pick another or auto");
+  choose(21600);
+  assert.equal(p.$("bph").textContent, "21600");
+  assert.equal(p.app.state().readings.length, 0);
+  p.click("bph");
+  p.click("bph-close");
+  choose("auto");
+  assert.equal(p.app.state().settings.bph, "auto");
+
+  // back on auto, a watch that changes rate turns the beat rate red until auto relocks,
+  // in full screen mode too
+  feed(watch, 14);
+  p.click("focus");
+  assert.equal(p.$("focus-status").dataset.state, "locked");
+  assert.match(p.$("focus-detail").textContent, /^\d+ beats$/);
+  const other = D.synth({ sampleRate: 48000, bph: 18000, rate: 4, start: 0.3 });
+  let doubted = false;
+  for (let i = 0; i < 12 * 48000 && p.$("bph").textContent !== "18000 auto"; i += 2048) {
+    p.app.feed(other.next(2048));
+    p.flush();
+    if (!doubted && "doubt" in p.$("bph").dataset) {
+      doubted = true;
+      assert.ok("doubt" in p.$("focus-bph").dataset);
+      assert.match(p.$("bph").title, /auto is finding it again/);
+      assert.equal(p.$("focus-detail").textContent, "the beat rate stopped fitting, finding it again...");
+      p.click("focus-bph");
+      assert.equal(p.$("bph-now").textContent, "auto: 28800 stopped fitting the beats, finding the rate again");
+      key(p, "Escape");
+      assert.equal(p.$("focus-view").hidden, false, "escape closes the picker first");
+    }
+  }
+  assert.ok(doubted);
+  assert.equal(p.$("focus-bph").textContent, "18000 auto");
+  assert.equal("doubt" in p.$("bph").dataset, false);
+  assert.equal("doubt" in p.$("focus-bph").dataset, false);
+  assert.equal(p.$("focus-note").textContent, p.$("meter-note").textContent);
 });
