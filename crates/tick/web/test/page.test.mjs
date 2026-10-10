@@ -161,27 +161,48 @@ function captureUrls(win) {
   return got;
 }
 
-test("record keeps the next 30 s of raw input as a wav to save (TICK-24)", async () => {
+test("record opens the mic, records 30 s, then analyzes it and offers it to save (TICK-24, TICK-25)", async () => {
   const p = boot();
   const got = captureUrls(p.win);
   const save = p.$("save");
   assert.equal(save.hidden, true);
-  assert.equal(p.$("record").disabled, true, "nothing to record while idle");
+  assert.equal(p.$("record").disabled, false, "recording works from idle");
   assert.equal(p.$("record").textContent, "record 30 s");
   const audio = fakeAudio(p.win);
-  await p.app.startMic();
-  assert.equal(p.$("record").disabled, false);
-  p.click("record");
+  await p.app.record();
+  assert.equal(p.app.state().running, true);
   assert.equal(p.$("record").disabled, true);
   assert.equal(p.$("record").textContent, "recording... 30 s");
-  const watch = { bph: 18000, rate: 100, amp: 0.05, seed: 11 };
+  const watch = { bph: 18000, rate: 100, beatError: 0.8, amp: 0.05, seed: 11 };
   audio.play(watch, 10);
   p.flush();
   assert.equal(p.$("record").textContent, "recording... 20 s");
+  assert.equal(p.$("status").textContent, "measuring", "live while recording");
   assert.equal(save.hidden, true);
-  // the rest of the 30 s (play runs in 2048 sample blocks, so a bit over)
-  audio.play({ ...watch, seed: 12 }, 21);
+  // the rest of the 30 s (play runs in 2048 sample blocks, so a bit over),
+  // carrying on the same watch: the next even beat after what played
+  const played = (2048 * Math.ceil((10 * 48000) / 2048)) / 48000;
+  const period = 0.2 / (1 + 100 / 86400);
+  let k = Math.ceil((played - 0.15) / period);
+  if (k % 2) k++;
+  audio.play({ ...watch, seed: 12, start: 0.15 + k * period - played }, 21);
   p.flush();
+
+  // the mic is closed and the whole recording read
+  assert.equal(p.app.state().running, false);
+  assert.equal(audio.log.closed, 1);
+  assert.equal(p.$("status").textContent, "analyzed");
+  assert.equal(p.$("rate-label").textContent, "rate over 30 s of recording");
+  const rate = Number(p.$("rate").textContent);
+  assert.ok(Math.abs(rate - 100) < 1, `rate ${rate}`);
+  assert.ok(Math.abs(Number(p.$("beat-error").textContent) - 0.8) < 0.15);
+  assert.equal(p.$("bph").textContent, "18000 auto");
+  assert.ok(Number(p.$("beats").textContent) > 140);
+  // graphs span the recording, labeled from its start
+  const labels = texts(p.ctx("rate-canvas"));
+  for (const l of ["0s", "10s", "20s", "30s"]) assert.ok(labels.includes(l), l);
+  assert.ok(!labels.includes("now"));
+
   // a link the user clicks, since browsers block a download without one
   assert.equal(save.hidden, false);
   assert.match(save.download, /^tick-\d{8}-\d{6}-auto\.wav$/);
@@ -192,17 +213,48 @@ test("record keeps the next 30 s of raw input as a wav to save (TICK-24)", async
   // still there after stop
   p.click("stop");
   assert.equal(save.hidden, false);
+  assert.equal(p.$("status").textContent, "analyzed");
 
   const blob = got.urls[0];
   assert.equal(blob.type, "audio/wav");
   const bytes = new Uint8Array(await blob.arrayBuffer());
   assert.equal(bytes.length, 58 + 30 * 48000 * 4);
   const samples = new Float32Array(bytes.buffer.slice(58));
-  // exactly the samples the mic sent, from the click on
+  // exactly the samples the mic sent, from the start
   const first = D.synth({ sampleRate: 48000, ...watch }).next(2048 * Math.ceil((10 * 48000) / 2048));
   assert.deepEqual(samples.subarray(0, first.length), first);
-  // the detector kept running throughout
-  assert.ok(p.app.state().beatCount > 0);
+});
+
+test("settings read an analyzed recording again; a live source clears it", async () => {
+  const p = boot();
+  captureUrls(p.win);
+  const audio = fakeAudio(p.win);
+  await p.app.record();
+  audio.play({ bph: 18000, rate: 100, amp: 0.05 }, 31);
+  p.flush();
+  const before = Number(p.$("rate").textContent);
+  p.$("set-correction").value = "5";
+  p.$("set-correction").dispatchEvent(new p.win.Event("change"));
+  assert.ok(Math.abs(Number(p.$("rate").textContent) - before - 5) < 0.05);
+  assert.ok(p.app.state().readings.every((r) => r.window === 10));
+  p.$("set-average").value = "4";
+  p.$("set-average").dispatchEvent(new p.win.Event("change"));
+  assert.ok(p.app.state().readings.every((r) => r.window === 4));
+  // a wrong fixed rate finds nothing steady
+  p.$("set-bph").value = "28800";
+  p.$("set-bph").dispatchEvent(new p.win.Event("change"));
+  assert.equal(p.$("bph").textContent, "--");
+  assert.equal(p.$("rate").textContent, "--");
+  assert.ok(texts(p.ctx("rate-canvas")).includes("no steady beats found in recording"));
+  // the span select doesn't touch it
+  p.$("set-span").value = "300";
+  p.$("set-span").dispatchEvent(new p.win.Event("change"));
+  assert.equal(p.$("status").textContent, "analyzed");
+
+  p.click("sim");
+  assert.equal(p.app.state().analysis, null);
+  assert.equal(p.$("rate-label").textContent, "rate");
+  assert.notEqual(p.$("status").textContent, "analyzed");
 });
 
 test("stopping cancels a recording, and a new source starts clean", async () => {
@@ -214,7 +266,7 @@ test("stopping cancels a recording, and a new source starts clean", async () => 
   audio.play({ bph: 18000 }, 5);
   p.click("stop");
   assert.equal(p.$("record").textContent, "record 30 s");
-  assert.equal(p.$("record").disabled, true);
+  assert.equal(p.app.state().analysis, null, "a cancelled recording is not analyzed");
   await p.app.startMic();
   audio.play({ bph: 18000 }, 31);
   assert.equal(got.urls.length, 0, "nothing saved");
@@ -225,11 +277,118 @@ test("stopping cancels a recording, and a new source starts clean", async () => 
   audio.play({ bph: 18000 }, 31);
   assert.equal(got.urls.length, 1);
   // a new recording replaces the last one's link and frees it
-  p.click("record");
+  await p.app.record();
   assert.equal(p.$("save").hidden, true);
   assert.deepEqual(got.revoked, ["blob:test/1"]);
   audio.play({ bph: 18000 }, 31);
   assert.equal(p.$("save").getAttribute("href"), "blob:test/2");
+  // a mic that won't open records nothing
+  const denied = boot();
+  fakeAudio(denied.win, { deny: { name: "NotAllowedError" } });
+  await denied.app.record();
+  assert.equal(denied.app.state().running, false);
+  assert.equal(denied.$("record").textContent, "record 30 s");
+});
+
+/** An OfflineAudioContext whose decodeAudioData returns `buffer`, or throws. */
+function fakeDecoder(win, buffer) {
+  const made = [];
+  win.OfflineAudioContext = class {
+    constructor(channels, length, sampleRate) {
+      made.push({ channels, length, sampleRate });
+    }
+    decodeAudioData(bytes) {
+      made[made.length - 1].bytes = bytes.byteLength;
+      if (!buffer) return Promise.reject(new Error("unsupported format"));
+      return Promise.resolve(buffer);
+    }
+  };
+  return made;
+}
+
+/** An AudioBuffer of `channels` copies of a synthesized watch. */
+function audioBuffer(watch, secs, { sampleRate = 48000, channels = 2 } = {}) {
+  const data = D.synth({ sampleRate, ...watch }).next(Math.round(secs * sampleRate));
+  return {
+    sampleRate,
+    length: data.length,
+    numberOfChannels: channels,
+    getChannelData: () => data,
+  };
+}
+
+function pickFile(p, name, bytes = 4) {
+  const file = new p.win.File([new Uint8Array(bytes)], name, { type: "audio/wav" });
+  Object.defineProperty(p.$("file"), "files", { value: [file], configurable: true });
+  p.$("file").dispatchEvent(new p.win.Event("change"));
+}
+
+test("analyze file decodes an audio file and reads it (TICK-25)", async () => {
+  const p = boot();
+  let clicked = 0;
+  p.$("file").click = () => clicked++;
+  p.click("open");
+  assert.equal(clicked, 1, "the button opens the file picker");
+
+  const made = fakeDecoder(p.win, audioBuffer({ bph: 21600, rate: -12, beatError: 0.5 }, 20));
+  pickFile(p, "watch.m4a", 16);
+  await settle();
+  assert.deepEqual(made, [{ channels: 1, length: 1, sampleRate: 48000, bytes: 16 }]);
+  assert.equal(p.$("status").textContent, "analyzed");
+  assert.equal(p.$("rate-label").textContent, "rate over 20 s of watch.m4a");
+  const rate = Number(p.$("rate").textContent);
+  assert.ok(Math.abs(rate + 12) < 0.5, `rate ${rate}`);
+  assert.equal(p.$("bph").textContent, "21600 auto");
+  // stereo is mixed to mono, not summed (one channel peaks near 0.17)
+  assert.ok(p.app.state().waves.every((w) => w.peak < 0.25));
+  assert.equal(p.$("save").hidden, true, "a file needs no save link");
+  assert.equal(p.$("file").value, "");
+
+  // a file the browser can't decode
+  fakeDecoder(p.win, null);
+  pickFile(p, "notes.txt");
+  await settle();
+  assert.equal(p.$("error").hidden, false);
+  assert.match(p.$("error").textContent, /Could not read notes\.txt as audio: unsupported format/);
+
+  // no file chosen
+  Object.defineProperty(p.$("file"), "files", { value: [], configurable: true });
+  p.$("file").dispatchEvent(new p.win.Event("change"));
+});
+
+test("long files are analyzed up to 5 minutes; a newer source wins over a slow decode", async () => {
+  const p = boot();
+  // 301 s of silence at a low rate, to keep it quick
+  const silent = { sampleRate: 4000, length: 301 * 4000, numberOfChannels: 1, getChannelData: () => new Float32Array(301 * 4000) };
+  fakeDecoder(p.win, silent);
+  pickFile(p, "long.wav");
+  await settle();
+  assert.equal(p.$("rate-label").textContent, "rate over first 5 min of long.wav");
+  assert.equal(p.app.state().analysis.samples.length, 300 * 4000);
+  assert.equal(p.$("rate").textContent, "--");
+  assert.ok(texts(p.ctx("rate-canvas")).includes("no steady beats found in long.wav"));
+  assert.ok(texts(p.ctx("rate-canvas")).includes("5m"));
+
+  // a decode that finishes after simulate started is dropped
+  let finish;
+  p.win.OfflineAudioContext = class {
+    decodeAudioData() {
+      return new Promise((r) => (finish = r));
+    }
+  };
+  pickFile(p, "slow.wav");
+  await settle();
+  p.click("sim");
+  finish(audioBuffer({ bph: 18000 }, 2));
+  await settle();
+  assert.equal(p.app.state().analysis, null);
+  assert.equal(p.app.state().running, true);
+
+  // no OfflineAudioContext at all
+  delete p.win.OfflineAudioContext;
+  pickFile(p, "x.wav");
+  await settle();
+  assert.match(p.$("error").textContent, /Could not read x\.wav as audio/);
 });
 
 test("pickRange and fmtRate", () => {

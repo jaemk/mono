@@ -38,14 +38,30 @@ A denied microphone, a missing `getUserMedia` (insecure context or old browser),
 audio setup shows an error line and leaves the page idle.
 
 ### TICK-24
-While a source runs, `record 30 s` saves the next 30 seconds of input, exactly the samples
-the detector gets (unprocessed, at the input's sample rate), and downloads them as a mono
-32-bit float WAV named `tick-<yyyymmdd>-<hhmmss>-<beat rate setting>.wav`. The button counts
-down while recording, and the detector keeps running. When it finishes, a `save recording`
-link appears; clicking it downloads the file (browsers block a download not started by a
-click). The link stays after `stop` until the next recording replaces it. `stop` or a new
-source cancels a recording in progress without saving. Recordings never leave the browser
-except as that download.
+`record 30 s` keeps the next 30 seconds of input, exactly the samples the detector gets
+(unprocessed, at the input's sample rate), from the running source, or from the mic, opened
+first, when idle. The button counts down while recording, and the live display keeps running.
+When it finishes, the source stops, the recording is analyzed (TICK-25), and a `save
+recording` link offers it as a mono 32-bit float WAV named
+`tick-<yyyymmdd>-<hhmmss>-<beat rate setting>.wav` (clicking it downloads the file; browsers
+block a download not started by a click). The link stays until the next recording replaces it.
+`stop` or a new source cancels a recording in progress without saving or analyzing it.
+Recordings never leave the browser except as that download.
+
+### TICK-25
+`analyze file` reads an audio file the browser can decode (decoded at 48 kHz, channels mixed
+to mono, at most the first 5 minutes) and analyzes it as a finished recording is:
+
+- the whole recording runs through a detector with the current settings, and the graphs show
+  its readings and beats over its own length, labeled in seconds from its start
+- the readout shows one fit over the longest unbroken run of beats in it (the rate label says
+  `rate over <length> of <name>`), and the status reads `analyzed`
+- without enough steady beats for a fit, the rate graph says `no steady beats found in <name>`
+- changing the beat rate, averaging, sensitivity, or mic correction analyzes the same audio
+  again; a live source or simulate replaces the analysis
+
+A file that can't be decoded shows an error line. A decode that finishes after another source
+started is dropped.
 
 ## Detection
 
@@ -160,7 +176,7 @@ beat history and the graphs.
 The readout shows the current rate (s/d, signed, one decimal), beat error (ms, one decimal),
 beat rate (bph, marked `auto` when detected), beats counted, and status: `idle`,
 `listening` (no beats heard, or no beat rate yet), `measuring` (beat rate known, averaging window still
-filling, TICK-23), or `locked`. After `stop` the last reading and the graphs stay up.
+filling, TICK-23), `locked`, or `analyzed` (a recording or file on show, TICK-25). After `stop` the last reading and the graphs stay up.
 
 ### TICK-15
 The rate graph plots readings against time over the visible span (30 s, 1 min, 5 min; default

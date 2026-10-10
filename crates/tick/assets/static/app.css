@@ -69,6 +69,16 @@ body {
   color: var(--odd);
 }
 
+.status[data-state="analyzed"] {
+  color: var(--text);
+}
+
+#rate-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #rate[data-state="settling"] {
   opacity: 0.5;
 }

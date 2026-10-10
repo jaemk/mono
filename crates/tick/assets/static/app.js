@@ -37,6 +37,9 @@
   const PROGRESS_W = 160;
   // the record button saves this much raw input as a wav (TICK-24)
   const RECORD_SECS = 30;
+  // files are decoded at this rate and analyzed up to this long (TICK-25)
+  const FILE_RATE = 48000;
+  const MAX_ANALYZE_SECS = 300;
   // shared horizontal plot margins, so the rate graph and the beat trace line
   // up in time
   const PAD_L = 48;
@@ -130,6 +133,9 @@
       stop: $("stop"),
       record: $("record"),
       save: $("save"),
+      open: $("open"),
+      file: $("file"),
+      rateLabel: $("rate-label"),
       bph: $("set-bph"),
       average: $("set-average"),
       span: $("set-span"),
@@ -168,6 +174,9 @@
     let rec = null;
     // the object url behind the save link of the last recording
     let saveUrl = null;
+    // a recording or file on show instead of a live source (TICK-25):
+    // { samples, sampleRate, name, truncated, duration, summary }
+    let analysis = null;
     let shownLevel = 0;
     let deadFrames = 0;
     // beats heard since the source started, indexed or not
@@ -229,6 +238,7 @@
       clearData();
       source = { stop: stopFn, sampleRate };
       rec = null;
+      analysis = null;
       showError("");
       render();
     }
@@ -236,7 +246,11 @@
     function feed(chunk) {
       // blocks still queued from a stopped source change nothing
       if (!source) return;
-      if (rec) record(chunk);
+      if (rec) {
+        record(chunk);
+        // a finished recording stops the source for its analysis
+        if (!source) return;
+      }
       for (const ev of det.push(chunk)) handle(ev);
       now = det.time();
       const keep = now - SPANS[SPANS.length - 1] - 1;
@@ -278,15 +292,23 @@
     // recording (TICK-24)
     // ---------------------------------------------------------------------
 
-    function startRecording() {
-      if (!source || rec) return;
+    /** Record the next 30 s of the running source, opening the mic if idle. */
+    async function startRecording() {
+      if (rec) return;
+      if (!source) {
+        await startMic();
+        if (!source) return;
+      }
       const sampleRate = source.sampleRate;
       clearSave();
       rec = { buf: new Float32Array(RECORD_SECS * sampleRate), len: 0, sampleRate };
       render();
     }
 
-    /** Keep the raw samples, exactly as the detector gets them. */
+    /**
+     * Keep the raw samples, exactly as the detector gets them. A full
+     * recording stops the source, is offered for saving, and is analyzed.
+     */
     function record(chunk) {
       const n = Math.min(chunk.length, rec.buf.length - rec.len);
       rec.buf.set(chunk.subarray(0, n), rec.len);
@@ -294,8 +316,63 @@
       if (rec.len === rec.buf.length) {
         const done = rec;
         rec = null;
+        stop();
         offerSave(encodeWav(done.buf, done.sampleRate), recordingName());
+        showAnalysis(done.buf, done.sampleRate, "recording", false);
       }
+    }
+
+    // ---------------------------------------------------------------------
+    // analysis of a recording or file (TICK-25)
+    // ---------------------------------------------------------------------
+
+    function showAnalysis(samples, sampleRate, name, truncated) {
+      analysis = { samples, sampleRate, name, truncated };
+      reanalyze();
+    }
+
+    /** Run the whole recording through a detector with the current settings. */
+    function reanalyze() {
+      const a = D.analyze(analysis.samples, {
+        sampleRate: analysis.sampleRate,
+        bph: settings.bph,
+        average: settings.average,
+        correction: settings.correction,
+        sensitivity: settings.sensitivity,
+      });
+      locked = settings.bph === "auto" ? null : { bph: settings.bph, auto: false };
+      clearData();
+      heard = 0;
+      for (const ev of a.events) handle(ev);
+      analysis.duration = a.duration;
+      analysis.summary = a.summary;
+      now = a.duration;
+      render();
+    }
+
+    /** Decode an audio file (mixed to mono) and analyze its first 5 minutes. */
+    async function analyzeFile(file) {
+      stop();
+      const gen = startGen;
+      showError("");
+      let audio;
+      try {
+        const Ctx = win.OfflineAudioContext || win.webkitOfflineAudioContext;
+        const bytes = await file.arrayBuffer();
+        audio = await new Ctx(1, 1, FILE_RATE).decodeAudioData(bytes);
+      } catch (e) {
+        showError(`Could not read ${file.name} as audio: ${(e && e.message) || e}`);
+        return;
+      }
+      if (gen !== startGen) return;
+      const n = Math.min(audio.length, MAX_ANALYZE_SECS * audio.sampleRate);
+      const samples = new Float32Array(n);
+      for (let c = 0; c < audio.numberOfChannels; c++) {
+        const data = audio.getChannelData(c);
+        for (let i = 0; i < n; i++) samples[i] += data[i] / audio.numberOfChannels;
+      }
+      clearSave();
+      showAnalysis(samples, audio.sampleRate, file.name, audio.length > n);
     }
 
     function recordingName() {
@@ -455,25 +532,38 @@
      * (window filling), or locked.
      */
     function status() {
-      if (!source) return "idle";
+      if (!source) return analysis ? "analyzed" : "idle";
       if (!locked || !heard) return "listening";
       return settled() ? "locked" : "measuring";
     }
 
     function renderReadout() {
-      const r = readings[readings.length - 1];
-      el.rateOut.textContent = r ? fmtRate(r.rate) : "--";
-      el.rateOut.dataset.state = r && !r.settled ? "settling" : "";
-      el.beatErrorOut.textContent = r ? r.beatError.toFixed(1) : "--";
-      el.bphOut.textContent = locked ? `${locked.bph}${locked.auto ? " auto" : ""}` : "--";
-      el.beatsOut.textContent = String(beatCount);
+      if (analysis && !source) {
+        // one fit over the whole recording
+        const s = analysis.summary;
+        el.rateOut.textContent = s ? fmtRate(s.rate) : "--";
+        el.rateOut.dataset.state = "";
+        el.beatErrorOut.textContent = s ? s.beatError.toFixed(1) : "--";
+        el.bphOut.textContent = s ? `${s.bph}${s.auto ? " auto" : ""}` : "--";
+        el.beatsOut.textContent = String(s ? s.beats : 0);
+        const part = analysis.truncated ? `first ${MAX_ANALYZE_SECS / 60} min` : `${Math.round(analysis.duration)} s`;
+        el.rateLabel.textContent = `rate over ${part} of ${analysis.name}`;
+      } else {
+        const r = readings[readings.length - 1];
+        el.rateOut.textContent = r ? fmtRate(r.rate) : "--";
+        el.rateOut.dataset.state = r && !r.settled ? "settling" : "";
+        el.beatErrorOut.textContent = r ? r.beatError.toFixed(1) : "--";
+        el.bphOut.textContent = locked ? `${locked.bph}${locked.auto ? " auto" : ""}` : "--";
+        el.beatsOut.textContent = String(beatCount);
+        el.rateLabel.textContent = "rate";
+      }
       const state = status();
       el.status.textContent = state;
       el.status.dataset.state = state;
       el.start.disabled = !!source;
       el.sim.disabled = !!source;
       el.stop.disabled = !source;
-      el.record.disabled = !source || !!rec;
+      el.record.disabled = !!rec;
       el.record.textContent = rec
         ? `recording... ${Math.ceil((rec.buf.length - rec.len) / rec.sampleRate)} s`
         : `record ${RECORD_SECS} s`;
@@ -520,28 +610,35 @@
       return { ctx, w, h };
     }
 
-    /** x for a time on the shared axis of the rate graph and the trace. */
+    /**
+     * x for a time on the shared axis of the rate graph and the trace: the
+     * visible span up to now while live, or the whole of an analyzed
+     * recording (`fixed`).
+     */
     function timeAxis(w) {
-      const span = settings.span;
-      const t1 = Math.max(now, span);
+      const fixed = !!analysis && !source;
+      const span = fixed ? Math.max(analysis.duration, 1) : settings.span;
+      const t1 = fixed ? span : Math.max(now, span);
       const t0 = t1 - span;
       const plot = w - PAD_L - PAD_R;
-      return { t0, t1, x: (t) => PAD_L + ((t - t0) / span) * plot };
+      return { t0, t1, span, fixed, x: (t) => PAD_L + ((t - t0) / span) * plot };
     }
 
     function drawTimeGrid(ctx, w, h, axis, labels) {
-      const step = settings.span >= 300 ? 60 : 10;
+      const step = axis.span >= 300 ? 60 : axis.span > 20 ? 10 : 1;
+      const label = (s) => (step === 60 ? `${s / 60}m` : `${s}s`);
       ctx.strokeStyle = C.grid;
       ctx.fillStyle = C.gridText;
       ctx.lineWidth = 1;
       ctx.textAlign = "center";
-      for (let ago = 0; ago <= settings.span; ago += step) {
-        const x = Math.round(axis.x(axis.t1 - ago)) + 0.5;
+      for (let s = 0; s <= axis.span; s += step) {
+        // live: back from now; a recording: on from its start
+        const x = Math.round(axis.x(axis.fixed ? s : axis.t1 - s)) + 0.5;
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, h - (labels ? 14 : 0));
         ctx.stroke();
-        if (labels) ctx.fillText(ago === 0 ? "now" : step === 60 ? `-${ago / 60}m` : `-${ago}s`, x, h - 2);
+        if (labels) ctx.fillText(axis.fixed ? label(s) : s === 0 ? "now" : `-${label(s)}`, x, h - 2);
       }
     }
 
@@ -593,7 +690,8 @@
         ctx.textAlign = "center";
         ctx.fillStyle = C.text;
         let msg = "start the mic or simulate";
-        if (source && !heard) msg = "listening for beats...";
+        if (!source && analysis) msg = `no steady beats found in ${analysis.name}`;
+        else if (source && !heard) msg = "listening for beats...";
         else if (source && !locked) msg = "ticks heard, finding the beat rate...";
         else if (source) msg = progressText();
         ctx.fillText(msg, cx, mid - 16);
@@ -751,6 +849,11 @@
       settings[key] = value;
       settings = sanitize(settings);
       saveSettings();
+      if (!source && analysis) {
+        // look at the same recording with the new settings
+        if (key !== "span") reanalyze();
+        return;
+      }
       if (det) {
         if (key === "bph") {
           for (const ev of det.setBph(settings.bph)) handle(ev);
@@ -773,6 +876,13 @@
       el.sim.addEventListener("click", startSim);
       el.stop.addEventListener("click", stop);
       el.record.addEventListener("click", startRecording);
+      el.open.addEventListener("click", () => el.file.click());
+      el.file.addEventListener("change", () => {
+        const file = el.file.files && el.file.files[0];
+        // cleared so picking the same file again still fires a change
+        el.file.value = "";
+        if (file) analyzeFile(file);
+      });
       el.bph.addEventListener("change", () =>
         onSetting("bph", el.bph.value === "auto" ? "auto" : Number(el.bph.value)),
       );
@@ -792,9 +902,11 @@
       stop,
       startMic,
       startSim,
+      record: startRecording,
+      analyzeFile,
       feed,
       // for tests
-      state: () => ({ settings, readings, beats, waves, beatCount, locked, running: !!source }),
+      state: () => ({ settings, readings, beats, waves, beatCount, locked, running: !!source, analysis }),
     };
   }
 

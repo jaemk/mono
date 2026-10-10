@@ -20,7 +20,9 @@
         <button id="start" class="primary">start mic</button>
         <button id="sim">simulate</button>
         <button id="stop" disabled>stop</button>
-        <button id="record" disabled title="save the next 30 s of raw input as a wav file">record 30 s</button>
+        <button id="record" title="record 30 s from the mic, then analyze it">record 30 s</button>
+        <button id="open" title="analyze an audio file of a watch ticking">analyze file</button>
+        <input id="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac" hidden>
         <a id="save" class="button" hidden>save recording</a>
       </div>
       <div class="settings">
@@ -76,7 +78,7 @@
 
       <section class="panel readout" aria-live="polite">
         <div class="metric big">
-          <span class="label">rate</span>
+          <span id="rate-label" class="label">rate</span>
           <span class="value"><span id="rate">--</span><span class="unit">s/d</span></span>
         </div>
         <div class="metric">
@@ -120,6 +122,11 @@
       meter; if they don't, move the watch closer or raise the sensitivity. Faint ticks read
       steadier with a longer averaging window. Sound card clocks can be off by a few s/d: time a
       known-good watch and enter the difference as mic correction.
+    </p>
+    <p class="help">
+      To measure without watching it live, press record 30 s: it listens for 30 seconds, then
+      reads the rate over the whole recording and offers it to save. Analyze file does the same
+      for an audio file you already have. Changing a setting reads the same audio again.
     </p>
   </main>
 
