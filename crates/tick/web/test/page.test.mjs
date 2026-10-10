@@ -125,6 +125,107 @@ test("sensitivity applies to a running source", async () => {
   assert.ok(p.app.state().beatCount > 10);
 });
 
+test("encodeWav writes mono 32-bit float wav that round trips", () => {
+  const samples = new Float32Array([0, 1e-7, -0.5, 0.25, 1]);
+  const bytes = tick.encodeWav(samples, 44100);
+  const v = new DataView(bytes.buffer);
+  const tag = (at) => String.fromCharCode(...bytes.slice(at, at + 4));
+  assert.equal(tag(0), "RIFF");
+  assert.equal(v.getUint32(4, true), bytes.length - 8);
+  assert.equal(tag(8), "WAVE");
+  assert.equal(tag(12), "fmt ");
+  assert.equal(v.getUint32(16, true), 18);
+  assert.equal(v.getUint16(20, true), 3);
+  assert.equal(v.getUint16(22, true), 1);
+  assert.equal(v.getUint32(24, true), 44100);
+  assert.equal(v.getUint32(28, true), 44100 * 4);
+  assert.equal(v.getUint16(32, true), 4);
+  assert.equal(v.getUint16(34, true), 32);
+  assert.equal(tag(38), "fact");
+  assert.equal(v.getUint32(46, true), 5);
+  assert.equal(tag(50), "data");
+  assert.equal(v.getUint32(54, true), 20);
+  assert.equal(bytes.length, 58 + 20);
+  const back = new Float32Array(bytes.buffer.slice(58));
+  assert.deepEqual(back, samples);
+});
+
+/** Capture downloads: the anchor clicked, and object urls made and revoked. */
+function captureDownloads(win) {
+  const got = { clicks: [], urls: [], revoked: [] };
+  win.URL.createObjectURL = (blob) => {
+    got.urls.push(blob);
+    return `blob:test/${got.urls.length}`;
+  };
+  win.URL.revokeObjectURL = (url) => got.revoked.push(url);
+  win.HTMLAnchorElement.prototype.click = function () {
+    got.clicks.push({ href: this.href, download: this.download, attached: this.isConnected });
+  };
+  return got;
+}
+
+test("record saves the next 30 s of raw input as a wav (TICK-24)", async () => {
+  const p = boot();
+  const got = captureDownloads(p.win);
+  assert.equal(p.$("record").disabled, true, "nothing to record while idle");
+  assert.equal(p.$("record").textContent, "record 30 s");
+  const audio = fakeAudio(p.win);
+  await p.app.startMic();
+  assert.equal(p.$("record").disabled, false);
+  p.click("record");
+  assert.equal(p.$("record").disabled, true);
+  assert.equal(p.$("record").textContent, "recording... 30 s");
+  const watch = { bph: 18000, rate: 100, amp: 0.05, seed: 11 };
+  audio.play(watch, 10);
+  p.flush();
+  assert.equal(p.$("record").textContent, "recording... 20 s");
+  assert.equal(got.clicks.length, 0);
+  // the rest of the 30 s (play runs in 2048 sample blocks, so a bit over)
+  audio.play({ ...watch, seed: 12 }, 21);
+  p.flush();
+  assert.equal(got.clicks.length, 1);
+  const click = got.clicks[0];
+  assert.match(click.download, /^tick-\d{8}-\d{6}-auto\.wav$/);
+  assert.equal(click.href, "blob:test/1");
+  assert.equal(click.attached, true);
+  assert.equal(p.$("record").textContent, "record 30 s");
+  assert.equal(p.$("record").disabled, false);
+  // the anchor is gone and its url revoked once the download has started
+  assert.equal(p.win.document.querySelectorAll("a[download]").length, 0);
+  assert.deepEqual(got.revoked, ["blob:test/1"]);
+
+  const blob = got.urls[0];
+  assert.equal(blob.type, "audio/wav");
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  assert.equal(bytes.length, 58 + 30 * 48000 * 4);
+  const samples = new Float32Array(bytes.buffer.slice(58));
+  // exactly the samples the mic sent, from the click on
+  const first = D.synth({ sampleRate: 48000, ...watch }).next(2048 * Math.ceil((10 * 48000) / 2048));
+  assert.deepEqual(samples.subarray(0, first.length), first);
+  // the detector kept running throughout
+  assert.ok(p.app.state().beatCount > 0);
+});
+
+test("stopping cancels a recording, and a new source starts clean", async () => {
+  const p = boot();
+  const got = captureDownloads(p.win);
+  const audio = fakeAudio(p.win);
+  await p.app.startMic();
+  p.click("record");
+  audio.play({ bph: 18000 }, 5);
+  p.click("stop");
+  assert.equal(p.$("record").textContent, "record 30 s");
+  assert.equal(p.$("record").disabled, true);
+  await p.app.startMic();
+  audio.play({ bph: 18000 }, 31);
+  assert.equal(got.clicks.length, 0, "nothing saved");
+  // a second click while recording does nothing
+  p.click("record");
+  p.click("record");
+  audio.play({ bph: 18000 }, 31);
+  assert.equal(got.clicks.length, 1);
+});
+
 test("pickRange and fmtRate", () => {
   assert.equal(tick.pickRange(0), 5);
   assert.equal(tick.pickRange(4.3), 5);

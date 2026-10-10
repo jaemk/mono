@@ -37,6 +37,13 @@ displays as the microphone does. `stop` ends either source.
 A denied microphone, a missing `getUserMedia` (insecure context or old browser), or a failed
 audio setup shows an error line and leaves the page idle.
 
+### TICK-24
+While a source runs, `record 30 s` saves the next 30 seconds of input, exactly the samples
+the detector gets (unprocessed, at the input's sample rate), and downloads them as a mono
+32-bit float WAV named `tick-<yyyymmdd>-<hhmmss>-<beat rate setting>.wav`. The button counts
+down while recording, and the detector keeps running. `stop` or a new source cancels a
+recording without saving. Recordings never leave the browser except as that download.
+
 ## Detection
 
 ### TICK-7

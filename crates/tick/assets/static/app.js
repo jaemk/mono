@@ -35,6 +35,9 @@
   const SETTLING_ALPHA = 0.45;
   const SETTLING_DASH = [6, 4];
   const PROGRESS_W = 160;
+  // the record button saves this much raw input as a wav (TICK-24)
+  const RECORD_SECS = 30;
+  const REVOKE_MS = 60000;
   // shared horizontal plot margins, so the rate graph and the beat trace line
   // up in time
   const PAD_L = 48;
@@ -73,6 +76,36 @@
 
   const signed = (v, digits = 1) => (v > 0 ? "+" : v < 0 ? "-" : "") + Math.abs(v).toFixed(digits);
 
+  /**
+   * Mono 32-bit float WAV (format 3, with the fact chunk non-PCM formats
+   * carry), so the samples round trip exactly, however quiet the mic is.
+   */
+  function encodeWav(samples, sampleRate) {
+    const dataBytes = samples.length * 4;
+    const buf = new ArrayBuffer(58 + dataBytes);
+    const v = new DataView(buf);
+    const tag = (at, s) => [...s].forEach((c, i) => v.setUint8(at + i, c.charCodeAt(0)));
+    tag(0, "RIFF");
+    v.setUint32(4, 50 + dataBytes, true);
+    tag(8, "WAVE");
+    tag(12, "fmt ");
+    v.setUint32(16, 18, true);
+    v.setUint16(20, 3, true); // IEEE float
+    v.setUint16(22, 1, true); // mono
+    v.setUint32(24, sampleRate, true);
+    v.setUint32(28, sampleRate * 4, true); // byte rate
+    v.setUint16(32, 4, true); // block align
+    v.setUint16(34, 32, true); // bits per sample
+    v.setUint16(36, 0, true); // no extension
+    tag(38, "fact");
+    v.setUint32(42, 4, true);
+    v.setUint32(46, samples.length, true);
+    tag(50, "data");
+    v.setUint32(54, dataBytes, true);
+    for (let i = 0; i < samples.length; i++) v.setFloat32(58 + i * 4, samples[i], true);
+    return new Uint8Array(buf);
+  }
+
   function fmtRate(v) {
     return Math.abs(v) < 0.05 ? "0.0" : signed(v);
   }
@@ -96,6 +129,7 @@
       start: $("start"),
       sim: $("sim"),
       stop: $("stop"),
+      record: $("record"),
       bph: $("set-bph"),
       average: $("set-average"),
       span: $("set-span"),
@@ -130,6 +164,8 @@
     let waves = [];
     let beatCount = 0;
     let locked = null;
+    // a recording in progress: { buf, len, sampleRate }
+    let rec = null;
     let shownLevel = 0;
     let deadFrames = 0;
     // beats heard since the source started, indexed or not
@@ -189,13 +225,15 @@
       deadFrames = 0;
       heard = 0;
       clearData();
-      source = { stop: stopFn };
+      source = { stop: stopFn, sampleRate };
+      rec = null;
       showError("");
       render();
     }
 
     function feed(chunk) {
       if (!det) return;
+      if (rec) record(chunk);
       for (const ev of det.push(chunk)) handle(ev);
       now = det.time();
       const keep = now - SPANS[SPANS.length - 1] - 1;
@@ -223,11 +261,53 @@
 
     function stop() {
       startGen++;
+      rec = null;
       if (source) {
         source.stop();
         source = null;
       }
       render();
+    }
+
+    // ---------------------------------------------------------------------
+    // recording (TICK-24)
+    // ---------------------------------------------------------------------
+
+    function startRecording() {
+      if (!source || rec) return;
+      const sampleRate = source.sampleRate;
+      rec = { buf: new Float32Array(RECORD_SECS * sampleRate), len: 0, sampleRate };
+      render();
+    }
+
+    /** Keep the raw samples, exactly as the detector gets them. */
+    function record(chunk) {
+      const n = Math.min(chunk.length, rec.buf.length - rec.len);
+      rec.buf.set(chunk.subarray(0, n), rec.len);
+      rec.len += n;
+      if (rec.len === rec.buf.length) {
+        const done = rec;
+        rec = null;
+        download(encodeWav(done.buf, done.sampleRate), recordingName());
+      }
+    }
+
+    function recordingName() {
+      const d = new win.Date();
+      const p = (v) => String(v).padStart(2, "0");
+      const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+      return `tick-${stamp}-${settings.bph}.wav`;
+    }
+
+    function download(bytes, name) {
+      const url = win.URL.createObjectURL(new win.Blob([bytes], { type: "audio/wav" }));
+      const a = doc.createElement("a");
+      a.href = url;
+      a.download = name;
+      doc.body.appendChild(a);
+      a.click();
+      a.remove();
+      win.setTimeout(() => win.URL.revokeObjectURL(url), REVOKE_MS);
     }
 
     async function startMic() {
@@ -374,6 +454,10 @@
       el.start.disabled = !!source;
       el.sim.disabled = !!source;
       el.stop.disabled = !source;
+      el.record.disabled = !source || !!rec;
+      el.record.textContent = rec
+        ? `recording... ${Math.ceil((rec.buf.length - rec.len) / rec.sampleRate)} s`
+        : `record ${RECORD_SECS} s`;
       renderMeter();
     }
 
@@ -669,6 +753,7 @@
       el.start.addEventListener("click", startMic);
       el.sim.addEventListener("click", startSim);
       el.stop.addEventListener("click", stop);
+      el.record.addEventListener("click", startRecording);
       el.bph.addEventListener("change", () =>
         onSetting("bph", el.bph.value === "auto" ? "auto" : Number(el.bph.value)),
       );
@@ -695,7 +780,7 @@
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createTick, sanitize, pickRange, fmtRate, toDb, meterPct, DEFAULTS };
+    module.exports = { createTick, sanitize, pickRange, fmtRate, toDb, meterPct, encodeWav, DEFAULTS };
   } else {
     createTick(root).start();
   }
