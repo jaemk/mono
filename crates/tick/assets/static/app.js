@@ -26,7 +26,7 @@
     CL: "crown left",
     CR: "crown right",
   };
-  // the big readout's trend compares the rate with this many seconds ago,
+  // full screen mode's trend compares the rate with this many seconds ago,
   // and calls a change under TREND_STEADY s/d steady (TICK-28)
   const TREND_SECS = 5;
   const TREND_STEADY = 1;
@@ -306,9 +306,8 @@
     const el = {
       status: $("status"),
       error: $("error"),
-      start: $("start"),
+      run: $("run"),
       sim: $("sim"),
-      stop: $("stop"),
       record: $("record"),
       save: $("save"),
       open: $("open"),
@@ -332,6 +331,8 @@
       focusTrend: $("focus-trend"),
       focusBeatError: $("focus-beat-error"),
       focusExit: $("focus-exit"),
+      focusRun: $("focus-run"),
+      focusSettings: $("focus-settings"),
       drop: $("drop"),
       sessionPos: $("session-pos"),
       sessionAdd: $("session-add"),
@@ -385,8 +386,13 @@
     // the screen wake lock held while a source runs (TICK-27)
     let wake = null;
     let wakePending = false;
-    // whether the big readout asked for fullscreen (TICK-28)
+    // whether full screen mode asked for browser fullscreen (TICK-28)
     let focusFull = false;
+    // where the settings live outside full screen mode, and whether they were open there
+    const settingsHome = el.settingsBox.parentNode;
+    let settingsWasOpen = true;
+    // the startGen of a mic still opening, or -1
+    let opening = -1;
     // saved position results (TICK-29)
     let session = loadSession();
     // where the pointer is over the rate graph or beat trace, as a fraction
@@ -671,9 +677,31 @@
       el.save.hidden = true;
     }
 
+    /** Open the mic; the run button reads `starting...` until it opens or fails. */
     async function startMic() {
       stop();
       const gen = startGen;
+      opening = gen;
+      render();
+      try {
+        await openMic(gen);
+      } finally {
+        if (opening === gen) {
+          opening = -1;
+          render();
+        }
+      }
+    }
+
+    const isOpening = () => opening === startGen;
+
+    /** The run button: stop what runs (or is opening), else start the mic. */
+    function toggleRun() {
+      if (source || isOpening()) stop();
+      else startMic();
+    }
+
+    async function openMic(gen) {
       const md = win.navigator.mediaDevices;
       if (!md || !md.getUserMedia) {
         showError("The microphone needs a secure (https) page in a browser with getUserMedia.");
@@ -848,9 +876,13 @@
       // only a change of state is announced (the status is a live region)
       if (el.status.textContent !== state) el.status.textContent = state;
       el.status.dataset.state = state;
-      el.start.disabled = !!source;
+      const busy = !!source || isOpening();
+      for (const b of [el.run, el.focusRun]) {
+        b.textContent = source ? "stop" : busy ? "starting..." : "start mic";
+        if (busy) b.dataset.running = "";
+        else delete b.dataset.running;
+      }
       el.sim.disabled = !!source;
-      el.stop.disabled = !source;
       el.record.disabled = !!rec;
       if (rec) {
         el.record.textContent = `recording... ${Math.ceil((rec.buf.length - rec.len) / rec.sampleRate)} s`;
@@ -1230,10 +1262,14 @@
     }
 
     // ---------------------------------------------------------------------
-    // big readout (TICK-28)
+    // full screen mode (TICK-28)
     // ---------------------------------------------------------------------
 
     function openFocus() {
+      // the same settings, folded under their toggle (TICK-28)
+      settingsWasOpen = el.settingsBox.open;
+      el.settingsBox.open = false;
+      el.focusSettings.append(el.settingsBox);
       el.focusView.hidden = false;
       const fs = el.focusView.requestFullscreen;
       if (fs) {
@@ -1246,7 +1282,10 @@
     }
 
     function closeFocus() {
+      settingsHome.append(el.settingsBox);
+      el.settingsBox.open = settingsWasOpen;
       el.focusView.hidden = true;
+      fitSettings();
       if (focusFull && doc.fullscreenElement && doc.exitFullscreen) doc.exitFullscreen();
       focusFull = false;
       el.focus.focus();
@@ -1350,8 +1389,7 @@
       if (e.key === " ") {
         // instead of pressing whichever button has focus
         e.preventDefault();
-        if (source) stop();
-        else startMic();
+        toggleRun();
       } else if (e.key === "r") {
         startRecording();
       } else if (e.key === "f") {
@@ -1374,7 +1412,8 @@
 
     /** Fold the settings away on a narrow screen, and open them on a wide one. */
     function fitSettings() {
-      if (!win.matchMedia) return;
+      // full screen mode keeps them folded (entering fullscreen resizes)
+      if (!win.matchMedia || !el.focusView.hidden) return;
       const narrow = win.matchMedia(NARROW).matches;
       if (!narrow) el.settingsBox.open = true;
       return narrow;
@@ -1417,9 +1456,9 @@
 
     function start() {
       showSettings();
-      el.start.addEventListener("click", startMic);
+      el.run.addEventListener("click", toggleRun);
+      el.focusRun.addEventListener("click", toggleRun);
       el.sim.addEventListener("click", startSim);
-      el.stop.addEventListener("click", stop);
       el.record.addEventListener("click", startRecording);
       el.open.addEventListener("click", () => el.file.click());
       for (const b of doc.querySelectorAll("[data-info]")) {
@@ -1434,7 +1473,7 @@
       for (const type of ["dragenter", "dragover", "dragleave", "drop"]) doc.addEventListener(type, onDrag);
       el.focus.addEventListener("click", openFocus);
       el.focusExit.addEventListener("click", closeFocus);
-      // leaving fullscreen (escape, the browser's own control) leaves the big readout
+      // leaving fullscreen (escape, the browser's own control) leaves full screen mode
       doc.addEventListener("fullscreenchange", () => {
         if (!doc.fullscreenElement && focusFull && !el.focusView.hidden) closeFocus();
       });

@@ -21,10 +21,8 @@
         <div class="group" role="group" aria-labelledby="live-label">
           <span id="live-label" class="group-label">live</span>
           <div class="buttons">
-            <button id="start" class="primary" title="listen to the microphone (space)">start mic</button>
-            <button id="sim">simulate</button>
-            <button id="stop" disabled title="stop (space)">stop</button>
-            <button id="focus" title="large readout for reading at a distance (f)">big readout</button>
+            <button id="run" class="primary run" title="start or stop listening to the microphone (space)">start mic</button>
+            <button id="focus" title="large readout for reading at a distance (f)">full screen</button>
           </div>
         </div>
         <div class="group" role="group" aria-labelledby="offline-label">
@@ -89,6 +87,9 @@
             <option value="30">&plusmn;30 s/d</option>
           </select>
         </label>
+        <div class="setting"><span>test</span>
+          <button id="sim" title="feed the detector a synthesized 28800 bph watch in place of the microphone">simulate</button>
+        </div>
       </div>
       </details>
     </section>
@@ -188,9 +189,9 @@
     </p>
     <p class="help">
       To regulate, time the watch in a few positions and save each result under positions; the
-      delta between them shows how evenly it runs. Big readout shows the rate large enough to
-      read while you work on the watch. Keys: space starts or stops the mic, r records, f toggles
-      the big readout.
+      delta between them shows how evenly it runs. Full screen mode shows the rate large enough
+      to read while you work on the watch. Keys: space starts or stops the mic, r records, f
+      toggles full screen mode. To try the page without a watch, use simulate in the settings.
     </p>
   </main>
 
@@ -199,7 +200,12 @@
     <div class="focus-rate"><span id="focus-rate">--</span><span id="focus-trend" class="focus-trend"></span></div>
     <div class="focus-unit">s/d</div>
     <div class="focus-sub"><span id="focus-beat-error">--</span> ms beat error</div>
-    <button id="focus-exit">exit</button>
+    <div class="focus-buttons">
+      <button id="focus-run" class="primary run">start mic</button>
+      <button id="focus-exit">exit full screen</button>
+    </div>
+    <!-- the settings move in here while full screen mode is open -->
+    <div id="focus-settings" class="focus-settings"></div>
   </div>
 
   <div id="drop" class="drop" hidden><span>drop an audio file to analyze it</span></div>

@@ -1,5 +1,5 @@
 // The tick page's working aids under jsdom (spec/tick.md TICK-27 to TICK-35):
-// wake lock, big readout, positions, target band, graph cursor, dropped
+// wake lock, full screen mode, the run button, positions, target band, graph cursor, dropped
 // files, folding settings, keys, and the status live region.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -104,14 +104,14 @@ test("a running source holds a screen wake lock, and stop lets it go (TICK-27)",
   // no wake lock api: nothing to hold
   p.click("sim");
   assert.equal(p.app.state().wake, null);
-  p.click("stop");
+  p.click("run");
 
   const log = fakeWakeLock(p.win);
   p.click("sim");
   await settle();
   assert.equal(log.requests, 1);
   assert.equal(p.app.state().wake, log.sentinels[0]);
-  p.click("stop");
+  p.click("run");
   assert.equal(log.released, 1);
   assert.equal(p.app.state().wake, null);
 
@@ -132,13 +132,13 @@ test("a running source holds a screen wake lock, and stop lets it go (TICK-27)",
   // an old sentinel letting go later leaves the new one alone
   log.sentinels[1].lose();
   assert.equal(p.app.state().wake, log.sentinels[2]);
-  p.click("stop");
+  p.click("run");
 
   // a lock granted after stop is handed straight back
   const slow = boot();
   const held = fakeWakeLock(slow.win, { hold: true });
   slow.click("sim");
-  slow.click("stop");
+  slow.click("run");
   held.resolve[0]();
   await settle();
   assert.equal(held.released, 1);
@@ -154,7 +154,50 @@ test("a running source holds a screen wake lock, and stop lets it go (TICK-27)",
   assert.equal(denied.app.state().running, true);
 });
 
-test("the big readout shows the rate, beat error, status, and trend, and closes (TICK-28)", async () => {
+test("full screen mode has the run button and the settings, folded, moved in from the page (TICK-28, TICK-36)", async () => {
+  let narrow = false;
+  const p = boot({ media: () => narrow });
+  const box = p.$("settings-box");
+  const home = box.parentNode;
+  const audio = fakeAudio(p.win);
+  p.click("focus");
+  assert.equal(box.parentNode, p.$("focus-settings"));
+  assert.equal(box.open, false);
+  // entering browser fullscreen resizes the window; the settings stay folded
+  p.win.dispatchEvent(new p.win.Event("resize"));
+  assert.equal(box.open, false);
+  // they still work in there
+  box.open = true;
+  p.change("set-target", "10");
+  assert.equal(p.app.state().settings.target, "10");
+
+  // the run button starts and stops the mic, and matches the page's
+  assert.equal(p.$("focus-run").textContent, "start mic");
+  p.click("focus-run");
+  assert.equal(p.$("focus-run").textContent, "starting...");
+  await settle();
+  assert.equal(p.$("focus-run").textContent, "stop");
+  assert.equal(p.$("run").textContent, "stop");
+  assert.equal(p.$("focus-run").dataset.running, "");
+  audio.play({ bph: 28800 }, 1);
+  p.click("focus-run");
+  assert.equal(p.app.state().running, false);
+  assert.equal(p.$("focus-run").textContent, "start mic");
+
+  // back on the page, open as they were (wide: open)
+  p.click("focus-exit");
+  assert.equal(box.parentNode, home);
+  assert.equal(box.open, true);
+  // narrow and folded before: folded after
+  narrow = true;
+  box.open = false;
+  p.click("focus");
+  box.open = true;
+  p.click("focus-exit");
+  assert.equal(box.open, false);
+});
+
+test("full screen mode shows the rate, beat error, status, and trend, and closes (TICK-28)", async () => {
   const p = boot();
   const view = p.$("focus-view");
   assert.equal(view.hidden, true);
@@ -185,7 +228,7 @@ test("the big readout shows the rate, beat error, status, and trend, and closes 
   assert.equal(view.hidden, true);
 
   // stopped, there is no trend to show
-  p.click("stop");
+  p.click("run");
   p.click("focus");
   assert.equal(p.$("focus-trend").textContent, "");
   p.click("focus-exit");
@@ -299,7 +342,7 @@ test("positions save settled results, sum them up, and persist (TICK-29)", async
   assert.equal(p.win.localStorage.getItem("tick.session"), "[]");
 
   // the button does nothing without a result (a stale click)
-  p.click("stop");
+  p.click("run");
   p.click("sim");
   p.click("session-add");
   assert.deepEqual(rows(), []);
@@ -350,7 +393,7 @@ test("the target band shades the rate graph and marks the readout (TICK-30)", ()
   p.change("set-target", "off");
   assert.equal(p.$("rate").dataset.tolerance, "");
   assert.equal(p.$("beat-error").dataset.level, "");
-  p.click("stop");
+  p.click("run");
   assert.equal(p.$("rate").dataset.tolerance, "", "stopped, the last reading stays up");
 });
 
@@ -392,7 +435,7 @@ test("pointing at a graph reads the rate and the beat there (TICK-31)", () => {
   assert.ok(!texts(p.ctx("rate-canvas")).some((t) => / at /.test(t)));
   // a new source starts without one
   point("rate-canvas", 0.5);
-  p.click("stop");
+  p.click("run");
   p.click("sim");
   assert.equal(p.app.state().cursor, null);
 });

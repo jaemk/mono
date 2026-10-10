@@ -29,9 +29,15 @@ of it per tick, so a backgrounded tab does not catch up in one burst. A sound ca
 `mic correction` setting in s/d is added to every rate reading.
 
 ### TICK-5
-`simulate` feeds the detector a synthesized watch instead of the microphone: 28800 bph,
-+6.0 s/d, 0.4 ms beat error, with background noise. It runs through the same detector and
-displays as the microphone does. `stop` ends either source.
+`simulate`, a button in the settings, feeds the detector a synthesized watch instead of the
+microphone: 28800 bph, +6.0 s/d, 0.4 ms beat error, with background noise. It runs through the
+same detector and displays as the microphone does, and is disabled while a source runs.
+
+### TICK-36
+One run button starts and stops: `start mic` when idle, `starting...` while the mic opens, and
+`stop` while the mic or simulate runs. Pressed while starting or running, it stops (a mic still
+opening is released when it opens); otherwise it starts the mic. Full screen mode (TICK-28)
+has the same button.
 
 ### TICK-6
 A denied microphone, a missing `getUserMedia` (insecure context or old browser), or a failed
@@ -226,12 +232,14 @@ phone's screen stays on through a measurement. `stop` releases it. When the brow
 granted after the source stopped is released at once; a refused one is ignored.
 
 ### TICK-28
-`big readout` (or `f`) covers the page with the rate, beat error, and status in type large
-enough to read at arm's length, fullscreen where the browser allows it. Next to the rate, while
-a source runs, an arrow shows the trend against the reading 5 s or more before the latest: up
-when the rate rose by more than 1 s/d, down when it fell by more, and level otherwise. `exit`,
-escape, `f`, or leaving fullscreen closes it. The rate there is dimmed and colored as in the
-readout.
+`full screen` (or `f`) opens full screen mode: it covers the page with the rate, beat error,
+and status in type large enough to read at arm's length, fullscreen where the browser allows
+it. Next to the rate, while a source runs, an arrow shows the trend against the reading 5 s or
+more before the latest: up when the rate rose by more than 1 s/d, down when it fell by more,
+and level otherwise. The rate there is dimmed and colored as in the readout. Under it are the
+run button (TICK-36) and `exit full screen`, and the settings, moved in from the page and
+folded under their `settings` toggle; on leaving, they move back, open or folded as they were
+(TICK-33). `exit full screen`, escape, `f`, or leaving browser fullscreen closes it.
 
 ### TICK-29
 The positions panel keeps a result per watch position (dial up, dial down, crown up, down,
@@ -247,7 +255,7 @@ position are dropped on load.
 ### TICK-30
 The `target` setting picks a rate band: off (default), -4 to +6 s/d, or +-5, 10, 20, or 30
 s/d. With one set, the rate graph shades the band with dashed edges (its range grows to hold
-the band), and a rate outside it shows amber in the readout, the big readout, and the
+the band), and a rate outside it shows amber in the readout, full screen mode, and the
 positions table. Beat error shows amber over 1 ms and red over 3 ms there too.
 
 ### TICK-31
@@ -264,13 +272,14 @@ to the browser.
 
 ### TICK-33
 The settings sit in a section that, below 640px wide, folds under a `settings` toggle and
-starts folded. Growing past 640px opens it. The buttons are grouped as `live` (start mic,
-simulate, stop, big readout) and `offline` (record, analyze file, save).
+starts folded. Growing past 640px opens it (not in full screen mode, where they stay folded).
+The buttons are grouped as `live` (the run button and full screen) and `offline` (record,
+analyze file, save); simulate is in the settings (TICK-5).
 
 ### TICK-34
-Keys: space starts the mic, or stops the running source, in place of pressing the focused
-button; `r` records 30 s (TICK-24); `f` toggles the big readout (TICK-28); escape closes the
-info dialog or the big readout. Keys are ignored with ctrl, meta, or alt held, while typing in
+Keys: space presses the run button (TICK-36) in place of the focused button; `r` records 30 s
+(TICK-24); `f` toggles full screen mode (TICK-28); escape closes the info dialog or full
+screen mode. Keys are ignored with ctrl, meta, or alt held, while typing in
 a setting, and while an info dialog is open.
 
 ### TICK-35

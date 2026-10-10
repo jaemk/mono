@@ -191,7 +191,14 @@ button.primary {
   gap: 10px 16px;
 }
 
-.settings label {
+button.run[data-running] {
+  background: var(--panel);
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.settings label,
+.settings .setting {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -532,8 +539,11 @@ button.info:focus-visible {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* safe: open settings taller than the screen scroll instead of clipping */
+  justify-content: safe center;
   gap: 1vh;
+  padding: 16px 0;
+  overflow-y: auto;
   background: var(--bg);
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -581,8 +591,41 @@ button.info:focus-visible {
   font-size: min(6vw, 7vh);
 }
 
-#focus-exit {
+.focus-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
   margin-top: 3vh;
+}
+
+.focus-buttons button {
+  font-size: 16px;
+  padding: 10px 18px;
+}
+
+.focus-settings {
+  max-width: calc(100% - 32px);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* in full screen mode the settings always fold, under their toggle */
+.focus-settings .settings-box summary {
+  display: list-item;
+  cursor: pointer;
+  text-align: center;
+  font: 11px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
+.focus-settings .settings-box[open] summary {
+  margin-bottom: 6px;
+}
+
+.focus-settings .settings {
+  justify-content: center;
 }
 
 .drop {

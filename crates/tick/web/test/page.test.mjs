@@ -14,8 +14,9 @@ test("boots idle with defaults and an empty graph", () => {
   assert.equal(p.$("beat-error").textContent, "--");
   assert.equal(p.$("bph").textContent, "--");
   assert.equal(p.$("beats").textContent, "0");
-  assert.equal(p.$("start").disabled, false);
-  assert.equal(p.$("stop").disabled, true);
+  assert.equal(p.$("run").textContent, "start mic");
+  assert.equal(p.$("run").dataset.running, undefined);
+  assert.equal(p.$("sim").disabled, false);
   assert.equal(p.$("set-bph").value, "auto");
   assert.equal(p.$("set-average").value, "10");
   assert.equal(p.$("set-span").value, "60");
@@ -81,7 +82,7 @@ test("the input meter shows level, noise floor, and threshold while running", as
   assert.ok(pct("meter-threshold") > pct("meter-noise"), "threshold sits over the noise floor");
   assert.ok(parseFloat(p.$("meter-level").style.width) > pct("meter-threshold"), "ticks reach past it");
   assert.equal(p.$("meter-note").textContent, "");
-  p.click("stop");
+  p.click("run");
   assert.equal(p.$("meter-db").textContent, "--");
   assert.equal(p.$("meter-level").style.width, "0%");
 });
@@ -211,7 +212,7 @@ test("record opens the mic, records 30 s, then analyzes it and offers it to save
   assert.equal(p.$("record").disabled, false);
   assert.deepEqual(got.revoked, []);
   // still there after stop
-  p.click("stop");
+  p.app.stop();
   assert.equal(save.hidden, false);
   assert.equal(p.$("status").textContent, "analyzed");
 
@@ -264,7 +265,7 @@ test("stopping cancels a recording, and a new source starts clean", async () => 
   await p.app.startMic();
   p.click("record");
   audio.play({ bph: 18000 }, 5);
-  p.click("stop");
+  p.click("run");
   assert.equal(p.$("record").textContent, "record 30 s");
   assert.equal(p.app.state().analysis, null, "a cancelled recording is not analyzed");
   await p.app.startMic();
@@ -476,7 +477,8 @@ test("simulate locks on and reads the simulated watch", () => {
   p.click("sim");
   assert.equal(p.$("status").textContent, "listening");
   assert.equal(p.$("sim").disabled, true);
-  assert.equal(p.$("stop").disabled, false);
+  assert.equal(p.$("run").textContent, "stop");
+  assert.equal(p.$("run").dataset.running, "");
   assert.equal(p.intervals.size, 1);
   assert.ok(texts(p.ctx("rate-canvas")).includes("listening for beats..."));
   // ticks heard, rate not yet known
@@ -527,7 +529,7 @@ test("simulate locks on and reads the simulated watch", () => {
   const { readings } = p.app.state();
   assert.ok(readings[readings.length - 1].t - readings[0].t <= 301);
 
-  p.click("stop");
+  p.click("run");
   assert.equal(p.intervals.size, 0);
   assert.equal(p.$("status").textContent, "idle");
   // the last reading stays up after stopping
@@ -600,8 +602,10 @@ test("a backgrounded tab catches up at most a second at a time", () => {
 test("the mic opens with processing off and reads through the worklet", async () => {
   const p = boot();
   const audio = fakeAudio(p.win);
-  p.click("start");
+  p.click("run");
+  assert.equal(p.$("run").textContent, "starting...");
   await settle();
+  assert.equal(p.$("run").textContent, "stop");
   assert.deepEqual(audio.log.constraints, {
     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
     video: false,
@@ -618,7 +622,7 @@ test("the mic opens with processing off and reads through the worklet", async ()
   p.flush();
   assert.equal(p.$("bph").textContent, "21600 auto");
   assert.ok(Math.abs(rateOf(p) + 15) < 0.5, p.$("rate").textContent);
-  p.click("stop");
+  p.click("run");
   assert.equal(audio.log.tracksStopped, 1);
   assert.equal(audio.log.closed, 1);
 });
@@ -682,7 +686,7 @@ test("stopping while the mic is opening releases it", async () => {
   let grant;
   const audio = fakeAudio(p.win, { gum: () => new Promise((r) => (grant = r)) });
   const opening = p.app.startMic();
-  p.click("stop");
+  p.click("run");
   grant({ getTracks: () => [{ stop: () => audio.log.tracksStopped++ }] });
   await opening;
   assert.equal(audio.log.tracksStopped, 1);
