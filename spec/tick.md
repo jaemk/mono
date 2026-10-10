@@ -92,23 +92,37 @@ After an onset, further crossings are ignored for 0.6 of the beat period once th
 known, or 50 ms before then, so the unlock, impulse, and drop sounds within one beat count
 once.
 
+Once the rate is known and a beat has been indexed, a crossing only triggers within 0.15 of a
+period of a whole number of periods (at least one) after the last beat. A case or table that
+rings on after a beat (common through a phone mic, and longer than 0.6 of a 100 ms period at
+36000 bph) would otherwise trigger mid period, count as a beat, and lock out the real one. The
+gate opens when no beat has come for 4 periods, and while the auto rate is in doubt
+(TICK-10).
+
 ### TICK-9
-Each beat is timed by constant fraction: where its envelope first reaches halfway from the
-noise floor to that beat's own peak, interpolated between samples, searched from 12 ms before
-the trigger to 30 ms after it. This does not move with how loud the beat is, and a late trigger
-(on the impulse or drop sound instead of the unlock) is timed the same as an early one. Each
+Each beat is timed by constant fraction: where its envelope first reaches 30% of the way from
+the noise floor to that beat's own peak (taken from the trigger on), interpolated between
+samples. The search starts where this beat's rise began, stepping back from the trigger up to
+12 ms (a late trigger may have skipped the unlock) but not past a dip under that level, so the
+tail of the beat before is never picked. 30% is low enough that the unlock, often the weakest
+sound, clears it every beat; a level near another sound's height would flip between them. Each
 beat is reported with 2 ms of filtered signal before the trigger and 30 ms after, for the
 scope.
 
 ### TICK-10
 The beat rate is chosen from 12000, 14400, 18000, 19800, 21600, 25200, 28800, and 36000 bph.
-In `auto`, the detector scores each candidate against the last 24 onset intervals: the mean
-distance from each interval to its nearest whole number of periods, as a fraction of the
-period, plus 0.02 for each interval that spans missed beats. It locks the best candidate once
-one scores 0.08 or less (after at least 8 intervals). When a full window of 24 no longer fits
-the locked rate, the window is dropped and the choice is made again on at least 8 fresh
-intervals: the locked rate stays if it fits them, otherwise the best fitting candidate
-replaces it. Choosing a rate in the select locks it immediately.
+In `auto`, each candidate is scored by folding the last 24 onset times by its period
+(stretched by up to 0.4% either way, so a watch far off rate still lines up): the largest
+share of onsets within 0.08 of a period of one phase. Missed beats don't lower it; a ringing
+tail or stray click only dilutes it. A watch also folds cleanly at a multiple of its rate, so
+the lower candidate wins unless a higher one scores over 0.05 more. It locks the best
+candidate once at least 10 onsets are in and it scores 0.5 or more.
+
+Once locked, the rate is in doubt when a full window of 24 onsets scores under 0.5 for it, or
+when fewer than half the beats due got through the gate over the last 16 indexed beats (a
+different watch mostly lands outside it). In doubt the gate is off and the onsets start over:
+the locked rate stays if 10 fresh onsets fit it, and is replaced only once 24 fresh onsets fit
+another. Choosing a rate in the select locks it immediately and never doubts it.
 
 ### TICK-11
 Each beat gets an index: the previous index plus the interval divided by the period, rounded.
