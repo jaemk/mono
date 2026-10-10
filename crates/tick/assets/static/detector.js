@@ -36,28 +36,13 @@
   const PRE = 0.002;
   const POST = 0.03;
   const LOOKBACK = 0.012;
-  // low enough that the unlock, the first and often weakest sound, clears it
-  // every beat; a level near another sound's height flips between them
-  const CFD_FRAC = 0.3;
+  const CFD_FRAC = 0.5;
   const MIN_GAP = 0.05;
   const GAP_FRAC = 0.6;
-  // once tracking, triggers count only this close (in periods) to where the
-  // next beat is due, until no beat has come for GATE_PERIODS
-  const GATE = 0.15;
-  const GATE_PERIODS = 4;
-  // in auto, fewer than HIT_MIN of the beats due over the last HIT_BEATS
-  // accepted ones means the gate holds the wrong rate
-  const HIT_BEATS = 16;
-  const HIT_MIN = 0.5;
-  // the beat rate is chosen by folding the last AUTO_ONSETS onset times
-  // (at least AUTO_MIN); it locks once LOCK_MIN of them line up within
-  // CLUSTER_W of a period
-  const AUTO_MIN = 10;
-  const AUTO_ONSETS = 24;
-  const CLUSTER_W = 0.08;
-  const LOCK_MIN = 0.5;
-  const TIE = 0.05;
-  const STRETCH = [-0.004, -0.002, 0, 0.002, 0.004];
+  const AUTO_MIN = 8;
+  const AUTO_INTERVALS = 24;
+  const AUTO_FIT = 0.08;
+  const MULTI_PENALTY = 0.02;
   const MIN_READ_BEATS = 6;
   const MIN_READ_SPAN = 1;
   // a reading is settled once its beats span the averaging window, less this
@@ -97,40 +82,25 @@
   }
 
   /**
-   * How well a nominal period explains onset times: fold them by the period
-   * and take the largest share that lands within CLUSTER_W of one phase,
-   * over a few slightly stretched periods so a watch far off rate still
-   * lines up. Beats line up whatever beats were missed; a ringing tail or
-   * a stray click lands elsewhere and only dilutes the share.
+   * How well a nominal period explains onset intervals: the mean distance
+   * from each interval to its nearest whole number of periods, as a fraction
+   * of the period, plus a small penalty per interval that spans missed beats.
    */
-  function scorePeriod(period, times) {
-    let best = 0;
-    for (const s of STRETCH) {
-      const p = period * (1 + s);
-      const phase = times.map((t) => (t / p) % 1);
-      for (const a of phase) {
-        let count = 0;
-        for (const b of phase) {
-          const d = Math.abs(a - b);
-          if (Math.min(d, 1 - d) <= CLUSTER_W) count++;
-        }
-        best = Math.max(best, count);
-      }
+  function scorePeriod(period, intervals) {
+    let total = 0;
+    for (const d of intervals) {
+      const k = Math.round(d / period);
+      total += k < 1 ? 1 : Math.abs(d - k * period) / period + (k > 1 ? MULTI_PENALTY : 0);
     }
-    return best / times.length;
+    return total / intervals.length;
   }
 
-  /**
-   * The best fitting standard beat rate for the onset times. A watch's beats
-   * also line up at any multiple of its rate (an 18000 watch folds cleanly
-   * at 36000), but not at a fraction of it (a 36000 watch splits in two at
-   * 18000), so on a near tie the lower rate wins.
-   */
-  function bestBph(times) {
+  /** The best fitting standard beat rate for the intervals. */
+  function bestBph(intervals) {
     let best = null;
     for (const bph of BPH) {
-      const score = scorePeriod(periodOf(bph), times);
-      if (!best || score > best.score + TIE) best = { bph, score };
+      const score = scorePeriod(periodOf(bph), intervals);
+      if (!best || score < best.score) best = { bph, score };
     }
     return best;
   }
@@ -235,8 +205,8 @@
     let period = null;
     let auto = bphSetting === "auto";
     let doubt = false;
-    let onsets = [];
-    let hits = [];
+    let intervals = [];
+    let lastOnset = null;
     let beats = [];
     let prev = null;
     let t0 = null;
@@ -246,7 +216,6 @@
       period = periodOf(bph);
       auto = isAuto;
       doubt = false;
-      hits = [];
       // onsets before the lock may have been noise; judge knocks by beats
       peaks = [];
       peakRef = 0;
@@ -262,47 +231,30 @@
 
     // Lock the best fitting rate once one fits. Once locked, a full window the
     // locked rate no longer fits is dropped (it may straddle two watches) and
-    // the choice is made again on fresh onsets.
+    // the choice is made again on fresh intervals.
     function chooseRate() {
       if (period !== null && !doubt) {
-        if (onsets.length >= AUTO_ONSETS && scorePeriod(period, onsets) < LOCK_MIN) {
+        if (intervals.length >= AUTO_INTERVALS && scorePeriod(period, intervals) > AUTO_FIT) {
           doubt = true;
-          onsets = [];
+          intervals = [];
         }
         return;
       }
-      if (onsets.length < AUTO_MIN) return;
-      if (period !== null && scorePeriod(period, onsets) >= LOCK_MIN) {
+      if (intervals.length < AUTO_MIN) return;
+      if (period !== null && scorePeriod(period, intervals) <= AUTO_FIT) {
         doubt = false;
         return;
       }
-      // replacing a locked rate takes a full window, not a short burst
-      if (period !== null && onsets.length < AUTO_ONSETS) return;
-      const best = bestBph(onsets);
-      if (best.score >= LOCK_MIN) lock(best.bph, true);
-    }
-
-    /**
-     * Track how many of the beats due actually got through the gate. A
-     * different watch mostly lands outside it, so too few means the gate is
-     * holding the wrong rate: drop it and choose the rate again on ungated
-     * onsets (a ringing watch still hits nearly every beat).
-     */
-    function checkHits(k) {
-      hits.push(k);
-      if (hits.length > HIT_BEATS) hits.shift();
-      if (hits.length < HIT_BEATS) return;
-      const due = hits.reduce((a, b) => a + b, 0);
-      if (hits.length / due < HIT_MIN) {
-        doubt = true;
-        onsets = [];
-        hits = [];
-      }
+      const best = bestBph(intervals);
+      if (best.score <= AUTO_FIT) lock(best.bph, true);
     }
 
     function onBeat(t, peakAmp, wave) {
-      onsets.push(t);
-      if (onsets.length > AUTO_ONSETS) onsets.shift();
+      if (lastOnset !== null) {
+        intervals.push(t - lastOnset);
+        if (intervals.length > AUTO_INTERVALS) intervals.shift();
+      }
+      lastOnset = t;
       if (auto) chooseRate();
       const beat = { type: "beat", t, n: null, parity: null, offsetMs: null, peak: peakAmp, wave };
       if (period === null) {
@@ -315,7 +267,6 @@
         const k = Math.round((t - prev.t) / period);
         if (k < 1) return; // a second onset inside one beat: noise
         n = prev.n + k;
-        if (auto && !doubt) checkHits(k);
       } else {
         t0 = t;
       }
@@ -372,7 +323,7 @@
       over = env >= threshold ? over + 1 : 0;
       const na = pos < warmup || over > sustainedN ? warmA : over === 0 ? quietA : loudA;
       noise = na * noise + (1 - na) * env;
-      if (pos >= warmup && pos >= armedAt && prevEnv < threshold && env >= threshold && inGate()) {
+      if (pos >= warmup && pos >= armedAt && prevEnv < threshold && env >= threshold) {
         const frac = (threshold - prevEnv) / (env - prevEnv);
         const onset = pos - 1 + frac;
         const gap = period === null ? MIN_GAP : Math.max(MIN_GAP, GAP_FRAC * period);
@@ -410,24 +361,19 @@
 
     /**
      * A beat's time, by constant fraction: where its envelope first reaches
-     * CFD_FRAC of the way from the noise floor to this beat's own peak (taken
-     * from the trigger on, so an earlier tail can't inflate it). The search
-     * starts where this beat's rise began, stepping back from the trigger up
-     * to 12 ms (a late trigger may have skipped the unlock) but not past a
-     * dip under the level, so the tail of the beat before is never picked.
-     * The trigger crossing alone moves with the beat's loudness against the
-     * threshold, and near the noise it jumps between the unlock, impulse,
-     * and drop sounds.
+     * halfway from the noise floor to this beat's own peak, searched from
+     * 12 ms before the trigger (a late trigger may have skipped the unlock)
+     * to the end of the capture. The trigger crossing alone moves with the
+     * beat's loudness against the threshold, and near the noise it jumps
+     * between the unlock, impulse, and drop sounds.
      */
     function timeBeat(p) {
       const from = p.at - lookN;
       const to = p.at + postN;
       let top = 0;
-      for (let i = p.at; i < to; i++) top = Math.max(top, envRing[i & mask]);
+      for (let i = from; i < to; i++) top = Math.max(top, envRing[i & mask]);
       const level = noise + CFD_FRAC * (top - noise);
-      let start = p.at;
-      while (start > from && envRing[(start - 1) & mask] >= level) start--;
-      for (let i = Math.max(start, from + 1); i < to; i++) {
+      for (let i = from + 1; i < to; i++) {
         const a = envRing[(i - 1) & mask];
         const b = envRing[i & mask];
         if (a < level && b >= level) return i - 1 + (level - a) / (b - a);
@@ -442,20 +388,6 @@
       return out;
     }
 
-    /**
-     * Whether a trigger now could be the next beat. While beats are being
-     * tracked, only near a whole number of periods after the last one: a
-     * case or table ringing on after a beat would otherwise trigger mid
-     * period, count as a beat, and lock out the real one after it. With no
-     * beat for a few periods the gate opens again.
-     */
-    function inGate() {
-      if (period === null || !prev || doubt) return true;
-      const phase = (pos / sr - prev.t) / period;
-      if (phase > GATE_PERIODS) return true;
-      return phase >= 1 - GATE && Math.abs(phase - Math.round(phase)) <= GATE;
-    }
-
     function push(samples) {
       events = [];
       for (let i = 0; i < samples.length; i++) step(samples[i]);
@@ -464,7 +396,8 @@
 
     function setBph(bph) {
       bphSetting = bph;
-      onsets = [];
+      intervals = [];
+      lastOnset = null;
       if (bph === "auto") {
         period = null;
         auto = true;
@@ -519,17 +452,12 @@
   ];
   const BURST_TAU = 0.0006;
   const BEAT_LEN = 0.025;
-  // a case or table ringing on after the drop: two close tones, so the tail
-  // swells and fades as they beat
-  const RING_START = 0.009;
-  const RING_HZ = [3000, 3060];
 
   /**
    * A synthesized watch (TICK-5): `next(count)` returns the next `count`
    * samples. `rate` is in s/d (fast positive), `beatError` in ms (odd beats
    * land late by it), `noise` is the white noise level, and `drop` is the
-   * chance a beat is silent. `ring` adds a resonant tail at that fraction of
-   * the drop's level, decaying with `ringTau` seconds.
+   * chance a beat is silent.
    */
   function synth(opts = {}) {
     const sr = opts.sampleRate || 48000;
@@ -540,9 +468,6 @@
     const amp = opts.amp === undefined ? 0.5 : opts.amp;
     const start = opts.start === undefined ? 0.15 : opts.start;
     const drop = opts.drop || 0;
-    const ring = opts.ring || 0;
-    const ringTau = opts.ringTau || 0.02;
-    const beatLen = ring ? Math.max(BEAT_LEN, RING_START + 6 * ringTau) : BEAT_LEN;
     const rand = prng(opts.seed || 1);
     const period = periodOf(bph) / (1 + rate / 86400);
     const silent = new Map();
@@ -558,20 +483,15 @@
       for (let i = 0; i < count; i++, pos++) {
         const t = pos / sr;
         let v = noise * (rand() * 2 - 1);
-        const first = Math.max(0, Math.floor((t - start - beatLen - beatError) / period));
+        const first = Math.max(0, Math.floor((t - start - BEAT_LEN - beatError) / period));
         const last = Math.floor((t - start) / period);
         for (let k = first; k <= last; k++) {
           const tk = start + k * period + (k % 2 ? beatError : 0);
           const dt = t - tk;
-          if (dt < 0 || dt >= beatLen || (drop && isSilent(k))) continue;
+          if (dt < 0 || dt >= BEAT_LEN || (drop && isSilent(k))) continue;
           for (const [off, level, hz] of BURSTS) {
             const u = dt - off;
-            if (u >= 0 && u < BEAT_LEN) v += amp * level * Math.sin(2 * Math.PI * hz * u) * Math.exp(-u / BURST_TAU);
-          }
-          const u = dt - RING_START;
-          if (ring && u >= 0) {
-            const tone = Math.sin(2 * Math.PI * RING_HZ[0] * u) + Math.sin(2 * Math.PI * RING_HZ[1] * u);
-            v += amp * ring * 0.5 * tone * Math.exp(-u / ringTau);
+            if (u >= 0) v += amp * level * Math.sin(2 * Math.PI * hz * u) * Math.exp(-u / BURST_TAU);
           }
         }
         out[i] = v;

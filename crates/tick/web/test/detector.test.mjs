@@ -174,14 +174,12 @@ function feedParts(det, parts) {
 const zeros = { next: (n) => new Float32Array(n) };
 
 test("quiet ticks a little over room noise are read", () => {
-  // tick peaks 3x the noise amplitude (about 2.5x its envelope): each beat's
-  // time jitters by a fraction of a ms, which a 30 s window averages to
-  // within a few s/d
+  // tick peaks 3x the noise amplitude (about 2.5x its envelope)
   const { of } = run({ bph: 28800, rate: 4, beatError: 0.5, amp: 0.012, noise: 0.004, seed: 5 }, { average: 30 }, 40);
   assert.deepEqual(of("lock").map((e) => e.bph), [28800]);
   const r = last(of("reading"));
-  assert.ok(Math.abs(r.rate - 4) < 3, `rate ${r.rate}`);
-  assert.ok(Math.abs(r.beatError - 0.5) < 0.6, `beat error ${r.beatError}`);
+  assert.ok(Math.abs(r.rate - 4) < 1, `rate ${r.rate}`);
+  assert.ok(Math.abs(r.beatError - 0.5) < 0.3, `beat error ${r.beatError}`);
 });
 
 test("higher sensitivity reads ticks lower in the noise", () => {
@@ -233,28 +231,7 @@ test("loud knocks are ignored and do not hide the ticks after them", () => {
   // 6 beats/s for ~19.8 s, nearly all heard
   assert.ok(beats.length > 110, `${beats.length} beats`);
   assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - 9) < 0.5);
-});
-
-test("a knock on the beat is rejected as too loud", () => {
-  // knocks land right where a beat is due, so the gate lets them through
-  // and only the loudness check keeps them out
-  const det = D.createDetector({ sampleRate: SR, bph: 28800 });
-  const watch = D.synth({ sampleRate: SR, bph: 28800, amp: 0.01, noise: 0.001 });
-  const knock = D.synth({ sampleRate: SR, bph: 12000, start: 0, noise: 0, amp: 0.6 }).next(1200);
-  const period = Math.round(D.periodOf(28800) * SR);
-  const events = [];
-  let at = 0;
-  for (let i = 0; i < 12 * SR; i += 2048, at += 2048) {
-    const block = watch.next(2048);
-    for (let j = 0; j < 2048; j++) {
-      // every 13th beat, 3 ms early
-      const off = (at + j - Math.round(0.15 * SR) + Math.round(0.003 * SR)) % (13 * period);
-      if (at + j > 3 * SR && off >= 0 && off < knock.length) block[j] += knock[off];
-    }
-    events.push(...det.push(block));
-  }
-  assert.ok(det.levels().rejected >= 4, `${det.levels().rejected} rejected`);
-  assert.ok(events.filter((e) => e.type === "beat").every((b) => b.peak < 0.05), "no knock counted");
+  assert.ok(det.levels().rejected > 5, "knocks counted as rejected");
 });
 
 test("a watch moved closer to the mic is followed, not rejected as knocks", () => {
@@ -366,73 +343,14 @@ test("works at 44.1 kHz", () => {
   assert.ok(Math.abs(r.beatError - 0.5) < 0.05);
 });
 
-test("scorePeriod folds onsets and tolerates skipped beats and stray onsets", () => {
+test("scorePeriod prefers the true period and tolerates skipped beats", () => {
   const p = D.periodOf(28800);
-  // beats with a few missed, plus stray onsets mid period
-  const times = [0, 1, 2, 4, 5, 6, 9, 10, 11, 12].map((n) => 3 + n * p);
-  const mixed = [...times, 3 + 0.4 * p, 3 + 5.55 * p, 3 + 7.3 * p].sort((a, b) => a - b);
-  assert.equal(D.scorePeriod(p, times), 1);
-  assert.equal(D.bestBph(times).bph, 28800);
-  assert.equal(D.bestBph(mixed).bph, 28800);
-  assert.ok(Math.abs(D.scorePeriod(p, mixed) - 10 / 13) < 1e-9);
-  assert.ok(D.scorePeriod(D.periodOf(21600), times) < 0.5);
-  // a watch 300 s/d fast still folds within the stretch
-  const fast = times.map((t) => t / (1 + 300 / 86400));
-  assert.ok(D.scorePeriod(p, fast) >= 0.9);
-});
-
-test("bestBph picks the lower of two rates that both fold the beats", () => {
-  // an 18000 watch folds at 36000 too; a 36000 watch splits at 18000
-  const slow = Array.from({ length: 16 }, (_, n) => 1 + n * D.periodOf(18000));
-  const fast = Array.from({ length: 16 }, (_, n) => 1 + n * D.periodOf(36000));
-  assert.equal(D.bestBph(slow).bph, 18000);
-  assert.equal(D.bestBph(fast).bph, 36000);
-  assert.ok(D.scorePeriod(D.periodOf(18000), fast) <= 0.5);
-});
-
-for (const bph of [18000, 21600, 28800, 36000]) {
-  for (const auto of [true, false]) {
-    test(`a ringing case does not add beats at ${bph} bph (${auto ? "auto" : "fixed"})`, () => {
-      // the tail swells and fades for ~0.3 s, as loud as the drop at first
-      const watch = { bph, rate: 30, beatError: 0.3, amp: 0.05, noise: 0.002, ring: 0.8, ringTau: 0.06, seed: 5 };
-      const { of } = run(watch, auto ? { average: 30 } : { bph, average: 30 }, 40);
-      if (auto) assert.deepEqual(of("lock").map((e) => e.bph), [bph]);
-      const beats = of("beat").filter((b) => b.n !== null);
-      // never more beats than the watch made
-      assert.ok(beats.length <= Math.ceil((40 * bph) / 3600), `${beats.length} beats`);
-      assert.ok(beats.length > 0.9 * ((40 - 3) * bph) / 3600, `${beats.length} beats`);
-      const r = last(of("reading"));
-      assert.ok(r.settled);
-      assert.ok(Math.abs(r.rate - 30) < 1, `rate ${r.rate}`);
-      assert.ok(Math.abs(r.beatError - 0.3) < 0.35, `beat error ${r.beatError}`);
-    });
-  }
-}
-
-test("readings keep coming at 36000 bph with a ringing case", () => {
-  const { of } = run({ bph: 36000, rate: 30, amp: 0.05, ring: 1.5, ringTau: 0.05 }, { bph: 36000 }, 30);
-  const readings = of("reading");
-  // a reading on every beat to the end, no stall
-  assert.ok(last(readings).t > 29.9);
-  const gaps = readings.slice(1).map((r, i) => r.t - readings[i].t);
-  assert.ok(Math.max(...gaps) < 0.35, `longest gap ${Math.max(...gaps)}`);
-});
-
-test("the gate reopens when beats stop lining up, so a fixed wrong rate never stalls", () => {
-  // fixed at 28800, then a 21600 watch: its beats mostly miss the gate, which
-  // reopens after 4 periods with nothing
-  const det = D.createDetector({ sampleRate: SR, bph: 28800 });
-  const a = D.synth({ sampleRate: SR, bph: 28800 });
-  const b = D.synth({ sampleRate: SR, bph: 21600, start: 0.37 });
-  const events = feedParts(det, [
-    [a, 4],
-    [b, 4],
-  ]);
-  // beats are still heard from the new watch rather than going silent
-  const late = events.filter((e) => e.type === "beat" && e.t > 5);
-  assert.ok(late.length >= 4, `${late.length} beats heard after the switch`);
-  const gaps = late.slice(1).map((b, i) => b.t - late[i].t);
-  assert.ok(Math.max(...gaps) < 0.7, `longest gap ${Math.max(...gaps)}`);
+  const intervals = [p, p, 2 * p, p, p, p, 3 * p, p];
+  assert.equal(D.bestBph(intervals).bph, 28800);
+  assert.ok(D.scorePeriod(p, intervals) < 0.02);
+  assert.ok(D.scorePeriod(D.periodOf(21600), intervals) > 0.1);
+  // an interval shorter than half a period fits nothing
+  assert.equal(D.scorePeriod(p, [p / 3]), 1);
 });
 
 test("fit recovers slope and parity offset, and gives up on degenerate input", () => {
