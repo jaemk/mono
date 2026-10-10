@@ -160,9 +160,25 @@ test("simulate locks on and reads the simulated watch", () => {
   assert.equal(p.$("stop").disabled, false);
   assert.equal(p.intervals.size, 1);
   assert.ok(texts(p.ctx("rate-canvas")).includes("listening for beats..."));
-  p.advance(6000);
+  // ticks heard, rate not yet known
+  p.advance(600);
+  p.flush();
+  assert.ok(p.app.state().beatCount === 0 && p.app.state().waves.length > 0);
+  assert.ok(texts(p.ctx("rate-canvas")).includes("ticks heard, finding the beat rate..."));
+  // locked, readings coming in while the 10 s window fills (TICK-23)
+  p.advance(5400);
+  p.flush();
+  assert.equal(p.$("status").textContent, "measuring");
+  assert.equal(p.$("rate").dataset.state, "settling");
+  const filling = texts(p.ctx("rate-canvas")).find((t) => t.startsWith("measuring: "));
+  assert.match(filling, /^measuring: [3-5]\.[0-9] of 10 s$/);
+  assert.ok(callsOf(p.ctx("rate-canvas"), "setLineDash").some((c) => c[1].length === 2), "dashed while settling");
+  // window full: settled, solid
+  p.advance(8000);
   p.flush();
   assert.equal(p.$("status").textContent, "locked");
+  assert.equal(p.$("rate").dataset.state, "");
+  assert.ok(!texts(p.ctx("rate-canvas")).some((t) => t.startsWith("measuring: ")));
   assert.equal(p.$("bph").textContent, "28800 auto");
   assert.ok(Math.abs(rateOf(p) - 6) < 0.5, p.$("rate").textContent);
   assert.ok(Math.abs(Number(p.$("beat-error").textContent) - 0.4) <= 0.1);
@@ -209,7 +225,8 @@ test("changing the beat rate while running relocks and clears the graphs", () =>
   p.change("set-bph", "21600");
   assert.equal(p.$("bph").textContent, "21600");
   assert.equal(p.app.state().readings.length, 0);
-  assert.ok(texts(p.ctx("rate-canvas")).includes("fitting..."));
+  assert.ok(texts(p.ctx("rate-canvas")).includes("measuring: 0.0 of 10 s"));
+  assert.ok(callsOf(p.ctx("rate-canvas"), "fillRect").length > 2, "progress bar");
   p.change("set-bph", "auto");
   assert.equal(p.$("bph").textContent, "--");
   assert.equal(p.$("status").textContent, "listening");
@@ -222,7 +239,20 @@ test("a fixed beat rate is locked from the start", () => {
   const p = boot({ storage: JSON.stringify({ bph: 28800 }) });
   p.click("sim");
   assert.equal(p.$("bph").textContent, "28800");
-  assert.equal(p.$("status").textContent, "locked");
+  assert.equal(p.$("status").textContent, "measuring");
+  // nothing heard yet, even with the rate known
+  assert.ok(texts(p.ctx("rate-canvas")).includes("listening for beats..."));
+});
+
+test("progress before the first reading counts from the beats since the lock", () => {
+  const p = boot({ storage: JSON.stringify({ bph: 28800, average: 30 }) });
+  p.click("sim");
+  // beats indexed but under the 1 s a reading needs
+  p.advance(900);
+  p.flush();
+  assert.equal(p.app.state().readings.length, 0);
+  const msg = texts(p.ctx("rate-canvas")).find((t) => t.startsWith("measuring: "));
+  assert.match(msg, /^measuring: 0\.[1-9] of 30 s$/);
 });
 
 test("averaging and correction apply to a running source", () => {
@@ -366,7 +396,7 @@ test("canvases size to device pixel ratio and survive a missing 2d context", () 
   none.click("sim");
   none.advance(3000);
   none.flush();
-  assert.equal(none.$("status").textContent, "locked");
+  assert.equal(none.$("status").textContent, "measuring");
 });
 
 test("resizing redraws on the next frame", () => {

@@ -57,6 +57,23 @@ test("each beat is counted once and indexed in order", () => {
   });
 });
 
+test("readings say how much of the averaging window they cover", () => {
+  const { of } = run({ bph: 28800, rate: 5 }, { bph: 28800, average: 10 }, 14);
+  const readings = of("reading");
+  const first = readings[0];
+  assert.equal(first.window, 10);
+  assert.equal(first.settled, false);
+  assert.ok(first.span >= 1 && first.span < 1.2, `first span ${first.span}`);
+  // spans grow until the window fills, then hold just under it
+  const settledAt = readings.findIndex((r) => r.settled);
+  assert.ok(settledAt > 0);
+  // the first beat past 10 s less two periods
+  const s = readings[settledAt].span;
+  assert.ok(s >= 9.75 && s < 9.9, `${s}`);
+  assert.ok(readings.slice(settledAt).every((r) => r.settled && r.span < 10));
+  for (let i = 1; i < settledAt; i++) assert.ok(readings[i].span > readings[i - 1].span);
+});
+
 test("a fast watch lands its beats early, so trace offsets climb", () => {
   const { of } = run({ bph: 28800, rate: 60 }, { bph: 28800 }, 10);
   const beats = of("beat");

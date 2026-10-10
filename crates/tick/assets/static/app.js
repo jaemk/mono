@@ -31,6 +31,10 @@
   const SIM_TICK_MS = 50;
   // readings further apart than this are drawn as separate runs
   const LINE_GAP = 2;
+  // readings from a window still filling (TICK-23)
+  const SETTLING_ALPHA = 0.45;
+  const SETTLING_DASH = [6, 4];
+  const PROGRESS_W = 160;
   // shared horizontal plot margins, so the rate graph and the beat trace line
   // up in time
   const PAD_L = 48;
@@ -128,6 +132,8 @@
     let locked = null;
     let shownLevel = 0;
     let deadFrames = 0;
+    // beats heard since the source started, indexed or not
+    let heard = 0;
 
     function loadSettings() {
       try {
@@ -181,6 +187,7 @@
       now = 0;
       shownLevel = 0;
       deadFrames = 0;
+      heard = 0;
       clearData();
       source = { stop: stopFn };
       showError("");
@@ -202,6 +209,7 @@
         locked = { bph: ev.bph, auto: ev.auto };
         clearData();
       } else if (ev.type === "beat") {
+        heard++;
         waves.push(ev);
         if (waves.length > SCOPE_WAVES) waves.shift();
         if (ev.n !== null) {
@@ -323,13 +331,44 @@
       drawScope();
     }
 
+    /**
+     * How far the averaging window has filled, as `{ span, window }` in
+     * seconds: from the latest reading, or before the first one from the
+     * beats indexed since the lock.
+     */
+    function progress() {
+      const r = readings[readings.length - 1];
+      if (r) return { span: r.span, window: r.window };
+      const span = beats.length > 1 ? beats[beats.length - 1].t - beats[0].t : 0;
+      return { span, window: settings.average };
+    }
+
+    /** Whether the latest reading fills its averaging window. */
+    const settled = () => {
+      const r = readings[readings.length - 1];
+      return !!r && r.settled;
+    };
+
+    const progressText = () => {
+      const { span, window } = progress();
+      return `measuring: ${Math.min(span, window).toFixed(1)} of ${window} s`;
+    };
+
+    /** Status: idle, listening, measuring (locked, window filling), or locked. */
+    function status() {
+      if (!source) return "idle";
+      if (!locked) return "listening";
+      return settled() ? "locked" : "measuring";
+    }
+
     function renderReadout() {
       const r = readings[readings.length - 1];
       el.rateOut.textContent = r ? fmtRate(r.rate) : "--";
+      el.rateOut.dataset.state = r && !r.settled ? "settling" : "";
       el.beatErrorOut.textContent = r ? r.beatError.toFixed(1) : "--";
       el.bphOut.textContent = locked ? `${locked.bph}${locked.auto ? " auto" : ""}` : "--";
       el.beatsOut.textContent = String(beatCount);
-      const state = !source ? "idle" : locked ? "locked" : "listening";
+      const state = status();
       el.status.textContent = state;
       el.status.dataset.state = state;
       el.start.disabled = !!source;
@@ -446,39 +485,78 @@
       ctx.fillText("fast", PAD_L + 6, mid - half + 8);
       ctx.fillText("slow", PAD_L + 6, mid + half - 8);
 
+      const cx = PAD_L + (w - PAD_L - PAD_R) / 2;
       if (!visible.length) {
         ctx.textAlign = "center";
         ctx.fillStyle = C.text;
-        const msg = !source ? "start the mic or simulate" : locked ? "fitting..." : "listening for beats...";
-        ctx.fillText(msg, PAD_L + (w - PAD_L - PAD_R) / 2, mid - 16);
+        let msg = "start the mic or simulate";
+        if (source && !heard) msg = "listening for beats...";
+        else if (source && !locked) msg = "ticks heard, finding the beat rate...";
+        else if (source) msg = progressText();
+        ctx.fillText(msg, cx, mid - 16);
+        if (source && locked) drawProgress(ctx, cx, mid - 4);
         return;
       }
 
+      // runs of readings: split at gaps, and where settling turns to settled
+      // (settling runs draw dashed and dim, TICK-23)
+      const runs = [];
+      visible.forEach((r, i) => {
+        const prev = visible[i - 1];
+        if (!prev || r.t - prev.t > LINE_GAP || prev.settled !== r.settled) {
+          runs.push({ settled: r.settled, points: prev && r.t - prev.t <= LINE_GAP ? [prev] : [] });
+        }
+        runs[runs.length - 1].points.push(r);
+      });
       ctx.strokeStyle = C.line;
       ctx.lineWidth = 2;
       ctx.lineJoin = "round";
       ctx.shadowColor = C.line;
-      ctx.shadowBlur = 6;
-      ctx.beginPath();
-      visible.forEach((r, i) => {
-        const px = axis.x(r.t);
-        const py = y(r.rate);
-        if (i === 0 || r.t - visible[i - 1].t > LINE_GAP) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      });
-      ctx.stroke();
+      for (const run of runs) {
+        ctx.globalAlpha = run.settled ? 1 : SETTLING_ALPHA;
+        ctx.setLineDash(run.settled ? [] : SETTLING_DASH);
+        ctx.shadowBlur = run.settled ? 6 : 0;
+        ctx.beginPath();
+        run.points.forEach((r, i) => {
+          if (i === 0) ctx.moveTo(axis.x(r.t), y(r.rate));
+          else ctx.lineTo(axis.x(r.t), y(r.rate));
+        });
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
 
       const head = visible[visible.length - 1];
       const hx = axis.x(head.t);
       const hy = y(head.rate);
+      ctx.globalAlpha = head.settled ? 1 : SETTLING_ALPHA;
+      ctx.shadowBlur = head.settled ? 6 : 0;
       ctx.fillStyle = C.line;
       ctx.beginPath();
       ctx.arc(hx, hy, 4, 0, Math.PI * 2);
       ctx.fill();
       ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+      if (!head.settled && source) {
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = C.text;
+        ctx.fillText(progressText(), cx, 14);
+        drawProgress(ctx, cx, 26);
+        ctx.fillStyle = C.line;
+      }
       ctx.textAlign = "right";
       ctx.textBaseline = hy < mid ? "top" : "bottom";
       ctx.fillText(fmtRate(head.rate), hx - 8, hy + (hy < mid ? 6 : -6));
+    }
+
+    /** A bar showing how far the averaging window has filled, centered on x. */
+    function drawProgress(ctx, x, y) {
+      const { span, window } = progress();
+      const frac = Math.min(1, span / window);
+      ctx.fillStyle = C.grid;
+      ctx.fillRect(x - PROGRESS_W / 2, y, PROGRESS_W, 4);
+      ctx.fillStyle = C.line;
+      ctx.fillRect(x - PROGRESS_W / 2, y, PROGRESS_W * frac, 4);
     }
 
     function drawTrace() {

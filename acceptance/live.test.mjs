@@ -248,7 +248,8 @@ test("tick serves the page and its scripts", async () => {
   expectRedirect(await c.get("/tick/"), "/tick", "tick trailing slash");
   for (const [path, marker] of [
     ["/tick/static/detector.js", "SENSITIVITY"],
-    ["/tick/static/app.js", "createTick"],
+    // the measuring state while the averaging window fills
+    ["/tick/static/app.js", "ticks heard, finding the beat rate"],
     ["/tick/static/worklet.js", "registerProcessor"],
     ["/tick/static/app.css", "--phosphor"],
   ]) {

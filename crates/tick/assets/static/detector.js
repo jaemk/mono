@@ -45,6 +45,9 @@
   const MULTI_PENALTY = 0.02;
   const MIN_READ_BEATS = 6;
   const MIN_READ_SPAN = 1;
+  // a reading is settled once its beats span the averaging window, less this
+  // many periods
+  const SETTLE_SLACK = 2;
   // a beat this far off the fit (and 5x the median miss) is left out of it
   const OUTLIER_MIN = 0.0005;
   const OUTLIER_MULT = 5;
@@ -156,8 +159,10 @@
    *   earlier beats no longer count
    * - `{ type: "beat", t, n, parity, offsetMs, peak, wave }`: one beat; `n`,
    *   `parity`, and `offsetMs` are null until the beat rate is known
-   * - `{ type: "reading", t, rate, beatError, bph }`: rate in s/d (fast is
-   *   positive) and beat error in ms, after each beat once enough are in
+   * - `{ type: "reading", t, rate, beatError, bph, span, window, settled }`:
+   *   rate in s/d (fast is positive) and beat error in ms, after each beat
+   *   once enough are in; `span` is the seconds of beats behind it and
+   *   `settled` says they fill the averaging `window`
    */
   function createDetector(opts = {}) {
     const sr = opts.sampleRate || 48000;
@@ -283,12 +288,18 @@
       if (beats[beats.length - 1].t - beats[0].t < MIN_READ_SPAN) return null;
       const f = robustFit(beats);
       if (!f) return null;
+      // beats older than the window are dropped, so a full window spans just
+      // under it
+      const span = beats[beats.length - 1].t - beats[0].t;
       return {
         type: "reading",
         t,
         rate: 86400 * (period / f.b - 1) + correction,
         beatError: 2 * Math.abs(f.h) * 1000,
         bph: Math.round(3600 / period),
+        span,
+        window: average,
+        settled: span >= average - SETTLE_SLACK * period,
       };
     }
 

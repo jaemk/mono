@@ -51,6 +51,24 @@ briefly over it, and 20 ms again once it has stayed over for more than 60 ms (th
 louder, or the stream started with silence). The beat peaks are forgotten after 3 seconds
 without a beat and on every lock.
 
+### TICK-23
+Each reading reports `span`, the seconds between the first and last beat behind it, and
+`settled`, true once `span` reaches the averaging window less two beat periods (older beats
+are dropped, so a full window spans just under it). Until then the rate graph says how far
+along it is:
+
+| State | Rate graph |
+|-------|------------|
+| no beats heard | `listening for beats...` |
+| beats heard, no beat rate | `ticks heard, finding the beat rate...` |
+| beat rate known, no reading | `measuring: <span> of <window> s` and a progress bar |
+| readings, window filling | the line dashed and dim, with the same text and bar at the top |
+| window full | the line solid; no text |
+
+Before the first reading, `span` counts the beats indexed since the lock. The readout's rate
+is dimmed while its reading is not settled. Changing the averaging window, a relock, or a
+silence that restarts the fit starts the window over.
+
 ### TICK-20
 Once the beat rate is locked and at least 4 beats are in, an onset peaking over 4x the median
 beat peak is a knock: it is not a beat, is counted as ignored, and the detector listens again
@@ -121,7 +139,8 @@ beat history and the graphs.
 ### TICK-14
 The readout shows the current rate (s/d, signed, one decimal), beat error (ms, one decimal),
 beat rate (bph, marked `auto` when detected), beats counted, and status: `idle`,
-`listening`, or `locked`. After `stop` the last reading and the graphs stay up.
+`listening` (no beat rate yet), `measuring` (beat rate known, averaging window still
+filling, TICK-23), or `locked`. After `stop` the last reading and the graphs stay up.
 
 ### TICK-15
 The rate graph plots readings against time over the visible span (30 s, 1 min, 5 min; default

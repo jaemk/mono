@@ -65,6 +65,14 @@ body {
   color: var(--even);
 }
 
+.status[data-state="measuring"] {
+  color: var(--odd);
+}
+
+#rate[data-state="settling"] {
+  opacity: 0.5;
+}
+
 .status[data-state="locked"] {
   color: var(--phosphor);
 }
