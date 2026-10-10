@@ -484,6 +484,15 @@ test("audio arriving after stop is ignored", () => {
   const p = boot();
   p.app.feed(new Float32Array(2048));
   assert.equal(p.app.state().beatCount, 0);
+
+  // blocks the worklet queued before its context closed
+  p.click("sim");
+  p.advance(3000);
+  p.app.stop();
+  const { beatCount, readings } = p.app.state();
+  p.app.feed(D.synth({ sampleRate: 48000, bph: 28800, seed: 3 }).next(48000 * 3));
+  assert.equal(p.app.state().beatCount, beatCount);
+  assert.equal(p.app.state().readings.length, readings.length);
 });
 
 test("canvases size to device pixel ratio and survive a missing 2d context", () => {

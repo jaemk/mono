@@ -232,7 +232,8 @@
     }
 
     function feed(chunk) {
-      if (!det) return;
+      // blocks still queued from a stopped source change nothing
+      if (!source) return;
       if (rec) record(chunk);
       for (const ev of det.push(chunk)) handle(ev);
       now = det.time();
