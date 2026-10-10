@@ -459,8 +459,11 @@ test("settings changes persist", () => {
   p.change("set-span", "30");
   p.change("set-correction", "1.5");
   p.change("set-sensitivity", "high");
+  p.change("set-target", "cosc");
   const saved = JSON.parse(p.win.localStorage.getItem("tick.settings"));
-  assert.deepEqual(saved, { bph: 28800, average: 60, span: 30, correction: 1.5, sensitivity: "high" });
+  assert.deepEqual(saved, { bph: 28800, average: 60, span: 30, correction: 1.5, sensitivity: "high", target: "cosc" });
+  assert.equal(boot({ storage: JSON.stringify(saved) }).$("set-target").value, "cosc");
+  assert.equal(tick.sanitize({ target: "7" }).target, "off");
   assert.equal(boot({ storage: JSON.stringify(saved) }).$("set-sensitivity").value, "high");
   p.change("set-correction", "abc");
   assert.equal(p.$("set-correction").value, "0");

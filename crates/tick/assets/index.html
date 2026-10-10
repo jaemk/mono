@@ -11,21 +11,34 @@
   <header class="bar">
     <a class="brand" href="/tick">tick</a>
     <span class="sub">watch timegrapher</span>
-    <span id="status" class="status" data-state="idle">idle</span>
+    <span id="status" class="status" data-state="idle" role="status" aria-live="polite">idle</span>
     <button class="info" data-info="status" aria-label="about the status">i</button>
   </header>
 
   <main>
     <section class="controls" aria-label="controls">
-      <div class="buttons">
-        <button id="start" class="primary">start mic</button>
-        <button id="sim">simulate</button>
-        <button id="stop" disabled>stop</button>
-        <button id="record" title="record 30 s from the mic, then analyze it">record 30 s</button>
-        <button id="open" title="analyze an audio file of a watch ticking">analyze file</button>
-        <input id="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac" hidden>
-        <a id="save" class="button" hidden>save recording</a>
+      <div class="groups">
+        <div class="group" role="group" aria-labelledby="live-label">
+          <span id="live-label" class="group-label">live</span>
+          <div class="buttons">
+            <button id="start" class="primary" title="listen to the microphone (space)">start mic</button>
+            <button id="sim">simulate</button>
+            <button id="stop" disabled title="stop (space)">stop</button>
+            <button id="focus" title="large readout for reading at a distance (f)">big readout</button>
+          </div>
+        </div>
+        <div class="group" role="group" aria-labelledby="offline-label">
+          <span id="offline-label" class="group-label">offline</span>
+          <div class="buttons">
+            <button id="record" title="record 30 s from the mic, then analyze it (r)">record 30 s</button>
+            <button id="open" title="analyze an audio file of a watch ticking; or drop one on the page">analyze file</button>
+            <input id="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac" hidden>
+            <a id="save" class="button" hidden>save recording</a>
+          </div>
+        </div>
       </div>
+      <details id="settings-box" class="settings-box" open>
+      <summary>settings</summary>
       <div class="settings">
         <label>beat rate
           <select id="set-bph">
@@ -66,7 +79,18 @@
         <label>mic correction
           <span class="with-unit"><input id="set-correction" type="number" step="0.1" min="-100" max="100" inputmode="decimal"><span>s/d</span></span>
         </label>
+        <label>target
+          <select id="set-target">
+            <option value="off">off</option>
+            <option value="cosc">-4 to +6 s/d</option>
+            <option value="5">&plusmn;5 s/d</option>
+            <option value="10">&plusmn;10 s/d</option>
+            <option value="20">&plusmn;20 s/d</option>
+            <option value="30">&plusmn;30 s/d</option>
+          </select>
+        </label>
       </div>
+      </details>
     </section>
 
     <p id="error" class="error" role="alert" hidden></p>
@@ -78,7 +102,7 @@
         <canvas id="rate-canvas" width="900" height="280" aria-label="rate over time"></canvas>
       </section>
 
-      <section class="panel readout" aria-live="polite">
+      <section class="panel readout" aria-label="readout">
         <div class="metric big">
           <span class="label-row"><span id="rate-label" class="label">rate</span><button class="info" data-info="rate" aria-label="about the rate">i</button></span>
           <span class="value"><span id="rate">--</span><span class="unit">s/d</span></span>
@@ -117,6 +141,35 @@
           <button class="info" data-info="scope" aria-label="about the beat scope">i</button></h2>
         <canvas id="scope-canvas" width="300" height="170" aria-label="beat waveforms"></canvas>
       </section>
+
+      <section class="panel session-panel" aria-label="positions">
+        <h2>positions <span class="hint">rate in each position the watch is timed in</span>
+          <button class="info" data-info="session" aria-label="about positions">i</button></h2>
+        <div class="session-controls">
+          <select id="session-pos" aria-label="position">
+            <option value="DU">dial up</option>
+            <option value="DD">dial down</option>
+            <option value="CU">crown up</option>
+            <option value="CD">crown down</option>
+            <option value="CL">crown left</option>
+            <option value="CR">crown right</option>
+          </select>
+          <button id="session-add" disabled>save result</button>
+          <button id="session-copy" disabled>copy</button>
+          <button id="session-clear" disabled>clear</button>
+          <span id="session-note" class="session-note"></span>
+        </div>
+        <table class="session">
+          <thead>
+            <tr><th>position</th><th>rate s/d</th><th>beat error ms</th><th>beat rate</th><th></th></tr>
+          </thead>
+          <tbody id="session-body"></tbody>
+          <tfoot>
+            <tr><th>average</th><td id="session-avg">--</td><td id="session-avg-be">--</td><td></td><td></td></tr>
+            <tr><th>delta</th><td id="session-delta">--</td><td></td><td></td><td></td></tr>
+          </tfoot>
+        </table>
+      </section>
     </div>
 
     <p class="help">
@@ -130,9 +183,26 @@
     <p class="help">
       To measure without watching it live, press record 30 s: it listens for 30 seconds, then
       reads the rate over the whole recording and offers it to save. Analyze file does the same
-      for an audio file you already have. Changing a setting reads the same audio again.
+      for an audio file you already have, or drop the file on the page. Changing a setting reads
+      the same audio again.
+    </p>
+    <p class="help">
+      To regulate, time the watch in a few positions and save each result under positions; the
+      delta between them shows how evenly it runs. Big readout shows the rate large enough to
+      read while you work on the watch. Keys: space starts or stops the mic, r records, f toggles
+      the big readout.
     </p>
   </main>
+
+  <div id="focus-view" class="focus-view" hidden>
+    <div id="focus-status" class="focus-status">idle</div>
+    <div class="focus-rate"><span id="focus-rate">--</span><span id="focus-trend" class="focus-trend"></span></div>
+    <div class="focus-unit">s/d</div>
+    <div class="focus-sub"><span id="focus-beat-error">--</span> ms beat error</div>
+    <button id="focus-exit">exit</button>
+  </div>
+
+  <div id="drop" class="drop" hidden><span>drop an audio file to analyze it</span></div>
 
   <dialog id="info" class="info-dialog" aria-labelledby="info-title">
     <div class="info-content">

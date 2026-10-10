@@ -83,6 +83,19 @@ body {
   opacity: 0.5;
 }
 
+/* outside the target band, and beat error past fine (TICK-30) */
+#rate[data-tolerance="out"],
+#beat-error[data-level="warn"],
+.session td[data-tolerance="out"],
+.session td[data-level="warn"] {
+  color: var(--even);
+}
+
+#beat-error[data-level="bad"],
+.session td[data-level="bad"] {
+  color: var(--bad);
+}
+
 .status[data-state="locked"] {
   color: var(--phosphor);
 }
@@ -101,10 +114,43 @@ main {
   margin-bottom: 14px;
 }
 
+.groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.group-label {
+  font: 11px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
 .buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* recording: the button fills as the 30 s go by */
+#record[data-recording] {
+  opacity: 1;
+  background: linear-gradient(
+    to right,
+    rgba(124, 252, 154, 0.28) var(--progress, 0%),
+    var(--panel) var(--progress, 0%)
+  );
+}
+
+.settings-box summary {
+  display: none;
 }
 
 button,
@@ -186,8 +232,66 @@ input {
   grid-template-columns: minmax(0, 1fr) 300px;
   grid-template-areas:
     "rate readout"
-    "trace scope";
+    "trace scope"
+    "session session";
   gap: 12px;
+}
+
+.session-panel {
+  grid-area: session;
+}
+
+.session-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.session-note {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.session {
+  width: 100%;
+  border-collapse: collapse;
+  font: 14px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.session th,
+.session td {
+  padding: 4px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--edge);
+}
+
+.session th:first-child {
+  text-align: left;
+}
+
+.session thead th,
+.session tfoot th {
+  font: 11px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
+.session tfoot td {
+  color: var(--phosphor);
+}
+
+.session button.remove {
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+canvas.pointable {
+  cursor: crosshair;
+  touch-action: pan-y;
 }
 
 .rate-panel {
@@ -421,6 +525,85 @@ button.info:focus-visible {
   font-size: 13px;
 }
 
+.focus-view {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1vh;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.focus-view[hidden] {
+  display: none;
+}
+
+.focus-status {
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
+.focus-rate {
+  font-size: min(24vw, 38vh);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--phosphor);
+}
+
+.focus-rate [data-state="settling"] {
+  opacity: 0.5;
+}
+
+.focus-rate [data-tolerance="out"] {
+  color: var(--even);
+}
+
+.focus-trend {
+  font-size: 0.4em;
+  margin-left: 0.15em;
+  vertical-align: middle;
+  color: var(--dim);
+}
+
+.focus-unit {
+  font-size: min(5vw, 6vh);
+  color: var(--dim);
+}
+
+.focus-sub {
+  font-size: min(6vw, 7vh);
+}
+
+#focus-exit {
+  margin-top: 3vh;
+}
+
+.drop {
+  position: fixed;
+  inset: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--phosphor);
+  border-radius: 12px;
+  background: rgba(7, 11, 9, 0.85);
+  color: var(--phosphor);
+  font: 600 20px var(--mono);
+  pointer-events: none;
+}
+
+.drop[hidden] {
+  display: none;
+}
+
 @media (max-width: 640px) {
   .bar,
   main {
@@ -434,7 +617,26 @@ button.info:focus-visible {
       "readout"
       "rate"
       "trace"
-      "scope";
+      "scope"
+      "session";
+  }
+
+  .settings-box summary {
+    display: list-item;
+    cursor: pointer;
+    font: 11px var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--dim);
+  }
+
+  .settings-box[open] summary {
+    margin-bottom: 6px;
+  }
+
+  .session th,
+  .session td {
+    padding: 4px;
   }
 
   #rate-canvas {

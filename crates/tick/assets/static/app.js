@@ -10,7 +10,28 @@
   const D = typeof module === "object" && module.exports ? require("./detector.js") : root.TickDetector;
 
   const SETTINGS_KEY = "tick.settings";
-  const DEFAULTS = { bph: "auto", average: 10, span: 60, correction: 0, sensitivity: "normal" };
+  const SESSION_KEY = "tick.session";
+  const DEFAULTS = { bph: "auto", average: 10, span: 60, correction: 0, sensitivity: "normal", target: "off" };
+  // target bands for the rate, [slow, fast] in s/d (TICK-30)
+  const TARGETS = { off: null, cosc: [-4, 6], 5: [-5, 5], 10: [-10, 10], 20: [-20, 20], 30: [-30, 30] };
+  // beat error past these (ms) reads as worth a look, then as out of beat
+  const BEAT_ERROR_WARN = 1;
+  const BEAT_ERROR_BAD = 3;
+  // the positions a watch is timed in (TICK-29), in table order
+  const POSITIONS = {
+    DU: "dial up",
+    DD: "dial down",
+    CU: "crown up",
+    CD: "crown down",
+    CL: "crown left",
+    CR: "crown right",
+  };
+  // the big readout's trend compares the rate with this many seconds ago,
+  // and calls a change under TREND_STEADY s/d steady (TICK-28)
+  const TREND_SECS = 5;
+  const TREND_STEADY = 1;
+  // below this width the settings fold away (TICK-33)
+  const NARROW = "(max-width: 640px)";
   const SENSITIVITIES = Object.keys(D.SENSITIVITY);
   // the input meter spans -100 to 0 dBFS of the filtered envelope
   const METER_FLOOR_DB = -100;
@@ -54,6 +75,9 @@
     even: "#ffb547",
     odd: "#4fd1c5",
     text: "#8fa99a",
+    band: "rgba(124, 252, 154, 0.09)",
+    bandEdge: "rgba(124, 252, 154, 0.35)",
+    cursor: "#cfe3d6",
   };
 
   /**
@@ -82,6 +106,7 @@
         "How unevenly the tick and the tock are spaced, in milliseconds. A balance that is in beat swings equally far either side of its rest point, so each beat lands exactly halfway between its neighbours and beat error is 0.",
         "As a rough guide, under 0.5 ms is very good and under 1 ms is fine. Above about 3 ms a watchmaker would usually put the watch back in beat; a watch far out of beat can stop more easily as it runs down.",
         "On the beat trace, beat error is the gap between the tick (amber) and tock (teal) lines. It does not affect the rate.",
+        "The value turns amber over 1 ms and red over 3 ms.",
       ],
     },
     bph: {
@@ -112,6 +137,15 @@
         "The rate over time in s/d. Zero is the line across the middle; fast is above (green tint) and slow below (red tint). Live, time runs left to right with the newest reading at the right edge; for a recording or file, the graph spans the whole recording from its start.",
         "Each point is the rate over the averaging window ending at that beat, so the line moves smoothly. While the window is still filling, the line is dashed and dim. The vertical scale grows to fit the readings shown.",
         "A real watch's rate wanders a few s/d from second to second as the gear train turns and the balance swing varies. A longer averaging window smooths that out.",
+        "With a target set in the settings, the target band is shaded across the graph and the rate turns amber outside it. Point at or tap the graph to read the rate at that moment.",
+      ],
+    },
+    session: {
+      title: "Positions",
+      body: [
+        "A watch runs at a slightly different rate in each position, because gravity pulls on the balance differently. Watchmakers time it in several (commonly dial up, dial down, and two or more crown positions) and regulate for the average.",
+        "Put the watch in a position, let the reading settle (status locked) or record and analyze it, pick the position, and press save result. Saving a position again replaces it. The results stay in this browser until cleared.",
+        "average is the mean rate and beat error over the saved positions. delta is the fastest position less the slowest: under about 10 s/d is good for a mechanical watch, and a large delta points to a balance out of poise or a worn pivot rather than the regulator setting. copy puts the table on the clipboard as text.",
       ],
     },
     trace: {
@@ -119,7 +153,7 @@
       body: [
         "One dot per beat, on the same time axis as the rate graph. The height is how early (up) or late (down) the beat came compared with a perfect watch at the nominal beat rate, in milliseconds. Amber dots are ticks and teal dots are tocks.",
         "A watch on time draws flat lines. A fast watch's beats come earlier and earlier, so the lines climb; a slow watch's lines fall. The steeper the lines, the bigger the rate.",
-        "The gap between the amber and teal lines is the beat error. Dots scattered away from the lines are beats caught on noise or a weak pickup.",
+        "The gap between the amber and teal lines is the beat error. Dots scattered away from the lines are beats caught on noise or a weak pickup. Point at or tap a dot to read it.",
       ],
     },
     scope: {
@@ -142,7 +176,76 @@
     if (typeof s.correction === "number" && Number.isFinite(s.correction)) {
       out.correction = Math.max(-MAX_CORRECTION, Math.min(MAX_CORRECTION, s.correction));
     }
+    if (typeof s.target === "string" && Object.hasOwn(TARGETS, s.target)) out.target = s.target;
     return out;
+  }
+
+  /** Saved position results from storage, keeping only well formed rows. */
+  function sanitizeSession(rows) {
+    if (!Array.isArray(rows)) return [];
+    const num = (v) => typeof v === "number" && Number.isFinite(v);
+    const out = rows.filter(
+      (r) => r && Object.hasOwn(POSITIONS, r.pos) && num(r.rate) && num(r.beatError) && num(r.bph),
+    );
+    return sortSession(out.filter((r, i) => out.findIndex((o) => o.pos === r.pos) === i));
+  }
+
+  const POSITION_ORDER = Object.keys(POSITIONS);
+  const sortSession = (rows) => rows.sort((a, b) => POSITION_ORDER.indexOf(a.pos) - POSITION_ORDER.indexOf(b.pos));
+
+  /** "in" or "out" of the target band, or "" with no target. */
+  function tolerance(rate, target) {
+    const band = TARGETS[target];
+    if (!band) return "";
+    return rate >= band[0] && rate <= band[1] ? "in" : "out";
+  }
+
+  /** "", "warn", or "bad" for a beat error in ms. */
+  function beatErrorLevel(ms) {
+    return ms > BEAT_ERROR_BAD ? "bad" : ms > BEAT_ERROR_WARN ? "warn" : "";
+  }
+
+  /**
+   * Which way the rate is heading: the latest reading against the last one
+   * at least `TREND_SECS` before it. "" until there is one that old.
+   */
+  function trend(readings) {
+    const last = readings[readings.length - 1];
+    if (!last) return "";
+    for (let i = readings.length - 2; i >= 0; i--) {
+      if (last.t - readings[i].t >= TREND_SECS) {
+        const d = last.rate - readings[i].rate;
+        return d > TREND_STEADY ? "↑" : d < -TREND_STEADY ? "↓" : "→";
+      }
+    }
+    return "";
+  }
+
+  /** Mean rate and beat error, and the fastest less the slowest rate. */
+  function sessionStats(rows) {
+    if (!rows.length) return null;
+    const rates = rows.map((r) => r.rate);
+    return {
+      rate: rates.reduce((a, b) => a + b, 0) / rows.length,
+      beatError: rows.reduce((a, r) => a + r.beatError, 0) / rows.length,
+      delta: Math.max(...rates) - Math.min(...rates),
+    };
+  }
+
+  /** The position table as plain text, for the clipboard. */
+  function sessionText(rows) {
+    const lines = ["tick positions"];
+    for (const r of rows) {
+      lines.push(
+        `${r.pos}  ${POSITIONS[r.pos].padEnd(11)}  ${fmtRate(r.rate).padStart(7)} s/d  ${r.beatError.toFixed(1).padStart(4)} ms  ${r.bph} bph`,
+      );
+    }
+    const s = sessionStats(rows);
+    if (s) {
+      lines.push(`average ${fmtRate(s.rate)} s/d, ${s.beatError.toFixed(1)} ms`);
+      lines.push(`delta ${s.delta.toFixed(1)} s/d`);
+    }
+    return lines.join("\n");
   }
 
   /** The smallest symmetric range that holds `peak` with margin (TICK-15). */
@@ -220,6 +323,25 @@
       span: $("set-span"),
       correction: $("set-correction"),
       sensitivity: $("set-sensitivity"),
+      target: $("set-target"),
+      settingsBox: $("settings-box"),
+      focus: $("focus"),
+      focusView: $("focus-view"),
+      focusStatus: $("focus-status"),
+      focusRate: $("focus-rate"),
+      focusTrend: $("focus-trend"),
+      focusBeatError: $("focus-beat-error"),
+      focusExit: $("focus-exit"),
+      drop: $("drop"),
+      sessionPos: $("session-pos"),
+      sessionAdd: $("session-add"),
+      sessionCopy: $("session-copy"),
+      sessionClear: $("session-clear"),
+      sessionNote: $("session-note"),
+      sessionBody: $("session-body"),
+      sessionAvg: $("session-avg"),
+      sessionAvgBe: $("session-avg-be"),
+      sessionDelta: $("session-delta"),
       meterDb: $("meter-db"),
       meterLevel: $("meter-level"),
       meterNoise: $("meter-noise"),
@@ -260,6 +382,18 @@
     let deadFrames = 0;
     // beats heard since the source started, indexed or not
     let heard = 0;
+    // the screen wake lock held while a source runs (TICK-27)
+    let wake = null;
+    let wakePending = false;
+    // whether the big readout asked for fullscreen (TICK-28)
+    let focusFull = false;
+    // saved position results (TICK-29)
+    let session = loadSession();
+    // where the pointer is over the rate graph or beat trace, as a fraction
+    // of the plot width (TICK-31)
+    let cursor = null;
+    // nested dragenter/dragleave pairs over the page (TICK-32)
+    let dragDepth = 0;
 
     function loadSettings() {
       try {
@@ -277,12 +411,29 @@
       }
     }
 
+    function loadSession() {
+      try {
+        return sanitizeSession(JSON.parse(win.localStorage.getItem(SESSION_KEY)));
+      } catch {
+        return [];
+      }
+    }
+
+    function saveSession() {
+      try {
+        win.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      } catch {
+        // storage blocked: results last for this page only
+      }
+    }
+
     function showSettings() {
       el.bph.value = String(settings.bph);
       el.average.value = String(settings.average);
       el.span.value = String(settings.span);
       el.correction.value = String(settings.correction);
       el.sensitivity.value = settings.sensitivity;
+      el.target.value = settings.target;
     }
 
     function clearData() {
@@ -318,8 +469,43 @@
       source = { stop: stopFn, sampleRate };
       rec = null;
       analysis = null;
+      cursor = null;
       showError("");
+      holdWake();
       render();
+    }
+
+    // ---------------------------------------------------------------------
+    // screen wake lock (TICK-27)
+    // ---------------------------------------------------------------------
+
+    /** Keep the screen on while a source runs, where the browser allows it. */
+    async function holdWake() {
+      const wl = win.navigator.wakeLock;
+      if (!wl || wake || wakePending || !source || doc.visibilityState === "hidden") return;
+      wakePending = true;
+      try {
+        const sentinel = await wl.request("screen");
+        if (source && !wake) {
+          wake = sentinel;
+          // the browser lets go when the tab is hidden
+          sentinel.addEventListener("release", () => {
+            if (wake === sentinel) wake = null;
+          });
+        } else {
+          sentinel.release();
+        }
+      } catch {
+        // denied (low battery, no user gesture): the screen may dim
+      }
+      wakePending = false;
+    }
+
+    function dropWake() {
+      if (!wake) return;
+      const sentinel = wake;
+      wake = null;
+      sentinel.release();
     }
 
     function feed(chunk) {
@@ -364,6 +550,7 @@
         source.stop();
         source = null;
       }
+      dropWake();
       render();
     }
 
@@ -396,7 +583,7 @@
         const done = rec;
         rec = null;
         stop();
-        offerSave(encodeWav(done.buf, done.sampleRate), recordingName());
+        offerSave(encodeWav(done.buf, done.sampleRate), recordingName(), RECORD_SECS);
         showAnalysis(done.buf, done.sampleRate, "recording", false);
       }
     }
@@ -466,11 +653,13 @@
      * started without a click, so the click on the link starts it. The link
      * stays (after stop too) until the next recording replaces it.
      */
-    function offerSave(bytes, name) {
+    function offerSave(bytes, name, secs) {
       clearSave();
       saveUrl = win.URL.createObjectURL(new win.Blob([bytes], { type: "audio/wav" }));
       el.save.setAttribute("href", saveUrl);
       el.save.download = name;
+      el.save.textContent = `save recording (${secs} s, ${(bytes.length / 1e6).toFixed(1)} MB)`;
+      el.save.title = `download ${name}`;
       el.save.hidden = false;
     }
 
@@ -616,36 +805,71 @@
       return settled() ? "locked" : "measuring";
     }
 
+    /**
+     * The result the positions table would save: one fit over an analyzed
+     * recording, or the latest settled live reading; null if neither.
+     */
+    function currentResult() {
+      if (analysis && !source) {
+        const s = analysis.summary;
+        return s ? { rate: s.rate, beatError: s.beatError, bph: s.bph } : null;
+      }
+      const r = readings[readings.length - 1];
+      return r && r.settled && locked ? { rate: r.rate, beatError: r.beatError, bph: locked.bph } : null;
+    }
+
     function renderReadout() {
+      let rate = null;
+      let beatError = null;
+      let settling = false;
       if (analysis && !source) {
         // one fit over the whole recording
         const s = analysis.summary;
-        el.rateOut.textContent = s ? fmtRate(s.rate) : "--";
-        el.rateOut.dataset.state = "";
-        el.beatErrorOut.textContent = s ? s.beatError.toFixed(1) : "--";
+        if (s) ({ rate, beatError } = s);
         el.bphOut.textContent = s ? `${s.bph}${s.auto ? " auto" : ""}` : "--";
         el.beatsOut.textContent = String(s ? s.beats : 0);
         const part = analysis.truncated ? `first ${MAX_ANALYZE_SECS / 60} min` : `${Math.round(analysis.duration)} s`;
         el.rateLabel.textContent = `rate over ${part} of ${analysis.name}`;
       } else {
         const r = readings[readings.length - 1];
-        el.rateOut.textContent = r ? fmtRate(r.rate) : "--";
-        el.rateOut.dataset.state = r && !r.settled ? "settling" : "";
-        el.beatErrorOut.textContent = r ? r.beatError.toFixed(1) : "--";
+        if (r) ({ rate, beatError } = r);
+        settling = !!r && !r.settled;
         el.bphOut.textContent = locked ? `${locked.bph}${locked.auto ? " auto" : ""}` : "--";
         el.beatsOut.textContent = String(beatCount);
         el.rateLabel.textContent = "rate";
       }
+      const has = rate !== null;
+      el.rateOut.textContent = has ? fmtRate(rate) : "--";
+      el.rateOut.dataset.state = settling ? "settling" : "";
+      el.rateOut.dataset.tolerance = has ? tolerance(rate, settings.target) : "";
+      el.beatErrorOut.textContent = has ? beatError.toFixed(1) : "--";
+      el.beatErrorOut.dataset.level = has ? beatErrorLevel(beatError) : "";
       const state = status();
-      el.status.textContent = state;
+      // only a change of state is announced (the status is a live region)
+      if (el.status.textContent !== state) el.status.textContent = state;
       el.status.dataset.state = state;
       el.start.disabled = !!source;
       el.sim.disabled = !!source;
       el.stop.disabled = !source;
       el.record.disabled = !!rec;
-      el.record.textContent = rec
-        ? `recording... ${Math.ceil((rec.buf.length - rec.len) / rec.sampleRate)} s`
-        : `record ${RECORD_SECS} s`;
+      if (rec) {
+        el.record.textContent = `recording... ${Math.ceil((rec.buf.length - rec.len) / rec.sampleRate)} s`;
+        el.record.dataset.recording = "";
+        el.record.style.setProperty("--progress", `${((100 * rec.len) / rec.buf.length).toFixed(1)}%`);
+      } else {
+        el.record.textContent = `record ${RECORD_SECS} s`;
+        delete el.record.dataset.recording;
+        el.record.style.removeProperty("--progress");
+      }
+      el.sessionAdd.disabled = !currentResult();
+      if (!el.focusView.hidden) {
+        el.focusStatus.textContent = state;
+        el.focusRate.textContent = el.rateOut.textContent;
+        el.focusRate.dataset.state = el.rateOut.dataset.state;
+        el.focusRate.dataset.tolerance = el.rateOut.dataset.tolerance;
+        el.focusTrend.textContent = source ? trend(readings) : "";
+        el.focusBeatError.textContent = el.beatErrorOut.textContent;
+      }
       renderMeter();
     }
 
@@ -700,7 +924,7 @@
       const t1 = fixed ? span : Math.max(now, span);
       const t0 = t1 - span;
       const plot = w - PAD_L - PAD_R;
-      return { t0, t1, span, fixed, x: (t) => PAD_L + ((t - t0) / span) * plot };
+      return { t0, t1, span, fixed, plot, x: (t) => PAD_L + ((t - t0) / span) * plot };
     }
 
     function drawTimeGrid(ctx, w, h, axis, labels) {
@@ -728,7 +952,10 @@
       const axis = timeAxis(w);
       const plotH = h - 16;
       const visible = readings.filter((r) => r.t >= axis.t0);
-      const range = pickRange(visible.reduce((m, r) => Math.max(m, Math.abs(r.rate)), 0));
+      const band = TARGETS[settings.target];
+      // the target band always fits, so it shows before the first reading
+      const bandPeak = band ? Math.max(-band[0], band[1]) : 0;
+      const range = pickRange(visible.reduce((m, r) => Math.max(m, Math.abs(r.rate)), bandPeak));
       const mid = plotH / 2;
       const half = mid - 8;
       const y = (v) => mid - (v / range) * half;
@@ -737,6 +964,20 @@
       ctx.fillRect(PAD_L, mid - half, w - PAD_L - PAD_R, half);
       ctx.fillStyle = C.slow;
       ctx.fillRect(PAD_L, mid, w - PAD_L - PAD_R, half);
+      if (band) {
+        ctx.fillStyle = C.band;
+        ctx.fillRect(PAD_L, y(band[1]), w - PAD_L - PAD_R, y(band[0]) - y(band[1]));
+        ctx.strokeStyle = C.bandEdge;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 3]);
+        for (const v of band) {
+          ctx.beginPath();
+          ctx.moveTo(PAD_L, Math.round(y(v)) + 0.5);
+          ctx.lineTo(w - PAD_R, Math.round(y(v)) + 0.5);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+      }
       drawTimeGrid(ctx, w, h, axis, true);
 
       ctx.textAlign = "right";
@@ -827,6 +1068,49 @@
       ctx.textAlign = "right";
       ctx.textBaseline = hy < mid ? "top" : "bottom";
       ctx.fillText(fmtRate(head.rate), hx - 8, hy + (hy < mid ? 6 : -6));
+      drawCursor(ctx, axis, plotH, visible, (r) => y(r.rate), (r) => `${fmtRate(r.rate)} s/d`);
+    }
+
+    /**
+     * The pointer's reading (TICK-31): a line through the item nearest the
+     * pointer's time, a dot on it, and its value and time.
+     */
+    function drawCursor(ctx, axis, h, items, yOf, label) {
+      if (!cursor || !items.length) return;
+      const t = axis.t0 + cursor.frac * axis.span;
+      let best = items[0];
+      for (const it of items) if (Math.abs(it.t - t) < Math.abs(best.t - t)) best = it;
+      const x = axis.x(best.t);
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = C.cursor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, h);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = C.cursor;
+      ctx.beginPath();
+      ctx.arc(x, yOf(best), 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      const when = axis.fixed ? `${best.t.toFixed(1)}s` : `-${(axis.t1 - best.t).toFixed(1)}s`;
+      // the label sits on the side with more room
+      const right = x > PAD_L + axis.plot / 2;
+      ctx.textAlign = right ? "right" : "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(`${label(best)} at ${when}`, x + (right ? -6 : 6), 4);
+    }
+
+    /** Point the cursor at a pointer event over a graph; null clears it. */
+    function pointAt(canvas, e) {
+      if (!e) {
+        cursor = null;
+      } else {
+        const w = canvas.clientWidth || baseSize.get(canvas).w;
+        const px = e.clientX - canvas.getBoundingClientRect().left;
+        cursor = { frac: Math.max(0, Math.min(1, (px - PAD_L) / (w - PAD_L - PAD_R))) };
+      }
+      schedule();
     }
 
     /** A bar showing how far the averaging window has filled, centered on x. */
@@ -868,6 +1152,7 @@
         ctx.fillStyle = b.parity ? C.odd : C.even;
         ctx.fillRect(axis.x(b.t) - 1, y(b.offsetMs) - 1, 2.5, 2.5);
       }
+      drawCursor(ctx, axis, h, visible, (b) => y(b.offsetMs), (b) => `${b.parity ? "tock" : "tick"} ${signed(b.offsetMs, 2)} ms`);
     }
 
     function drawScope() {
@@ -945,6 +1230,157 @@
     }
 
     // ---------------------------------------------------------------------
+    // big readout (TICK-28)
+    // ---------------------------------------------------------------------
+
+    function openFocus() {
+      el.focusView.hidden = false;
+      const fs = el.focusView.requestFullscreen;
+      if (fs) {
+        focusFull = true;
+        // refused (no user gesture, or not allowed): it still covers the page
+        Promise.resolve(fs.call(el.focusView)).catch(() => (focusFull = false));
+      }
+      el.focusExit.focus();
+      render();
+    }
+
+    function closeFocus() {
+      el.focusView.hidden = true;
+      if (focusFull && doc.fullscreenElement && doc.exitFullscreen) doc.exitFullscreen();
+      focusFull = false;
+      el.focus.focus();
+    }
+
+    const toggleFocus = () => (el.focusView.hidden ? openFocus() : closeFocus());
+
+    // ---------------------------------------------------------------------
+    // positions (TICK-29)
+    // ---------------------------------------------------------------------
+
+    function renderSession() {
+      const cell = (text, attr, value) => {
+        const td = doc.createElement("td");
+        td.textContent = text;
+        if (attr && value) td.dataset[attr] = value;
+        return td;
+      };
+      el.sessionBody.replaceChildren(
+        ...session.map((r) => {
+          const tr = doc.createElement("tr");
+          const th = doc.createElement("th");
+          th.textContent = POSITIONS[r.pos];
+          const remove = doc.createElement("button");
+          remove.className = "remove";
+          remove.textContent = "remove";
+          remove.setAttribute("aria-label", `remove ${POSITIONS[r.pos]}`);
+          remove.addEventListener("click", () => removePosition(r.pos));
+          const last = doc.createElement("td");
+          last.append(remove);
+          tr.append(
+            th,
+            cell(fmtRate(r.rate), "tolerance", tolerance(r.rate, settings.target)),
+            cell(r.beatError.toFixed(1), "level", beatErrorLevel(r.beatError)),
+            cell(String(r.bph)),
+            last,
+          );
+          return tr;
+        }),
+      );
+      const s = sessionStats(session);
+      el.sessionAvg.textContent = s ? fmtRate(s.rate) : "--";
+      el.sessionAvgBe.textContent = s ? s.beatError.toFixed(1) : "--";
+      el.sessionDelta.textContent = s ? s.delta.toFixed(1) : "--";
+      el.sessionCopy.disabled = !session.length;
+      el.sessionClear.disabled = !session.length;
+    }
+
+    /** Save the current result under the chosen position, then pick the next free one. */
+    function addPosition() {
+      const result = currentResult();
+      if (!result) return;
+      const pos = el.sessionPos.value;
+      session = sortSession([...session.filter((r) => r.pos !== pos), { pos, ...result }]);
+      saveSession();
+      const order = POSITION_ORDER;
+      const next = [...order.slice(order.indexOf(pos) + 1), ...order].find((p) => !session.some((r) => r.pos === p));
+      if (next) el.sessionPos.value = next;
+      el.sessionNote.textContent = `saved ${POSITIONS[pos]}`;
+      renderSession();
+    }
+
+    function removePosition(pos) {
+      session = session.filter((r) => r.pos !== pos);
+      saveSession();
+      el.sessionNote.textContent = "";
+      renderSession();
+    }
+
+    function clearSession() {
+      session = [];
+      saveSession();
+      el.sessionNote.textContent = "";
+      renderSession();
+    }
+
+    async function copySession() {
+      const clip = win.navigator.clipboard;
+      try {
+        await clip.writeText(sessionText(session));
+        el.sessionNote.textContent = "copied";
+      } catch {
+        el.sessionNote.textContent = "copy failed: the browser blocked the clipboard";
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // keys (TICK-34) and dropped files (TICK-32)
+    // ---------------------------------------------------------------------
+
+    function onKey(e) {
+      if (e.key === "Escape") {
+        // a native modal closes on escape by itself; this covers the fallback
+        if (el.info.hasAttribute("open")) closeInfo();
+        else if (!el.focusView.hidden) closeFocus();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey || el.info.hasAttribute("open")) return;
+      const t = e.target;
+      if (t && t.closest && t.closest("input, select, textarea, summary")) return;
+      if (e.key === " ") {
+        // instead of pressing whichever button has focus
+        e.preventDefault();
+        if (source) stop();
+        else startMic();
+      } else if (e.key === "r") {
+        startRecording();
+      } else if (e.key === "f") {
+        toggleFocus();
+      }
+    }
+
+    const hasFiles = (e) => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+
+    function onDrag(e) {
+      if (!hasFiles(e)) return;
+      // without this the browser opens the file in place of the page
+      e.preventDefault();
+      if (e.type === "dragenter") dragDepth++;
+      else if (e.type === "dragleave") dragDepth = Math.max(0, dragDepth - 1);
+      else if (e.type === "drop") dragDepth = 0;
+      el.drop.hidden = dragDepth === 0;
+      if (e.type === "drop" && e.dataTransfer.files.length) analyzeFile(e.dataTransfer.files[0]);
+    }
+
+    /** Fold the settings away on a narrow screen, and open them on a wide one. */
+    function fitSettings() {
+      if (!win.matchMedia) return;
+      const narrow = win.matchMedia(NARROW).matches;
+      if (!narrow) el.settingsBox.open = true;
+      return narrow;
+    }
+
+    // ---------------------------------------------------------------------
     // wiring
     // ---------------------------------------------------------------------
 
@@ -952,9 +1388,15 @@
       settings[key] = value;
       settings = sanitize(settings);
       saveSettings();
+      if (key === "span" || key === "target") {
+        // display only: the readings stand
+        if (key === "target") renderSession();
+        render();
+        return;
+      }
       if (!source && analysis) {
         // look at the same recording with the new settings
-        if (key !== "span") reanalyze();
+        reanalyze();
         return;
       }
       if (det) {
@@ -988,10 +1430,30 @@
       el.info.addEventListener("click", (e) => {
         if (e.target === el.info) closeInfo();
       });
-      // a native modal closes on escape by itself; this covers the fallback
-      doc.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && el.info.hasAttribute("open")) closeInfo();
+      doc.addEventListener("keydown", onKey);
+      for (const type of ["dragenter", "dragover", "dragleave", "drop"]) doc.addEventListener(type, onDrag);
+      el.focus.addEventListener("click", openFocus);
+      el.focusExit.addEventListener("click", closeFocus);
+      // leaving fullscreen (escape, the browser's own control) leaves the big readout
+      doc.addEventListener("fullscreenchange", () => {
+        if (!doc.fullscreenElement && focusFull && !el.focusView.hidden) closeFocus();
       });
+      doc.addEventListener("visibilitychange", () => {
+        if (doc.visibilityState === "visible") holdWake();
+      });
+      el.sessionAdd.addEventListener("click", addPosition);
+      el.sessionCopy.addEventListener("click", copySession);
+      el.sessionClear.addEventListener("click", clearSession);
+      for (const canvas of [el.rateCanvas, el.traceCanvas]) {
+        canvas.classList.add("pointable");
+        canvas.addEventListener("pointermove", (e) => pointAt(canvas, e));
+        canvas.addEventListener("pointerdown", (e) => pointAt(canvas, e));
+        // a finger lifting off leaves the reading up until the next tap
+        canvas.addEventListener("pointerleave", (e) => {
+          if (e.pointerType !== "touch") pointAt(canvas, null);
+        });
+      }
+      if (fitSettings()) el.settingsBox.open = false;
       el.file.addEventListener("change", () => {
         const file = el.file.files && el.file.files[0];
         // cleared so picking the same file again still fires a change
@@ -1008,7 +1470,12 @@
         onSetting("correction", Number(el.correction.value) || 0);
         el.correction.value = String(settings.correction);
       });
-      win.addEventListener("resize", schedule);
+      el.target.addEventListener("change", () => onSetting("target", el.target.value));
+      win.addEventListener("resize", () => {
+        fitSettings();
+        schedule();
+      });
+      renderSession();
       render();
     }
 
@@ -1021,12 +1488,28 @@
       analyzeFile,
       feed,
       // for tests
-      state: () => ({ settings, readings, beats, waves, beatCount, locked, running: !!source, analysis }),
+      state: () => ({ settings, readings, beats, waves, beatCount, locked, running: !!source, analysis, session, cursor, wake }),
     };
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createTick, sanitize, pickRange, fmtRate, toDb, meterPct, encodeWav, DEFAULTS, INFO };
+    module.exports = {
+      createTick,
+      sanitize,
+      sanitizeSession,
+      pickRange,
+      fmtRate,
+      toDb,
+      meterPct,
+      encodeWav,
+      tolerance,
+      beatErrorLevel,
+      trend,
+      sessionStats,
+      sessionText,
+      DEFAULTS,
+      INFO,
+    };
   } else {
     createTick(root).start();
   }

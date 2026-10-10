@@ -42,7 +42,7 @@ audio setup shows an error line and leaves the page idle.
 (unprocessed, at the input's sample rate), from the running source, or from the mic, opened
 first, when idle. The button counts down while recording, and the live display keeps running.
 When it finishes, the source stops, the recording is analyzed (TICK-25), and a `save
-recording` link offers it as a mono 32-bit float WAV named
+recording (<secs> s, <size> MB)` link (TICK-35) offers it as a mono 32-bit float WAV named
 `tick-<yyyymmdd>-<hhmmss>-<beat rate setting>.wav` (clicking it downloads the file; browsers
 block a download not started by a click). The link stays until the next recording replaces it.
 `stop` or a new source cancels a recording in progress without saving or analyzing it.
@@ -177,6 +177,8 @@ The readout shows the current rate (s/d, signed, one decimal), beat error (ms, o
 beat rate (bph, marked `auto` when detected), beats counted, and status: `idle`,
 `listening` (no beats heard, or no beat rate yet), `measuring` (beat rate known, averaging window still
 filling, TICK-23), `locked`, or `analyzed` (a recording or file on show, TICK-25). After `stop` the last reading and the graphs stay up.
+The status is the page's only live region, rewritten only when the state changes, so a screen
+reader announces state changes and not every beat's reading.
 
 ### TICK-15
 The rate graph plots readings against time over the visible span (30 s, 1 min, 5 min; default
@@ -200,8 +202,8 @@ Beside the beat trace, the scope overlays the last 16 beat waveforms aligned at 
 peak shown.
 
 ### TICK-18
-The beat rate select, averaging window, visible span, sensitivity, and mic correction persist in
-`localStorage` under `tick.settings`. Storage that throws or holds bad json falls back to the
+The beat rate select, averaging window, visible span, sensitivity, mic correction, and target
+(TICK-30) persist in `localStorage` under `tick.settings`. Storage that throws or holds bad json falls back to the
 defaults.
 
 ### TICK-26
@@ -212,5 +214,65 @@ close button, a click on the backdrop, or escape, and falls back to an open attr
 the browser has no modal dialog.
 
 ### TICK-19
-Below 640px wide the scope stacks under the beat trace. The graphs redraw at device pixel
-ratio on every animation frame while a source runs.
+Below 640px wide the readout comes first and the scope and positions stack under the beat
+trace. The graphs redraw at device pixel ratio on every animation frame while a source runs.
+
+## Working aids
+
+### TICK-27
+While a source runs, the page holds a screen wake lock where the browser offers one, so a
+phone's screen stays on through a measurement. `stop` releases it. When the browser drops it
+(the tab was hidden), it is taken again once the tab shows while the source still runs. A lock
+granted after the source stopped is released at once; a refused one is ignored.
+
+### TICK-28
+`big readout` (or `f`) covers the page with the rate, beat error, and status in type large
+enough to read at arm's length, fullscreen where the browser allows it. Next to the rate, while
+a source runs, an arrow shows the trend against the reading 5 s or more before the latest: up
+when the rate rose by more than 1 s/d, down when it fell by more, and level otherwise. `exit`,
+escape, `f`, or leaving fullscreen closes it. The rate there is dimmed and colored as in the
+readout.
+
+### TICK-29
+The positions panel keeps a result per watch position (dial up, dial down, crown up, down,
+left, right). `save result` stores the rate, beat error, and beat rate under the chosen
+position: an analyzed recording's fit, or the latest live reading once settled (TICK-23);
+with neither it is disabled. Saving a position again replaces it, and the position select
+then moves to the next one not yet saved. Rows show in position order, each with a `remove`
+button, under the average rate and beat error and the delta (fastest less slowest rate).
+`copy` writes the table as text to the clipboard and says whether it worked; `clear` empties
+it. The rows persist in `localStorage` under `tick.session`; malformed rows and repeats of a
+position are dropped on load.
+
+### TICK-30
+The `target` setting picks a rate band: off (default), -4 to +6 s/d, or +-5, 10, 20, or 30
+s/d. With one set, the rate graph shades the band with dashed edges (its range grows to hold
+the band), and a rate outside it shows amber in the readout, the big readout, and the
+positions table. Beat error shows amber over 1 ms and red over 3 ms there too.
+
+### TICK-31
+Pointing at the rate graph or the beat trace (hover, or a tap on touch) marks the reading or
+beat nearest that time on both, with a line, a dot, and its value and time (`at -12.3s` live,
+`at 12.3s` into a recording). The label sits on the side with more room. A mouse leaving the
+graph clears it; a finger lifting leaves it until the next tap. A new source starts without
+one.
+
+### TICK-32
+An audio file dragged over the page shows a `drop an audio file to analyze it` overlay, and
+dropping it analyzes it as `analyze file` does (TICK-25). Drags that carry no files are left
+to the browser.
+
+### TICK-33
+The settings sit in a section that, below 640px wide, folds under a `settings` toggle and
+starts folded. Growing past 640px opens it. The buttons are grouped as `live` (start mic,
+simulate, stop, big readout) and `offline` (record, analyze file, save).
+
+### TICK-34
+Keys: space starts the mic, or stops the running source, in place of pressing the focused
+button; `r` records 30 s (TICK-24); `f` toggles the big readout (TICK-28); escape closes the
+info dialog or the big readout. Keys are ignored with ctrl, meta, or alt held, while typing in
+a setting, and while an info dialog is open.
+
+### TICK-35
+While recording, the record button fills from the left as the 30 s go by. The save link names
+the recording's length and size, and its tooltip names the file it downloads.

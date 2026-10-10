@@ -45,11 +45,14 @@ export const sets = (ctx, prop) => frameCalls(ctx).filter((c) => c[0] === "set" 
 /**
  * Boot the page. `storage` seeds localStorage (a string, or "throw" for a
  * storage that throws), `canvas: false` makes getContext return null, and
- * `raf: false` removes requestAnimationFrame.
+ * `raf: false` removes requestAnimationFrame, `media` answers matchMedia
+ * queries (a function of the query), and `session` seeds the saved positions.
  */
-export function boot({ storage, canvas = true, raf = true, dpr } = {}) {
+export function boot({ storage, canvas = true, raf = true, dpr, media, session } = {}) {
   const dom = new JSDOM(html, { url: "https://example.test/tick" });
   const win = dom.window;
+  if (media) win.matchMedia = (q) => ({ matches: media(q) });
+  if (session !== undefined) win.localStorage.setItem("tick.session", session);
   const ctxs = new Map();
   win.HTMLCanvasElement.prototype.getContext = function () {
     if (!canvas) return null;
