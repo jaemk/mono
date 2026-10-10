@@ -145,6 +145,108 @@ test("auto relocks when the watch changes beat rate", () => {
   assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - 4) < 0.5);
 });
 
+/** Feed blocks from `parts` ([generator, secs] pairs) and collect events. */
+function feedParts(det, parts) {
+  const events = [];
+  for (const [gen, secs] of parts) {
+    for (let i = 0; i < secs * SR; i += 2048) events.push(...det.push(gen.next(2048)));
+  }
+  return events;
+}
+
+const zeros = { next: (n) => new Float32Array(n) };
+
+test("quiet ticks a little over room noise are read", () => {
+  // tick peaks 3x the noise amplitude (about 2.5x its envelope)
+  const { of } = run({ bph: 28800, rate: 4, beatError: 0.5, amp: 0.012, noise: 0.004, seed: 5 }, { average: 30 }, 40);
+  assert.deepEqual(of("lock").map((e) => e.bph), [28800]);
+  const r = last(of("reading"));
+  assert.ok(Math.abs(r.rate - 4) < 1, `rate ${r.rate}`);
+  assert.ok(Math.abs(r.beatError - 0.5) < 0.3, `beat error ${r.beatError}`);
+});
+
+test("higher sensitivity reads ticks lower in the noise", () => {
+  const watch = { bph: 28800, rate: -6, amp: 0.008, noise: 0.004, seed: 9 };
+  const high = run(watch, { sensitivity: "high", average: 30 }, 40);
+  assert.deepEqual(high.of("lock").map((e) => e.bph), [28800]);
+  assert.ok(Math.abs(last(high.of("reading")).rate + 6) < 2, `rate ${last(high.of("reading")).rate}`);
+  // low sensitivity hears nothing in the same signal
+  assert.equal(run(watch, { sensitivity: "low" }, 10).of("beat").length, 0);
+});
+
+test("normal sensitivity does not trigger on plain room noise", () => {
+  for (const sensitivity of ["low", "normal", "high"]) {
+    const { of } = run({ amp: 0, noise: 0.004, seed: 2 }, { sensitivity }, 20);
+    assert.equal(of("beat").length, 0, sensitivity);
+  }
+});
+
+test("silence at the start of the stream does not deafen the detector", () => {
+  const det = D.createDetector({ sampleRate: SR });
+  const watch = D.synth({ sampleRate: SR, bph: 28800, rate: 3, amp: 0.04, noise: 0.004 });
+  const events = feedParts(det, [
+    [zeros, 0.5],
+    [watch, 12],
+  ]);
+  const beats = events.filter((e) => e.type === "beat");
+  assert.ok(beats.length > 80, `${beats.length} beats`);
+  assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - 3) < 0.5);
+});
+
+test("loud knocks are ignored and do not hide the ticks after them", () => {
+  const det = D.createDetector({ sampleRate: SR });
+  const watch = D.synth({ sampleRate: SR, bph: 21600, rate: 9, amp: 0.01, noise: 0.002 });
+  const knock = D.synth({ sampleRate: SR, bph: 12000, start: 0, noise: 0, amp: 0.6 }).next(1200);
+  const events = [];
+  let at = 0;
+  for (let i = 0; i < 20 * SR; i += 2048, at += 2048) {
+    const block = watch.next(2048);
+    // a knock 50x the ticks every 1.7 s, between beats
+    for (let j = 0; j < 2048; j++) {
+      const off = (at + j) % Math.round(1.7 * SR) - Math.round(0.07 * SR);
+      if (at + j > 3 * SR && off >= 0 && off < knock.length) block[j] += knock[off];
+    }
+    events.push(...det.push(block));
+  }
+  assert.deepEqual(events.filter((e) => e.type === "lock").map((e) => e.bph), [21600]);
+  const beats = events.filter((e) => e.type === "beat");
+  assert.ok(beats.every((b) => b.peak < 0.05), "no knock counted as a beat");
+  // 6 beats/s for ~19.8 s, nearly all heard
+  assert.ok(beats.length > 110, `${beats.length} beats`);
+  assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - 9) < 0.5);
+  assert.ok(det.levels().rejected > 5, "knocks counted as rejected");
+});
+
+test("a watch moved closer to the mic is followed, not rejected as knocks", () => {
+  const det = D.createDetector({ sampleRate: SR });
+  const far = D.synth({ sampleRate: SR, bph: 28800, rate: -2, amp: 0.02, noise: 0.002 });
+  const near = D.synth({ sampleRate: SR, bph: 28800, rate: -2, amp: 0.3, noise: 0.002, start: 0.05 });
+  const events = feedParts(det, [
+    [far, 6],
+    [near, 10],
+  ]);
+  const late = events.filter((e) => e.type === "beat" && e.t > 8);
+  // 8 beats/s over the last ~8 s, all heard once the loud level is accepted
+  assert.ok(late.length > 60, `${late.length} beats after moving closer`);
+  assert.ok(det.levels().rejected <= 6);
+  assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate + 2) < 0.5);
+});
+
+test("a louder room raises the noise floor within a second", () => {
+  const det = D.createDetector({ sampleRate: SR });
+  const quiet = D.synth({ sampleRate: SR, amp: 0, noise: 0.001 });
+  const loud = D.synth({ sampleRate: SR, amp: 0, noise: 0.01, seed: 4 });
+  feedParts(det, [[quiet, 2]]);
+  const before = det.levels().noise;
+  feedParts(det, [[loud, 1.5]]);
+  const after = det.levels();
+  assert.ok(after.noise > 5 * before, `${before} -> ${after.noise}`);
+  assert.ok(after.threshold > after.noise);
+  assert.ok(after.level > 0);
+  // level is the peak since the last call
+  assert.equal(det.levels().level, 0);
+});
+
 test("a burst of stray clicks does not relock the beat rate", () => {
   const det = D.createDetector({ sampleRate: SR });
   const watch = D.synth({ sampleRate: SR, bph: 28800, rate: 7 });

@@ -2,7 +2,7 @@
 // TICK-19).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { boot, fakeAudio, settle, texts, callsOf, sets, tick } from "../helpers.mjs";
+import { boot, fakeAudio, settle, texts, callsOf, sets, tick, D } from "../helpers.mjs";
 
 const rateOf = (p) => Number(p.$("rate").textContent);
 
@@ -20,6 +20,7 @@ test("boots idle with defaults and an empty graph", () => {
   assert.equal(p.$("set-average").value, "10");
   assert.equal(p.$("set-span").value, "60");
   assert.equal(p.$("set-correction").value, "0");
+  assert.equal(p.$("set-sensitivity").value, "normal");
   const rate = texts(p.ctx("rate-canvas"));
   assert.ok(rate.includes("start the mic or simulate"));
   // zero in the middle, symmetric labels, fast up and slow down
@@ -53,6 +54,75 @@ test("sanitize rejects values outside the allowed sets", () => {
   assert.equal(tick.sanitize({ correction: 1e9 }).correction, 100);
   assert.equal(tick.sanitize({ correction: -1e9 }).correction, -100);
   assert.equal(tick.sanitize({ correction: Infinity }).correction, 0);
+  assert.equal(tick.sanitize({ sensitivity: "loud" }).sensitivity, "normal");
+  assert.equal(tick.sanitize({ sensitivity: "max" }).sensitivity, "max");
+});
+
+test("toDb and meterPct map levels onto the meter", () => {
+  assert.equal(tick.toDb(0), -100);
+  assert.equal(tick.toDb(1e-9), -100);
+  assert.equal(tick.toDb(1), 0);
+  assert.ok(Math.abs(tick.toDb(0.01) + 40) < 1e-9);
+  assert.equal(tick.meterPct(0), 0);
+  assert.equal(tick.meterPct(1), 100);
+  assert.ok(Math.abs(tick.meterPct(0.01) - 60) < 1e-9);
+});
+
+test("the input meter shows level, noise floor, and threshold while running", async () => {
+  const p = boot();
+  assert.equal(p.$("meter-db").textContent, "--");
+  const audio = fakeAudio(p.win);
+  await p.app.startMic();
+  audio.play({ bph: 28800, amp: 0.05, noise: 0.002 }, 3);
+  p.flush();
+  const db = Number(p.$("meter-db").textContent.replace(" dB", ""));
+  assert.ok(db > -60 && db < 0, `${db} dB`);
+  const pct = (id) => parseFloat(p.$(id).style.left);
+  assert.ok(pct("meter-threshold") > pct("meter-noise"), "threshold sits over the noise floor");
+  assert.ok(parseFloat(p.$("meter-level").style.width) > pct("meter-threshold"), "ticks reach past it");
+  assert.equal(p.$("meter-note").textContent, "");
+  p.click("stop");
+  assert.equal(p.$("meter-db").textContent, "--");
+  assert.equal(p.$("meter-level").style.width, "0%");
+});
+
+test("the meter says when the microphone sends only silence", async () => {
+  const p = boot();
+  const audio = fakeAudio(p.win);
+  await p.app.startMic();
+  for (let i = 0; i < 70; i++) {
+    audio.play({ amp: 0, noise: 0 }, 0.04);
+    p.flush();
+  }
+  assert.match(p.$("meter-note").textContent, /No audio from the microphone/);
+  assert.equal(p.$("meter-db").textContent, "-100 dB");
+});
+
+test("the meter counts loud sounds it ignored", async () => {
+  const p = boot();
+  const audio = fakeAudio(p.win);
+  await p.app.startMic();
+  audio.play({ bph: 28800, amp: 0.01, noise: 0.001 }, 4);
+  const knock = D.synth({ sampleRate: 48000, bph: 12000, start: 0, noise: 0, amp: 0.8 }).next(2048);
+  for (let i = 0; i < 2; i++) {
+    p.app.feed(knock);
+    audio.play({ bph: 28800, amp: 0, noise: 0.001, seed: 4 + i }, 0.5);
+  }
+  p.flush();
+  assert.match(p.$("meter-note").textContent, /^[12] loud sounds? ignored$/);
+});
+
+test("sensitivity applies to a running source", async () => {
+  const p = boot();
+  const audio = fakeAudio(p.win);
+  await p.app.startMic();
+  // faint ticks: unheard at low, read at max
+  p.change("set-sensitivity", "low");
+  audio.play({ bph: 28800, amp: 0.008, noise: 0.004 }, 5);
+  assert.equal(p.app.state().beatCount, 0);
+  p.change("set-sensitivity", "max");
+  audio.play({ bph: 28800, amp: 0.008, noise: 0.004, seed: 3 }, 5);
+  assert.ok(p.app.state().beatCount > 10);
 });
 
 test("pickRange and fmtRate", () => {
@@ -72,8 +142,10 @@ test("settings changes persist", () => {
   p.change("set-average", "60");
   p.change("set-span", "30");
   p.change("set-correction", "1.5");
+  p.change("set-sensitivity", "high");
   const saved = JSON.parse(p.win.localStorage.getItem("tick.settings"));
-  assert.deepEqual(saved, { bph: 28800, average: 60, span: 30, correction: 1.5 });
+  assert.deepEqual(saved, { bph: 28800, average: 60, span: 30, correction: 1.5, sensitivity: "high" });
+  assert.equal(boot({ storage: JSON.stringify(saved) }).$("set-sensitivity").value, "high");
   p.change("set-correction", "abc");
   assert.equal(p.$("set-correction").value, "0");
   p.change("set-bph", "auto");

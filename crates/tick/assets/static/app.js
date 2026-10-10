@@ -10,7 +10,13 @@
   const D = typeof module === "object" && module.exports ? require("./detector.js") : root.TickDetector;
 
   const SETTINGS_KEY = "tick.settings";
-  const DEFAULTS = { bph: "auto", average: 10, span: 60, correction: 0 };
+  const DEFAULTS = { bph: "auto", average: 10, span: 60, correction: 0, sensitivity: "normal" };
+  const SENSITIVITIES = Object.keys(D.SENSITIVITY);
+  // the input meter spans -100 to 0 dBFS of the filtered envelope
+  const METER_FLOOR_DB = -100;
+  const METER_FALL = 0.85;
+  // this many frames of exact zeros means the microphone sends nothing
+  const DEAD_FRAMES = 60;
   const AVERAGES = [4, 10, 30, 60];
   const SPANS = [30, 60, 300];
   const MAX_CORRECTION = 100;
@@ -48,6 +54,7 @@
     if (s.bph === "auto" || D.BPH.includes(s.bph)) out.bph = s.bph;
     if (AVERAGES.includes(s.average)) out.average = s.average;
     if (SPANS.includes(s.span)) out.span = s.span;
+    if (SENSITIVITIES.includes(s.sensitivity)) out.sensitivity = s.sensitivity;
     if (typeof s.correction === "number" && Number.isFinite(s.correction)) {
       out.correction = Math.max(-MAX_CORRECTION, Math.min(MAX_CORRECTION, s.correction));
     }
@@ -66,6 +73,16 @@
     return Math.abs(v) < 0.05 ? "0.0" : signed(v);
   }
 
+  /** An envelope level in dBFS, floored at the meter's bottom. */
+  function toDb(v) {
+    return v > 0 ? Math.max(METER_FLOOR_DB, 20 * Math.log10(v)) : METER_FLOOR_DB;
+  }
+
+  /** Where a level sits on the meter, in percent. */
+  function meterPct(v) {
+    return ((toDb(v) - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100;
+  }
+
   function createTick(win) {
     const doc = win.document;
     const $ = (id) => doc.getElementById(id);
@@ -79,6 +96,12 @@
       average: $("set-average"),
       span: $("set-span"),
       correction: $("set-correction"),
+      sensitivity: $("set-sensitivity"),
+      meterDb: $("meter-db"),
+      meterLevel: $("meter-level"),
+      meterNoise: $("meter-noise"),
+      meterThreshold: $("meter-threshold"),
+      meterNote: $("meter-note"),
       rateOut: $("rate"),
       beatErrorOut: $("beat-error"),
       bphOut: $("bph"),
@@ -103,6 +126,8 @@
     let waves = [];
     let beatCount = 0;
     let locked = null;
+    let shownLevel = 0;
+    let deadFrames = 0;
 
     function loadSettings() {
       try {
@@ -125,6 +150,7 @@
       el.average.value = String(settings.average);
       el.span.value = String(settings.span);
       el.correction.value = String(settings.correction);
+      el.sensitivity.value = settings.sensitivity;
     }
 
     function clearData() {
@@ -149,9 +175,12 @@
         bph: settings.bph,
         average: settings.average,
         correction: settings.correction,
+        sensitivity: settings.sensitivity,
       });
       locked = settings.bph === "auto" ? null : { bph: settings.bph, auto: false };
       now = 0;
+      shownLevel = 0;
+      deadFrames = 0;
       clearData();
       source = { stop: stopFn };
       showError("");
@@ -306,6 +335,29 @@
       el.start.disabled = !!source;
       el.sim.disabled = !!source;
       el.stop.disabled = !source;
+      renderMeter();
+    }
+
+    function renderMeter() {
+      if (!source) {
+        el.meterDb.textContent = "--";
+        el.meterLevel.style.width = "0%";
+        el.meterNote.textContent = "";
+        return;
+      }
+      const lv = det.levels();
+      shownLevel = Math.max(lv.level, shownLevel * METER_FALL);
+      deadFrames = lv.level === 0 ? deadFrames + 1 : 0;
+      el.meterDb.textContent = `${Math.round(toDb(shownLevel))} dB`;
+      el.meterLevel.style.width = `${meterPct(shownLevel).toFixed(1)}%`;
+      el.meterNoise.style.left = `${meterPct(lv.noise).toFixed(1)}%`;
+      el.meterThreshold.style.left = `${meterPct(lv.threshold).toFixed(1)}%`;
+      el.meterNote.textContent =
+        deadFrames > DEAD_FRAMES
+          ? "No audio from the microphone. Check the input device and its volume."
+          : lv.rejected
+            ? `${lv.rejected} loud ${lv.rejected === 1 ? "sound" : "sounds"} ignored`
+            : "";
     }
 
     /** Size a canvas to its css box at device pixel ratio; null without 2d. */
@@ -527,6 +579,8 @@
           det.setAverage(settings.average);
         } else if (key === "correction") {
           det.setCorrection(settings.correction);
+        } else if (key === "sensitivity") {
+          det.setSensitivity(settings.sensitivity);
         }
       }
       render();
@@ -542,6 +596,7 @@
       );
       el.average.addEventListener("change", () => onSetting("average", Number(el.average.value)));
       el.span.addEventListener("change", () => onSetting("span", Number(el.span.value)));
+      el.sensitivity.addEventListener("change", () => onSetting("sensitivity", el.sensitivity.value));
       el.correction.addEventListener("change", () => {
         onSetting("correction", Number(el.correction.value) || 0);
         el.correction.value = String(settings.correction);
@@ -562,7 +617,7 @@
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createTick, sanitize, pickRange, fmtRate, DEFAULTS };
+    module.exports = { createTick, sanitize, pickRange, fmtRate, toDb, meterPct, DEFAULTS };
   } else {
     createTick(root).start();
   }

@@ -6,23 +6,37 @@
   "use strict";
 
   const BPH = [12000, 14400, 18000, 19800, 21600, 25200, 28800, 36000];
-  const HP_HZ = 1000;
+  // ticks are light, high clicks; room rumble, voices, and knocks sit lower
+  const HP_HZ = 2000;
   const ENV_TAU = 0.0003;
   // the noise floor averages the envelope: quickly while the filters settle,
-  // then only slowly while the envelope is over the threshold, so beats
-  // barely lift it
+  // then only slowly while the envelope is briefly over the threshold, so
+  // beats barely lift it. Over the threshold for longer than any beat lasts
+  // means the room got louder (or the stream started with silence), and the
+  // floor catches up quickly.
   const NOISE_WARM_TAU = 0.02;
   const NOISE_QUIET_TAU = 0.3;
   const NOISE_LOUD_TAU = 5;
-  // the recent beat peak fades so a quieter watch is picked up again
-  const PEAK_TAU = 2;
-  const FLOOR = 1e-4;
-  const NOISE_MULT = 3;
+  const SUSTAINED = 0.06;
+  // only keeps digital silence from triggering; mic levels with gain control
+  // off can be far below 1e-4
+  const FLOOR = 1e-7;
+  // how far over the noise floor an onset must reach, as a multiple of it
+  // (pure white noise starts to trigger near 0.5)
+  const SENSITIVITY = { low: 1.5, normal: 0.8, high: 0.6, max: 0.45 };
+  // the threshold also stays over a quarter of the median recent beat peak
   const PEAK_FRAC = 0.25;
+  const PEAKS = 16;
+  // an onset this many times the median beat peak is a knock, not a beat
+  const LOUD_MULT = 4;
+  const LOUD_MIN_BEATS = 4;
+  const LOUD_STREAK = 6;
   // filter settle time before onsets count
   const WARMUP = 0.1;
   const PRE = 0.002;
   const POST = 0.03;
+  const LOOKBACK = 0.012;
+  const CFD_FRAC = 0.5;
   const MIN_GAP = 0.05;
   const GAP_FRAC = 0.6;
   const AUTO_MIN = 8;
@@ -150,27 +164,38 @@
     let bphSetting = opts.bph || "auto";
     let average = opts.average || 10;
     let correction = opts.correction || 0;
+    let mult = SENSITIVITY[opts.sensitivity] || SENSITIVITY.normal;
 
     const hp = highpass(sr, HP_HZ);
     const envA = Math.exp(-1 / (ENV_TAU * sr));
     const warmA = Math.exp(-1 / (NOISE_WARM_TAU * sr));
     const quietA = Math.exp(-1 / (NOISE_QUIET_TAU * sr));
     const loudA = Math.exp(-1 / (NOISE_LOUD_TAU * sr));
-    const peakA = Math.exp(-1 / (PEAK_TAU * sr));
+    const sustainedN = Math.round(SUSTAINED * sr);
+    const silenceN = Math.round(MAX_SILENCE * sr);
     const preN = Math.round(PRE * sr);
     const postN = Math.round(POST * sr);
+    const lookN = Math.round(LOOKBACK * sr);
     let ringSize = 1;
-    while (ringSize < (preN + postN) * 2) ringSize *= 2;
+    while (ringSize < (lookN + postN) * 2) ringSize *= 2;
     const ring = new Float32Array(ringSize);
+    const envRing = new Float32Array(ringSize);
     const mask = ringSize - 1;
     const warmup = Math.round(WARMUP * sr);
 
     let pos = 0;
     let env = 0;
     let noise = null;
-    let peak = 0;
+    let over = 0;
+    let threshold = FLOOR;
+    let peaks = [];
+    let peakRef = 0;
+    let lastBeatAt = 0;
     let armedAt = 0;
     let pending = [];
+    let level = 0;
+    let rejected = 0;
+    let loudStreak = 0;
 
     let period = null;
     let auto = bphSetting === "auto";
@@ -186,6 +211,9 @@
       period = periodOf(bph);
       auto = isAuto;
       doubt = false;
+      // onsets before the lock may have been noise; judge knocks by beats
+      peaks = [];
+      peakRef = 0;
       resetFit();
       events.push({ type: "lock", bph, auto: isAuto });
     }
@@ -269,13 +297,20 @@
       ring[pos & mask] = y;
       const prevEnv = env;
       env = envA * env + (1 - envA) * Math.abs(y);
+      envRing[pos & mask] = env;
       if (noise === null) noise = env;
-      peak *= peakA;
+      if (env > level) level = env;
 
       for (const p of pending) if (env > p.envPeak) p.envPeak = env;
 
-      const threshold = Math.max(FLOOR, noise + Math.max(NOISE_MULT * noise, PEAK_FRAC * (peak - noise)));
-      const na = pos < warmup ? warmA : env < threshold ? quietA : loudA;
+      // forget the beat peaks of a watch that has gone quiet
+      if (peaks.length && pos - lastBeatAt > silenceN) {
+        peaks = [];
+        peakRef = 0;
+      }
+      threshold = Math.max(FLOOR, noise + Math.max(mult * noise, PEAK_FRAC * (peakRef - noise)));
+      over = env >= threshold ? over + 1 : 0;
+      const na = pos < warmup || over > sustainedN ? warmA : over === 0 ? quietA : loudA;
       noise = na * noise + (1 - na) * env;
       if (pos >= warmup && pos >= armedAt && prevEnv < threshold && env >= threshold) {
         const frac = (threshold - prevEnv) / (env - prevEnv);
@@ -287,13 +322,59 @@
 
       if (pending.length && pos >= pending[0].at + postN) {
         const p = pending.shift();
-        const wave = new Float32Array(preN + postN);
-        const start = p.at - preN;
-        for (let i = 0; i < wave.length; i++) wave[i] = ring[(start + i) & mask];
-        peak = peak === 0 ? p.envPeak : 0.7 * peak + 0.3 * p.envPeak;
-        onBeat(p.onset / sr, p.envPeak, wave);
+        const loud = period !== null && peaks.length >= LOUD_MIN_BEATS && p.envPeak > LOUD_MULT * peakRef;
+        if (loud && loudStreak < LOUD_STREAK) {
+          // a knock: skip it and listen again right away
+          rejected++;
+          loudStreak++;
+          armedAt = pos;
+        } else {
+          if (loud) {
+            // loud every time: the watch itself got louder (moved closer)
+            peaks = [];
+          }
+          loudStreak = 0;
+          const wave = new Float32Array(preN + postN);
+          const start = p.at - preN;
+          for (let i = 0; i < wave.length; i++) wave[i] = ring[(start + i) & mask];
+          peaks.push(p.envPeak);
+          if (peaks.length > PEAKS) peaks.shift();
+          const sorted = [...peaks].sort((a, b) => a - b);
+          peakRef = sorted[sorted.length >> 1];
+          lastBeatAt = pos;
+          onBeat(timeBeat(p) / sr, p.envPeak, wave);
+        }
       }
       pos++;
+    }
+
+    /**
+     * A beat's time, by constant fraction: where its envelope first reaches
+     * halfway from the noise floor to this beat's own peak, searched from
+     * 12 ms before the trigger (a late trigger may have skipped the unlock)
+     * to the end of the capture. The trigger crossing alone moves with the
+     * beat's loudness against the threshold, and near the noise it jumps
+     * between the unlock, impulse, and drop sounds.
+     */
+    function timeBeat(p) {
+      const from = p.at - lookN;
+      const to = p.at + postN;
+      let top = 0;
+      for (let i = from; i < to; i++) top = Math.max(top, envRing[i & mask]);
+      const level = noise + CFD_FRAC * (top - noise);
+      for (let i = from + 1; i < to; i++) {
+        const a = envRing[(i - 1) & mask];
+        const b = envRing[i & mask];
+        if (a < level && b >= level) return i - 1 + (level - a) / (b - a);
+      }
+      return p.onset;
+    }
+
+    /** Input level (envelope peak since the last call), noise floor, and threshold. */
+    function levels() {
+      const out = { level, noise: noise || 0, threshold, rejected };
+      level = 0;
+      return out;
     }
 
     function push(samples) {
@@ -329,6 +410,10 @@
       setCorrection: (sd) => {
         correction = sd;
       },
+      setSensitivity: (name) => {
+        mult = SENSITIVITY[name] || SENSITIVITY.normal;
+      },
+      levels,
       time: () => pos / sr,
       sampleRate: sr,
       waveMs: { pre: PRE * 1000, post: POST * 1000 },
@@ -406,7 +491,7 @@
     return { next, sampleRate: sr };
   }
 
-  const api = { BPH, createDetector, synth, scorePeriod, bestBph, fit, robustFit, highpass, periodOf };
+  const api = { BPH, SENSITIVITY, createDetector, synth, scorePeriod, bestBph, fit, robustFit, highpass, periodOf };
   if (typeof module === "object" && module.exports) {
     module.exports = api;
   } else {

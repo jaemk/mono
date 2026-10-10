@@ -50,6 +50,14 @@
             <option value="300">5 min</option>
           </select>
         </label>
+        <label>sensitivity
+          <select id="set-sensitivity">
+            <option value="low">low</option>
+            <option value="normal">normal</option>
+            <option value="high">high</option>
+            <option value="max">max</option>
+          </select>
+        </label>
         <label>mic correction
           <span class="with-unit"><input id="set-correction" type="number" step="0.1" min="-100" max="100" inputmode="decimal"><span>s/d</span></span>
         </label>
@@ -81,6 +89,15 @@
           <span class="label">beats</span>
           <span class="value"><span id="beats">0</span></span>
         </div>
+        <div class="metric input-meter">
+          <span class="label">input <span id="meter-db">--</span></span>
+          <div class="meter" title="input level; marks: noise floor (grey) and trigger threshold (amber)">
+            <div id="meter-level" class="meter-level"></div>
+            <div id="meter-noise" class="meter-mark noise"></div>
+            <div id="meter-threshold" class="meter-mark threshold"></div>
+          </div>
+          <span id="meter-note" class="meter-note"></span>
+        </div>
       </section>
 
       <section class="panel trace-panel">
@@ -97,7 +114,9 @@
     <p class="help">
       Lay the watch dial down on a hard surface beside the microphone, in a quiet room. A wired
       or contact microphone works best; turn off headphones' noise cancelling. Readings start
-      after a few seconds of steady beats. Sound card clocks can be off by a few s/d: time a
+      after a few seconds of steady beats. Ticks should peak past the amber mark on the input
+      meter; if they don't, move the watch closer or raise the sensitivity. Faint ticks read
+      steadier with a longer averaging window. Sound card clocks can be off by a few s/d: time a
       known-good watch and enter the difference as mic correction.
     </p>
   </main>

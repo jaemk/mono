@@ -40,13 +40,34 @@ audio setup shows an error line and leaves the page idle.
 ## Detection
 
 ### TICK-7
-Each sample goes through a 1 kHz biquad high-pass, then a rectified one-pole envelope (0.3 ms
-time constant). A beat onset is the upward crossing of an adaptive threshold, timed to a
-fraction of a sample by linear interpolation, and none count in the first 100 ms while the
-filters settle. The threshold sits above the noise floor by the larger of 3x the floor or 25%
-of the recent beat peak height, and never below 1e-4. The noise floor averages the envelope
-(0.3 s time constant while under the threshold, 5 s while over it); the beat peak averages
-each beat's envelope peak and fades with a 2 s time constant.
+Each sample goes through a 2 kHz biquad high-pass (ticks are light, high clicks; rumble,
+voices, and knocks sit lower), then a rectified one-pole envelope (0.3 ms time constant). A
+beat triggers on the upward crossing of an adaptive threshold; none count in the first 100 ms
+while the filters settle. The threshold is the noise floor plus the larger of the
+sensitivity multiple of the floor (TICK-21) or 25% of the median of the last 16 beat peaks over
+it, and never below 1e-7 (only digital silence). The noise floor averages the envelope: with a
+20 ms time constant while the filters settle, 0.3 s while under the threshold, 5 s while
+briefly over it, and 20 ms again once it has stayed over for more than 60 ms (the room got
+louder, or the stream started with silence). The beat peaks are forgotten after 3 seconds
+without a beat and on every lock.
+
+### TICK-20
+Once the beat rate is locked and at least 4 beats are in, an onset peaking over 4x the median
+beat peak is a knock: it is not a beat, is counted as ignored, and the detector listens again
+right away. Six in a row mean the watch itself got louder; the sixth is accepted and the beat
+peaks start over from it.
+
+### TICK-21
+`sensitivity` sets how far over the noise floor a trigger must reach, as a multiple of it:
+low 1.5, normal 0.8 (default), high 0.6, max 0.45. Plain white noise starts to trigger near
+0.5. Changing it applies to a running source.
+
+### TICK-22
+While a source runs, an input meter in the readout shows the envelope level (peak since the
+last frame, falling back 15% a frame) on a -100 to 0 dBFS scale with its value in dB, and
+marks the noise floor and the trigger threshold. Under it a note says `No audio from the
+microphone...` after 60 frames of exact zeros, or otherwise how many loud sounds were ignored.
+Stopped, the meter reads `--`.
 
 ### TICK-8
 After an onset, further crossings are ignored for 0.6 of the beat period once the rate is
@@ -54,7 +75,12 @@ known, or 50 ms before then, so the unlock, impulse, and drop sounds within one 
 once.
 
 ### TICK-9
-Each onset is reported with 2 ms of filtered signal before it and 30 ms after, for the scope.
+Each beat is timed by constant fraction: where its envelope first reaches halfway from the
+noise floor to that beat's own peak, interpolated between samples, searched from 12 ms before
+the trigger to 30 ms after it. This does not move with how loud the beat is, and a late trigger
+(on the impulse or drop sound instead of the unlock) is timed the same as an early one. Each
+beat is reported with 2 ms of filtered signal before the trigger and 30 ms after, for the
+scope.
 
 ### TICK-10
 The beat rate is chosen from 12000, 14400, 18000, 19800, 21600, 25200, 28800, and 36000 bph.
@@ -119,7 +145,7 @@ Beside the beat trace, the scope overlays the last 16 beat waveforms aligned at 
 peak shown.
 
 ### TICK-18
-The beat rate select, averaging window, visible span, and mic correction persist in
+The beat rate select, averaging window, visible span, sensitivity, and mic correction persist in
 `localStorage` under `tick.settings`. Storage that throws or holds bad json falls back to the
 defaults.
 
