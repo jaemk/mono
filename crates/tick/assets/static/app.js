@@ -37,7 +37,6 @@
   const PROGRESS_W = 160;
   // the record button saves this much raw input as a wav (TICK-24)
   const RECORD_SECS = 30;
-  const REVOKE_MS = 60000;
   // shared horizontal plot margins, so the rate graph and the beat trace line
   // up in time
   const PAD_L = 48;
@@ -130,6 +129,7 @@
       sim: $("sim"),
       stop: $("stop"),
       record: $("record"),
+      save: $("save"),
       bph: $("set-bph"),
       average: $("set-average"),
       span: $("set-span"),
@@ -166,6 +166,8 @@
     let locked = null;
     // a recording in progress: { buf, len, sampleRate }
     let rec = null;
+    // the object url behind the save link of the last recording
+    let saveUrl = null;
     let shownLevel = 0;
     let deadFrames = 0;
     // beats heard since the source started, indexed or not
@@ -252,7 +254,9 @@
         waves.push(ev);
         if (waves.length > SCOPE_WAVES) waves.shift();
         if (ev.n !== null) {
-          beatCount++;
+          // a better onset for the same beat takes the last one's place
+          if (ev.replaced) beats.pop();
+          else beatCount++;
           beats.push({ t: ev.t, parity: ev.parity, offsetMs: ev.offsetMs });
         }
       } else {
@@ -277,6 +281,7 @@
     function startRecording() {
       if (!source || rec) return;
       const sampleRate = source.sampleRate;
+      clearSave();
       rec = { buf: new Float32Array(RECORD_SECS * sampleRate), len: 0, sampleRate };
       render();
     }
@@ -289,7 +294,7 @@
       if (rec.len === rec.buf.length) {
         const done = rec;
         rec = null;
-        download(encodeWav(done.buf, done.sampleRate), recordingName());
+        offerSave(encodeWav(done.buf, done.sampleRate), recordingName());
       }
     }
 
@@ -300,15 +305,25 @@
       return `tick-${stamp}-${settings.bph}.wav`;
     }
 
-    function download(bytes, name) {
-      const url = win.URL.createObjectURL(new win.Blob([bytes], { type: "audio/wav" }));
-      const a = doc.createElement("a");
-      a.href = url;
-      a.download = name;
-      doc.body.appendChild(a);
-      a.click();
-      a.remove();
-      win.setTimeout(() => win.URL.revokeObjectURL(url), REVOKE_MS);
+    /**
+     * Show a save link for the finished recording. Browsers block a download
+     * started without a click, so the click on the link starts it. The link
+     * stays (after stop too) until the next recording replaces it.
+     */
+    function offerSave(bytes, name) {
+      clearSave();
+      saveUrl = win.URL.createObjectURL(new win.Blob([bytes], { type: "audio/wav" }));
+      el.save.setAttribute("href", saveUrl);
+      el.save.download = name;
+      el.save.hidden = false;
+    }
+
+    function clearSave() {
+      if (!saveUrl) return;
+      win.URL.revokeObjectURL(saveUrl);
+      saveUrl = null;
+      el.save.removeAttribute("href");
+      el.save.hidden = true;
     }
 
     async function startMic() {

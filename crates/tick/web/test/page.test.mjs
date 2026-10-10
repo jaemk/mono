@@ -150,23 +150,22 @@ test("encodeWav writes mono 32-bit float wav that round trips", () => {
   assert.deepEqual(back, samples);
 });
 
-/** Capture downloads: the anchor clicked, and object urls made and revoked. */
-function captureDownloads(win) {
-  const got = { clicks: [], urls: [], revoked: [] };
+/** Capture object urls made and revoked. */
+function captureUrls(win) {
+  const got = { urls: [], revoked: [] };
   win.URL.createObjectURL = (blob) => {
     got.urls.push(blob);
     return `blob:test/${got.urls.length}`;
   };
   win.URL.revokeObjectURL = (url) => got.revoked.push(url);
-  win.HTMLAnchorElement.prototype.click = function () {
-    got.clicks.push({ href: this.href, download: this.download, attached: this.isConnected });
-  };
   return got;
 }
 
-test("record saves the next 30 s of raw input as a wav (TICK-24)", async () => {
+test("record keeps the next 30 s of raw input as a wav to save (TICK-24)", async () => {
   const p = boot();
-  const got = captureDownloads(p.win);
+  const got = captureUrls(p.win);
+  const save = p.$("save");
+  assert.equal(save.hidden, true);
   assert.equal(p.$("record").disabled, true, "nothing to record while idle");
   assert.equal(p.$("record").textContent, "record 30 s");
   const audio = fakeAudio(p.win);
@@ -179,20 +178,20 @@ test("record saves the next 30 s of raw input as a wav (TICK-24)", async () => {
   audio.play(watch, 10);
   p.flush();
   assert.equal(p.$("record").textContent, "recording... 20 s");
-  assert.equal(got.clicks.length, 0);
+  assert.equal(save.hidden, true);
   // the rest of the 30 s (play runs in 2048 sample blocks, so a bit over)
   audio.play({ ...watch, seed: 12 }, 21);
   p.flush();
-  assert.equal(got.clicks.length, 1);
-  const click = got.clicks[0];
-  assert.match(click.download, /^tick-\d{8}-\d{6}-auto\.wav$/);
-  assert.equal(click.href, "blob:test/1");
-  assert.equal(click.attached, true);
+  // a link the user clicks, since browsers block a download without one
+  assert.equal(save.hidden, false);
+  assert.match(save.download, /^tick-\d{8}-\d{6}-auto\.wav$/);
+  assert.equal(save.getAttribute("href"), "blob:test/1");
   assert.equal(p.$("record").textContent, "record 30 s");
   assert.equal(p.$("record").disabled, false);
-  // the anchor is gone and its url revoked once the download has started
-  assert.equal(p.win.document.querySelectorAll("a[download]").length, 0);
-  assert.deepEqual(got.revoked, ["blob:test/1"]);
+  assert.deepEqual(got.revoked, []);
+  // still there after stop
+  p.click("stop");
+  assert.equal(save.hidden, false);
 
   const blob = got.urls[0];
   assert.equal(blob.type, "audio/wav");
@@ -208,7 +207,7 @@ test("record saves the next 30 s of raw input as a wav (TICK-24)", async () => {
 
 test("stopping cancels a recording, and a new source starts clean", async () => {
   const p = boot();
-  const got = captureDownloads(p.win);
+  const got = captureUrls(p.win);
   const audio = fakeAudio(p.win);
   await p.app.startMic();
   p.click("record");
@@ -218,12 +217,19 @@ test("stopping cancels a recording, and a new source starts clean", async () => 
   assert.equal(p.$("record").disabled, true);
   await p.app.startMic();
   audio.play({ bph: 18000 }, 31);
-  assert.equal(got.clicks.length, 0, "nothing saved");
+  assert.equal(got.urls.length, 0, "nothing saved");
+  assert.equal(p.$("save").hidden, true);
   // a second click while recording does nothing
   p.click("record");
   p.click("record");
   audio.play({ bph: 18000 }, 31);
-  assert.equal(got.clicks.length, 1);
+  assert.equal(got.urls.length, 1);
+  // a new recording replaces the last one's link and frees it
+  p.click("record");
+  assert.equal(p.$("save").hidden, true);
+  assert.deepEqual(got.revoked, ["blob:test/1"]);
+  audio.play({ bph: 18000 }, 31);
+  assert.equal(p.$("save").getAttribute("href"), "blob:test/2");
 });
 
 test("pickRange and fmtRate", () => {

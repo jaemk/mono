@@ -97,8 +97,10 @@ main {
   gap: 8px;
 }
 
-button {
+button,
+a.button {
   font: 600 14px system-ui, sans-serif;
+  text-decoration: none;
   padding: 8px 14px;
   border-radius: 6px;
   border: 1px solid var(--edge);
@@ -107,6 +109,11 @@ button {
   cursor: pointer;
 }
 
+a.button[hidden] {
+  display: none;
+}
+
+a.button:hover,
 button:hover:not(:disabled) {
   border-color: var(--dim);
 }
