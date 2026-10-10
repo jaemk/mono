@@ -43,6 +43,13 @@
   const AUTO_INTERVALS = 24;
   const AUTO_FIT = 0.08;
   const MULTI_PENALTY = 0.02;
+  // a beat rate is scored on its best fitting 3/4 of intervals
+  const SCORE_KEEP = 0.75;
+  // once locked, an onset this far (in periods) from where the fit expects a
+  // beat is off phase: it gets only the short refractory, so a stray click
+  // can't hold off the real beat after it
+  const OFF_PHASE = 0.25;
+  const ROBUST_PASSES = 3;
   const MIN_READ_BEATS = 6;
   const MIN_READ_SPAN = 1;
   // a reading is settled once its beats span the averaging window, less this
@@ -82,17 +89,22 @@
   }
 
   /**
-   * How well a nominal period explains onset intervals: the mean distance
-   * from each interval to its nearest whole number of periods, as a fraction
-   * of the period, plus a small penalty per interval that spans missed beats.
+   * How well a nominal period explains onset intervals: the distance from
+   * each interval to its nearest whole number of periods, as a fraction of
+   * the period, plus a small penalty per interval that spans missed beats,
+   * averaged over the best fitting 3/4 so a few noise onsets don't sink the
+   * true rate.
    */
   function scorePeriod(period, intervals) {
-    let total = 0;
-    for (const d of intervals) {
+    const costs = intervals.map((d) => {
       const k = Math.round(d / period);
-      total += k < 1 ? 1 : Math.abs(d - k * period) / period + (k > 1 ? MULTI_PENALTY : 0);
-    }
-    return total / intervals.length;
+      return k < 1 ? 1 : Math.abs(d - k * period) / period + (k > 1 ? MULTI_PENALTY : 0);
+    });
+    costs.sort((x, y) => x - y);
+    const keep = Math.ceil(costs.length * SCORE_KEEP);
+    let total = 0;
+    for (let i = 0; i < keep; i++) total += costs[i];
+    return total / keep;
   }
 
   /** The best fitting standard beat rate for the intervals. */
@@ -105,10 +117,15 @@
     return best;
   }
 
+  const sign = (n) => (n % 2 === 0 ? 1 : -1);
+
+  /** Where a fit puts beat `n`. */
+  const fitAt = (f, n) => f.t0 + f.a + f.b * (n - f.n0) + f.h * sign(n);
+
   /**
    * Least squares fit of `t = a + b*n + h*s` (s = +1 even, -1 odd), centered
-   * for precision. Returns `{ b, h, residual }` (each beat's miss in s) or
-   * null when the beats can't separate the terms.
+   * on the first beat for precision. Returns `{ a, b, h, t0, n0, residual }`
+   * (each beat's miss in s) or null when the beats can't separate the terms.
    */
   function fit(beats) {
     const t0 = beats[0].t;
@@ -116,7 +133,7 @@
     let sn = 0, ss = 0, snn = 0, sns = 0, sss = 0, st = 0, snt = 0, sst = 0;
     for (const { t, n } of beats) {
       const x = n - n0;
-      const s = n % 2 === 0 ? 1 : -1;
+      const s = sign(n);
       const y = t - t0;
       sn += x;
       ss += s;
@@ -135,20 +152,31 @@
     const a = det3(st, sn, ss, snt, snn, sns, sst, sns, sss) / det;
     const b = det3(m, st, ss, sn, snt, sns, ss, sst, sss) / det;
     const h = det3(m, sn, st, sn, snn, snt, ss, sns, sst) / det;
-    const residual = beats.map(({ t, n }) => t - t0 - (a + b * (n - n0) + h * (n % 2 === 0 ? 1 : -1)));
-    return { b, h, residual };
+    const f = { a, b, h, t0, n0 };
+    f.residual = beats.map(({ t, n }) => t - fitAt(f, n));
+    return f;
   }
 
-  /** `fit`, refit once without the beats that miss it by far (TICK-12). */
+  /**
+   * `fit`, refit without the beats that miss it by far, until the kept set
+   * stops changing (at most `ROBUST_PASSES` refits, TICK-12).
+   */
   function robustFit(beats) {
-    const f = fit(beats);
+    let f = fit(beats);
     if (!f) return null;
-    const miss = f.residual.map(Math.abs);
-    const sorted = [...miss].sort((x, y) => x - y);
-    const limit = Math.max(OUTLIER_MIN, OUTLIER_MULT * sorted[sorted.length >> 1]);
-    const kept = beats.filter((_, i) => miss[i] <= limit);
-    if (kept.length === beats.length || kept.length < MIN_READ_BEATS) return f;
-    return fit(kept) || f;
+    let kept = beats.length;
+    for (let pass = 0; pass < ROBUST_PASSES; pass++) {
+      const miss = beats.map(({ t, n }) => Math.abs(t - fitAt(f, n)));
+      const sorted = [...miss].sort((x, y) => x - y);
+      const limit = Math.max(OUTLIER_MIN, OUTLIER_MULT * sorted[sorted.length >> 1]);
+      const next = beats.filter((_, i) => miss[i] <= limit);
+      if (next.length === kept || next.length < MIN_READ_BEATS) break;
+      const g = fit(next);
+      if (!g) break;
+      f = g;
+      kept = next.length;
+    }
+    return f;
   }
 
   /**
@@ -158,7 +186,9 @@
    * - `{ type: "lock", bph, auto }`: the beat rate was chosen (or changed);
    *   earlier beats no longer count
    * - `{ type: "beat", t, n, parity, offsetMs, peak, wave }`: one beat; `n`,
-   *   `parity`, and `offsetMs` are null until the beat rate is known
+   *   `parity`, and `offsetMs` are null until the beat rate is known;
+   *   `replaced` marks a better onset for the previous beat's index, which
+   *   takes its place
    * - `{ type: "reading", t, rate, beatError, bph, span, window, settled }`:
    *   rate in s/d (fast is positive) and beat error in ms, after each beat
    *   once enough are in; `span` is the seconds of beats behind it and
@@ -210,6 +240,8 @@
     let beats = [];
     let prev = null;
     let t0 = null;
+    // the latest reading's fit, which indexes and phases new onsets
+    let model = null;
     let events = [];
 
     function lock(bph, isAuto) {
@@ -227,6 +259,19 @@
       beats = [];
       prev = null;
       t0 = null;
+      model = null;
+    }
+
+    /** The index an onset at `t` belongs to: by the fit once there is one. */
+    function indexAt(t) {
+      if (model) return model.n0 + Math.round((t - model.t0 - model.a) / model.b);
+      return prev.n + Math.round((t - prev.t) / period);
+    }
+
+    /** How far, in periods, an onset at `t` lands from its expected beat. */
+    function phaseMiss(t) {
+      if (!model) return 0;
+      return Math.abs(t - fitAt(model, indexAt(t))) / period;
     }
 
     // Lock the best fitting rate once one fits. Once locked, a full window the
@@ -264,9 +309,15 @@
       if (prev && t - prev.t > MAX_SILENCE) resetFit();
       let n = 0;
       if (prev) {
-        const k = Math.round((t - prev.t) / period);
-        if (k < 1) return; // a second onset inside one beat: noise
-        n = prev.n + k;
+        n = indexAt(t);
+        if (n < prev.n) return;
+        if (n === prev.n) {
+          // two onsets in one beat: keep the one nearer where the fit
+          // expects it (before a fit, the first)
+          if (!model || Math.abs(t - fitAt(model, n)) >= Math.abs(prev.t - fitAt(model, n))) return;
+          beats.pop();
+          beat.replaced = true;
+        }
       } else {
         t0 = t;
       }
@@ -288,6 +339,7 @@
       if (beats[beats.length - 1].t - beats[0].t < MIN_READ_SPAN) return null;
       const f = robustFit(beats);
       if (!f) return null;
+      model = f;
       // beats older than the window are dropped, so a full window spans just
       // under it
       const span = beats[beats.length - 1].t - beats[0].t;
@@ -326,7 +378,8 @@
       if (pos >= warmup && pos >= armedAt && prevEnv < threshold && env >= threshold) {
         const frac = (threshold - prevEnv) / (env - prevEnv);
         const onset = pos - 1 + frac;
-        const gap = period === null ? MIN_GAP : Math.max(MIN_GAP, GAP_FRAC * period);
+        const onPhase = period !== null && phaseMiss(onset / sr) <= OFF_PHASE;
+        const gap = onPhase ? Math.max(MIN_GAP, GAP_FRAC * period) : MIN_GAP;
         armedAt = pos + Math.round(gap * sr);
         pending.push({ onset, at: pos, envPeak: env });
       }

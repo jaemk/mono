@@ -293,6 +293,52 @@ test("a burst of stray clicks does not relock the beat rate", () => {
   assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - 7) < 0.3);
 });
 
+test("a stray click before a beat does not hold off the beat", () => {
+  const det = D.createDetector({ sampleRate: SR });
+  const bph = 18000;
+  const rate = 100;
+  const watch = D.synth({ sampleRate: SR, bph, rate, amp: 0.05, noise: 0.002 });
+  const click = D.synth({ sampleRate: SR, bph: 12000, start: 0, noise: 0, amp: 0.05 }).next(1200);
+  const period = D.periodOf(bph) / (1 + rate / 86400);
+  // a click as loud as the ticks, 0.65 of a period after every 7th beat from 4 s on
+  const clickAt = new Set();
+  for (let k = 0; 0.15 + k * period < 20; k++) {
+    if (k % 7 === 0 && 0.15 + k * period > 4) clickAt.add(Math.round((0.15 + (k + 0.65) * period) * SR));
+  }
+  const events = [];
+  let at = 0;
+  for (let i = 0; i < 20 * SR; i += 2048, at += 2048) {
+    const block = watch.next(2048);
+    for (const c of clickAt) {
+      for (let j = Math.max(0, c - at); j < 2048 && c - at + click.length > j; j++) block[j] += click[at + j - c];
+    }
+    events.push(...det.push(block));
+  }
+  assert.deepEqual(events.filter((e) => e.type === "lock").map((e) => e.bph), [bph]);
+  const beats = events.filter((e) => e.type === "beat" && e.n !== null);
+  assert.ok(beats.some((b) => b.replaced), "a click was replaced by the beat after it");
+  // the beat each index ends up with is the real one, and none are lost
+  const kept = new Map(beats.map((b) => [b.n, b.t]));
+  const late = [...kept].filter(([, t]) => t > 5 && t < 19.9);
+  assert.ok(late.length >= Math.floor(14.9 / period) - 1, `${late.length} beats kept`);
+  for (const [, t] of late) {
+    const phase = (t - 0.15) / period;
+    assert.ok(Math.abs(phase - Math.round(phase)) < 0.05, `beat at ${t} is off phase`);
+  }
+  assert.ok(Math.abs(last(events.filter((e) => e.type === "reading")).rate - rate) < 0.5);
+});
+
+test("robustFit refits until the outliers stop changing", () => {
+  const beats = [];
+  for (let n = 0; n < 40; n++) beats.push({ t: (n * 0.2) / (1 + 100 / 86400), n });
+  // a beat caught way off, which hides a smaller miss on the first pass
+  beats[5].t += 0.05;
+  beats[30].t += 0.004;
+  const rate = (f) => 86400 * (0.2 / f.b - 1);
+  const f = D.robustFit(beats);
+  assert.ok(Math.abs(rate(f) - 100) < 1e-6, `robust fit ${rate(f)}`);
+});
+
 test("robustFit leaves a beat caught late out of the fit", () => {
   const beats = [];
   for (let n = 0; n < 40; n++) beats.push({ t: (n * 0.125) / (1 + 5 / 86400) + (n % 2 ? 0.0003 : 0), n });
@@ -351,6 +397,11 @@ test("scorePeriod prefers the true period and tolerates skipped beats", () => {
   assert.ok(D.scorePeriod(D.periodOf(21600), intervals) > 0.1);
   // an interval shorter than half a period fits nothing
   assert.equal(D.scorePeriod(p, [p / 3]), 1);
+  // a few noise onsets among the beats don't sink the true rate
+  const q = D.periodOf(18000);
+  const noisy = [...Array(20).fill(q), 0.35 * q, 0.6 * q, 0.45 * q, 0.7 * q];
+  assert.equal(D.bestBph(noisy).bph, 18000);
+  assert.ok(D.scorePeriod(q, noisy) <= 0.08, `score ${D.scorePeriod(q, noisy)}`);
 });
 
 test("fit recovers slope and parity offset, and gives up on degenerate input", () => {

@@ -41,8 +41,11 @@ audio setup shows an error line and leaves the page idle.
 While a source runs, `record 30 s` saves the next 30 seconds of input, exactly the samples
 the detector gets (unprocessed, at the input's sample rate), and downloads them as a mono
 32-bit float WAV named `tick-<yyyymmdd>-<hhmmss>-<beat rate setting>.wav`. The button counts
-down while recording, and the detector keeps running. `stop` or a new source cancels a
-recording without saving. Recordings never leave the browser except as that download.
+down while recording, and the detector keeps running. When it finishes, a `save recording`
+link appears; clicking it downloads the file (browsers block a download not started by a
+click). The link stays after `stop` until the next recording replaces it. `stop` or a new
+source cancels a recording in progress without saving. Recordings never leave the browser
+except as that download.
 
 ## Detection
 
@@ -97,7 +100,8 @@ Stopped, the meter reads `--`.
 ### TICK-8
 After an onset, further crossings are ignored for 0.6 of the beat period once the rate is
 known, or 50 ms before then, so the unlock, impulse, and drop sounds within one beat count
-once.
+once. Once there is a reading, an onset more than 0.25 of a period from where the fit expects a
+beat only gets the 50 ms, so a stray click can't hold off the beat after it.
 
 ### TICK-9
 Each beat is timed by constant fraction: where its envelope first reaches halfway from the
@@ -109,17 +113,21 @@ scope.
 
 ### TICK-10
 The beat rate is chosen from 12000, 14400, 18000, 19800, 21600, 25200, 28800, and 36000 bph.
-In `auto`, the detector scores each candidate against the last 24 onset intervals: the mean
+In `auto`, the detector scores each candidate against the last 24 onset intervals: the
 distance from each interval to its nearest whole number of periods, as a fraction of the
-period, plus 0.02 for each interval that spans missed beats. It locks the best candidate once
+period, plus 0.02 for each interval that spans missed beats, averaged over the best fitting
+3/4 of the intervals so a few noise onsets don't sink the true rate. It locks the best candidate once
 one scores 0.08 or less (after at least 8 intervals). When a full window of 24 no longer fits
 the locked rate, the window is dropped and the choice is made again on at least 8 fresh
 intervals: the locked rate stays if it fits them, otherwise the best fitting candidate
 replaces it. Choosing a rate in the select locks it immediately.
 
 ### TICK-11
-Each beat gets an index: the previous index plus the interval divided by the period, rounded.
-An onset that rounds to the same index as the previous one is dropped as noise. A gap of more
+Each beat gets an index: once there is a reading, the index the latest fit puts it nearest;
+before then, the previous index plus the interval divided by the period, rounded. An onset
+behind the previous index is dropped. One on the same index replaces the previous beat if it
+lands nearer where the fit expects that beat (and is reported with `replaced`), and is
+otherwise dropped as noise. A gap of more
 than 3 seconds restarts indexing at 0 and drops the beats before it from the fit.
 
 ## Readings
@@ -134,8 +142,8 @@ and -1 for odd beats. With nominal period `P`:
 
 A reading needs at least 6 beats spanning at least 1 second, and is produced on every beat
 after that. Beats that miss the fit by more than 0.5 ms and 5x the median miss (a beat caught
-on its drop sound, a stray click) are left out and the fit is run once more, unless fewer than
-6 beats would remain.
+on its drop sound, a stray click) are left out and the fit is run again, until the beats left
+out stop changing (at most 3 refits), unless fewer than 6 beats would remain.
 
 ### TICK-13
 Changing the beat rate, starting a source, or restarting the fit after a relock clears the
