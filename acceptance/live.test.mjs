@@ -241,9 +241,13 @@ test("tick serves the page and its scripts", async () => {
   const c = new Client();
   const page = await expectStatus(await c.get("/tick"), 200, "tick page");
   assert.match(page, /<title>tick<\/title>/);
+  // the sensitivity setting and the input meter
+  for (const id of ["set-sensitivity", "meter-level", "meter-threshold", "meter-note"]) {
+    assert.ok(page.includes(`id="${id}"`), `tick page has #${id}`);
+  }
   expectRedirect(await c.get("/tick/"), "/tick", "tick trailing slash");
   for (const [path, marker] of [
-    ["/tick/static/detector.js", "createDetector"],
+    ["/tick/static/detector.js", "SENSITIVITY"],
     ["/tick/static/app.js", "createTick"],
     ["/tick/static/worklet.js", "registerProcessor"],
     ["/tick/static/app.css", "--phosphor"],
