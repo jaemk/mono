@@ -1,0 +1,305 @@
+:root {
+  --bg: #070b09;
+  --panel: #0d1411;
+  --edge: #1c2a23;
+  --text: #cfe3d6;
+  --dim: #6f8a7a;
+  --phosphor: #7cfc9a;
+  --even: #ffb547;
+  --odd: #4fd1c5;
+  --bad: #ff6b6b;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.bar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--edge);
+}
+
+.brand {
+  color: var(--phosphor);
+  font: 700 22px var(--mono);
+  letter-spacing: 0.04em;
+  text-decoration: none;
+}
+
+.sub {
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.status {
+  margin-left: auto;
+  font: 12px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
+.status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status[data-state="listening"] {
+  color: var(--even);
+}
+
+.status[data-state="locked"] {
+  color: var(--phosphor);
+}
+
+main {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 16px 20px 32px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 24px;
+  margin-bottom: 14px;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  font: 600 14px system-ui, sans-serif;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--dim);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--phosphor);
+  border-color: var(--phosphor);
+  color: #062010;
+}
+
+.settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+select,
+input {
+  font: 14px var(--mono);
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.with-unit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.with-unit input {
+  width: 84px;
+}
+
+.error {
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  color: var(--bad);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-areas:
+    "rate readout"
+    "trace scope";
+  gap: 12px;
+}
+
+.rate-panel {
+  grid-area: rate;
+}
+
+.readout {
+  grid-area: readout;
+}
+
+.trace-panel {
+  grid-area: trace;
+}
+
+.scope-panel {
+  grid-area: scope;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  padding: 10px 12px 12px;
+  min-width: 0;
+}
+
+.panel h2 {
+  margin: 0 0 8px;
+  font: 600 12px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
+.hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 6px;
+  opacity: 0.8;
+}
+
+.hint i {
+  font-style: normal;
+}
+
+.even {
+  color: var(--even);
+}
+
+.odd {
+  color: var(--odd);
+}
+
+canvas {
+  display: block;
+  width: 100%;
+}
+
+#rate-canvas {
+  height: 280px;
+}
+
+#trace-canvas,
+#scope-canvas {
+  height: 170px;
+}
+
+.readout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-content: center;
+  gap: 18px 12px;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.metric.big {
+  grid-column: 1 / -1;
+}
+
+.metric .label {
+  font: 11px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
+.metric .value {
+  font: 600 22px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.metric.big .value {
+  font-size: 52px;
+  line-height: 1.05;
+  color: var(--phosphor);
+}
+
+.unit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--dim);
+  margin-left: 6px;
+}
+
+.help {
+  margin-top: 18px;
+  max-width: 72ch;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .bar,
+  main {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "readout"
+      "rate"
+      "trace"
+      "scope";
+  }
+
+  #rate-canvas {
+    height: 220px;
+  }
+
+  .metric.big .value {
+    font-size: 40px;
+  }
+}

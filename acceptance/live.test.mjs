@@ -234,6 +234,31 @@ test("flip serves the page, flips, and keeps odds and coin per cookie", async ()
 });
 
 // ---------------------------------------------------------------------------
+// tick (static: the page and its client scripts)
+// ---------------------------------------------------------------------------
+
+test("tick serves the page and its scripts", async () => {
+  const c = new Client();
+  const page = await expectStatus(await c.get("/tick"), 200, "tick page");
+  assert.match(page, /<title>tick<\/title>/);
+  expectRedirect(await c.get("/tick/"), "/tick", "tick trailing slash");
+  for (const [path, marker] of [
+    ["/tick/static/detector.js", "createDetector"],
+    ["/tick/static/app.js", "createTick"],
+    ["/tick/static/worklet.js", "registerProcessor"],
+    ["/tick/static/app.css", "--phosphor"],
+  ]) {
+    const resp = await c.get(path);
+    const body = await expectStatus(resp, 200, path);
+    assert.ok(body.includes(marker), `${path} should contain ${marker}`);
+  }
+  // the worklet must load as javascript
+  const worklet = await c.get("/tick/static/worklet.js");
+  await worklet.text();
+  assert.match(worklet.headers.get("content-type"), /javascript/);
+});
+
+// ---------------------------------------------------------------------------
 // mapour (mounted only when MAPOUR_ENABLED=true)
 // ---------------------------------------------------------------------------
 

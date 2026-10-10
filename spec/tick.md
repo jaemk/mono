@@ -1,0 +1,128 @@
+# Tick
+
+A mechanical watch timegrapher at `/tick`. The page listens to a watch through the
+microphone, detects each beat, and plots the rate in seconds per day alongside the raw beats.
+Everything runs in the browser; the server only serves the assets.
+
+## Serving
+
+### TICK-1
+`GET /tick` serves the page. `GET /tick/` redirects (308) to `/tick`. The client scripts
+and stylesheet are served under `/tick/static/`. No other route exists under `/tick`.
+
+### TICK-2
+The server keeps no state for tick: no database, no cookies, no config flag. Audio never
+leaves the browser.
+
+## Capture
+
+### TICK-3
+`start mic` asks for the microphone with echo cancellation, noise suppression, and automatic
+gain control turned off, since each of them smears or drops the short beat transients. One
+channel is read at the audio context's sample rate through an AudioWorklet (or a
+ScriptProcessor where AudioWorklet is missing), in blocks of 2048 samples.
+
+### TICK-4
+The audio sample clock is the time reference: a beat's time is its sample position divided by
+the sample rate. The simulator feeds whatever audio is due on a 50 ms timer, at most 1 second
+of it per tick, so a backgrounded tab does not catch up in one burst. A sound card crystal is commonly off by 20-50 ppm (about 2-4 s/d), so a
+`mic correction` setting in s/d is added to every rate reading.
+
+### TICK-5
+`simulate` feeds the detector a synthesized watch instead of the microphone: 28800 bph,
++6.0 s/d, 0.4 ms beat error, with background noise. It runs through the same detector and
+displays as the microphone does. `stop` ends either source.
+
+### TICK-6
+A denied microphone, a missing `getUserMedia` (insecure context or old browser), or a failed
+audio setup shows an error line and leaves the page idle.
+
+## Detection
+
+### TICK-7
+Each sample goes through a 1 kHz biquad high-pass, then a rectified one-pole envelope (0.3 ms
+time constant). A beat onset is the upward crossing of an adaptive threshold, timed to a
+fraction of a sample by linear interpolation, and none count in the first 100 ms while the
+filters settle. The threshold sits above the noise floor by the larger of 3x the floor or 25%
+of the recent beat peak height, and never below 1e-4. The noise floor averages the envelope
+(0.3 s time constant while under the threshold, 5 s while over it); the beat peak averages
+each beat's envelope peak and fades with a 2 s time constant.
+
+### TICK-8
+After an onset, further crossings are ignored for 0.6 of the beat period once the rate is
+known, or 50 ms before then, so the unlock, impulse, and drop sounds within one beat count
+once.
+
+### TICK-9
+Each onset is reported with 2 ms of filtered signal before it and 30 ms after, for the scope.
+
+### TICK-10
+The beat rate is chosen from 12000, 14400, 18000, 19800, 21600, 25200, 28800, and 36000 bph.
+In `auto`, the detector scores each candidate against the last 24 onset intervals: the mean
+distance from each interval to its nearest whole number of periods, as a fraction of the
+period, plus 0.02 for each interval that spans missed beats. It locks the best candidate once
+one scores 0.08 or less (after at least 8 intervals). When a full window of 24 no longer fits
+the locked rate, the window is dropped and the choice is made again on at least 8 fresh
+intervals: the locked rate stays if it fits them, otherwise the best fitting candidate
+replaces it. Choosing a rate in the select locks it immediately.
+
+### TICK-11
+Each beat gets an index: the previous index plus the interval divided by the period, rounded.
+An onset that rounds to the same index as the previous one is dropped as noise. A gap of more
+than 3 seconds restarts indexing at 0 and drops the beats before it from the fit.
+
+## Readings
+
+### TICK-12
+Over the beats in the averaging window (4, 10, 30, or 60 seconds; default 10), the detector
+fits `t = a + b*n + h*s` by least squares, where `n` is the beat index and `s` is +1 for even
+and -1 for odd beats. With nominal period `P`:
+
+- rate (s/d) = `86400 * (P / b - 1)` + mic correction; positive is fast
+- beat error (ms) = `2 * |h| * 1000`
+
+A reading needs at least 6 beats spanning at least 1 second, and is produced on every beat
+after that. Beats that miss the fit by more than 0.5 ms and 5x the median miss (a beat caught
+on its drop sound, a stray click) are left out and the fit is run once more, unless fewer than
+6 beats would remain.
+
+### TICK-13
+Changing the beat rate, starting a source, or restarting the fit after a relock clears the
+beat history and the graphs.
+
+## Display
+
+### TICK-14
+The readout shows the current rate (s/d, signed, one decimal), beat error (ms, one decimal),
+beat rate (bph, marked `auto` when detected), beats counted, and status: `idle`,
+`listening`, or `locked`. After `stop` the last reading and the graphs stay up.
+
+### TICK-15
+The rate graph plots readings against time over the visible span (30 s, 1 min, 5 min; default
+1 min). The line grows from the left edge until it reaches the right, then scrolls with the
+newest reading at the right edge. Readings more than 2 s apart are not joined. Zero is a fixed horizontal line in the middle; fast is
+up and slow is down. The vertical range is symmetric, the smallest of 5, 10, 20, 30, 60, 120,
+300, or 600 s/d that holds every visible reading with a 15% margin. The latest reading is
+marked with a dot at the head of the line.
+
+### TICK-16
+Under the rate graph, sharing its time axis, the beat trace plots one dot per beat: x is the
+beat's time and y is how early it landed against its nominal time (`t0 + n*P - t`, in ms,
+where `t0` is the first indexed beat). The vertical range fits the visible dots with a 2 ms
+minimum. Even and odd beats use two colors,
+so a fast watch draws two rising lines, a slow one two falling lines, and the gap between them
+is the beat error.
+
+### TICK-17
+Beside the beat trace, the scope overlays the last 16 beat waveforms aligned at their onsets
+(-2 to +30 ms), newest brightest, colored by parity like the trace, and scaled to the largest
+peak shown.
+
+### TICK-18
+The beat rate select, averaging window, visible span, and mic correction persist in
+`localStorage` under `tick.settings`. Storage that throws or holds bad json falls back to the
+defaults.
+
+### TICK-19
+Below 640px wide the scope stacks under the beat trace. The graphs redraw at device pixel
+ratio on every animation frame while a source runs.
