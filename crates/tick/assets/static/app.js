@@ -1299,7 +1299,8 @@
 
     /** Choose the beat rate from the readout: auto, a rate, or hold auto's choice. */
     function openBph() {
-      const held = settings.bph === "auto" && locked && locked.auto ? locked.bph : null;
+      // only a running source's choice can be held: a stopped one's may be stale
+      const held = source && settings.bph === "auto" && locked && locked.auto ? locked.bph : null;
       el.bphNow.textContent =
         settings.bph !== "auto"
           ? `set to ${settings.bph} bph; it stays until you pick another or auto`

@@ -390,8 +390,9 @@ test("the target band shades the rate graph and marks the readout (TICK-30)", ()
   p.change("set-target", "cosc");
   assert.ok(texts(p.ctx("rate-canvas")).includes("+10"));
   settledSim(p);
-  // the simulated watch runs +6.0 s/d, at the edge of -4 to +6
-  const rate = Number(p.$("rate").textContent);
+  // the simulated watch runs about +6 s/d, at the edge of -4 to +6; the band uses the
+  // unrounded rate, not the one decimal shown
+  const rate = p.app.state().readings.at(-1).rate;
   assert.equal(p.$("rate").dataset.tolerance, rate <= 6 ? "in" : "out");
   p.change("set-target", "5");
   assert.equal(p.$("rate").dataset.tolerance, "out");
@@ -675,4 +676,9 @@ test("the beat rate opens a picker that sets it, holds auto's choice, and shows 
   assert.equal("doubt" in p.$("bph").dataset, false);
   assert.equal("doubt" in p.$("focus-bph").dataset, false);
   assert.equal(p.$("focus-note").textContent, p.$("meter-note").textContent);
+  // stopped, auto's last choice is not offered to hold
+  p.click("focus-run");
+  p.click("focus-bph");
+  assert.equal(p.$("bph-hold"), null);
+  assert.equal(p.$("bph-now").textContent, "auto: found from the gaps between beats");
 });
