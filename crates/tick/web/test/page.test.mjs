@@ -340,9 +340,12 @@ test("a fixed beat rate is locked from the start", () => {
   const p = boot({ storage: JSON.stringify({ bph: 28800 }) });
   p.click("sim");
   assert.equal(p.$("bph").textContent, "28800");
-  assert.equal(p.$("status").textContent, "measuring");
-  // nothing heard yet, even with the rate known
+  // nothing heard yet, even with the rate known: the status and graph agree
+  assert.equal(p.$("status").textContent, "listening");
   assert.ok(texts(p.ctx("rate-canvas")).includes("listening for beats..."));
+  p.advance(900);
+  p.flush();
+  assert.equal(p.$("status").textContent, "measuring");
 });
 
 test("progress before the first reading counts from the beats since the lock", () => {

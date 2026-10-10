@@ -146,7 +146,7 @@ beat history and the graphs.
 ### TICK-14
 The readout shows the current rate (s/d, signed, one decimal), beat error (ms, one decimal),
 beat rate (bph, marked `auto` when detected), beats counted, and status: `idle`,
-`listening` (no beat rate yet), `measuring` (beat rate known, averaging window still
+`listening` (no beats heard, or no beat rate yet), `measuring` (beat rate known, averaging window still
 filling, TICK-23), or `locked`. After `stop` the last reading and the graphs stay up.
 
 ### TICK-15

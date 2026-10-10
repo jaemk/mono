@@ -435,10 +435,13 @@
       return `measuring: ${Math.min(span, window).toFixed(1)} of ${window} s`;
     };
 
-    /** Status: idle, listening, measuring (locked, window filling), or locked. */
+    /**
+     * Status: idle, listening (no beats or no beat rate yet), measuring
+     * (window filling), or locked.
+     */
     function status() {
       if (!source) return "idle";
-      if (!locked) return "listening";
+      if (!locked || !heard) return "listening";
       return settled() ? "locked" : "measuring";
     }
 

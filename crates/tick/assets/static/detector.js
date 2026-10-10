@@ -372,11 +372,11 @@
       const to = p.at + postN;
       let top = 0;
       for (let i = from; i < to; i++) top = Math.max(top, envRing[i & mask]);
-      const level = noise + CFD_FRAC * (top - noise);
+      const cfd = noise + CFD_FRAC * (top - noise);
       for (let i = from + 1; i < to; i++) {
         const a = envRing[(i - 1) & mask];
         const b = envRing[i & mask];
-        if (a < level && b >= level) return i - 1 + (level - a) / (b - a);
+        if (a < cfd && b >= cfd) return i - 1 + (cfd - a) / (b - a);
       }
       return p.onset;
     }
