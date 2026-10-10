@@ -88,6 +88,11 @@ pub fn app(
     let mut router = Router::new()
         .nest("/spot", spot::service::router(state.clone()))
         .nest("/paste", paste::service::router(state.clone()))
+        .nest("/tick", tick::router())
+        .route(
+            "/tick/",
+            get(|| async { axum::response::Redirect::permanent("/tick") }),
+        )
         .merge(flip::router());
     if state.mapour_state.is_some() {
         router = router.nest("/mapour", mapour::service::router(state.clone()));
