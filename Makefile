@@ -19,7 +19,7 @@ test: test-rust test-js
 test-rust:
 	./bin/test-db.sh
 
-# komino client tests (jsdom) with CI's coverage thresholds
+# komino and tick client tests (jsdom) with CI's coverage thresholds
 test-js:
 	./bin/test-js.sh
 

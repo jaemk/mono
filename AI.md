@@ -4,7 +4,7 @@
 - `cd` is aliased in this shell — always use `builtin cd` instead
 
 ## Project
-- Rust workspace with six crates: `crates/common`, `crates/spot`, `crates/mono`, `crates/paste`, `crates/mapour`, `crates/komino`
+- Rust workspace with seven crates: `crates/common`, `crates/spot`, `crates/mono`, `crates/paste`, `crates/mapour`, `crates/komino`, `crates/tick`
 - Feature specs live in `spec/`; see `spec/README.md` for status
 - Main binary is `mono` in `crates/mono`
 
@@ -30,14 +30,14 @@ make test
 ```
 `make test` needs no setup beyond docker and cargo: `bin/test-db.sh` uses a postgres
 reachable without a password (as in CI) or starts a throwaway `postgres:16` container, and
-`bin/test-js.sh` runs the komino client tests (`crates/komino/web`) with node from PATH or
-nvm, or in a `node:24` container. `make test-rust` and `make test-js` run either half.
+`bin/test-js.sh` runs the komino and tick client tests (`crates/{komino,tick}/web`) with node
+from PATH or nvm, or in a `node:24` container. `make test-rust` and `make test-js` run either half.
 
 ## CI
 `.github/workflows/ci.yml` runs on every PR and push to main: fmt and clippy, `cargo audit
 --deny warnings` (ignores in `.cargo/audit.toml`), the full `bin/test-db.sh` suite against
-postgres plus a RustFS S3 store (so S3-backed tests run), the komino client tests with
-coverage thresholds, and a Docker image build. Deploys are still manual.
+postgres plus a RustFS S3 store (so S3-backed tests run), the komino and tick client tests
+with coverage thresholds, and a Docker image build. Deploys are still manual.
 
 After a deploy, `make acceptance` (or the manual `acceptance` workflow) runs
 `acceptance/live.test.mjs` against the live site: every mounted app, a paste round trip,

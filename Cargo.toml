@@ -6,6 +6,7 @@ members = [
     "crates/paste",
     "crates/mapour",
     "crates/komino",
+    "crates/tick",
 ]
 resolver = "2"
 
@@ -59,3 +60,4 @@ spot = { path = "crates/spot" }
 paste = { path = "crates/paste" }
 mapour = { path = "crates/mapour" }
 komino = { path = "crates/komino" }
+tick = { path = "crates/tick" }

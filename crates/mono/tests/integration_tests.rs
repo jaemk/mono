@@ -421,6 +421,22 @@ async fn test_komino_app_serves() {
     assert_eq!(response.header("location"), "/komino");
 }
 
+#[tokio::test]
+async fn test_tick_app_serves() {
+    let server = get_server().await;
+    let response = server.get("/tick").await;
+    response.assert_status_ok();
+    assert!(response.text().contains("<title>tick</title>"));
+
+    let response = server.get("/tick/").await;
+    response.assert_status(StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(response.header("location"), "/tick");
+
+    let response = server.get("/tick/static/detector.js").await;
+    response.assert_status_ok();
+    assert!(response.text().contains("createDetector"));
+}
+
 /// With mapour disabled (state None) the router is not mounted and the rest
 /// of the app still works.
 #[tokio::test]
