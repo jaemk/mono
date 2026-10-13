@@ -67,6 +67,48 @@ main { max-width: 980px; margin: 0 auto; padding: 12px 16px 120px; }
 .brand { font-weight: 700; color: var(--ink); text-decoration: none; letter-spacing: .04em; }
 .name { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
 .name input { width: 150px; }
+.bar { flex-wrap: wrap; }
+@media (max-width: 480px) { .name input { width: 120px; } }
+
+/* accounts (ACCT-13) */
+.account { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.account-user { color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-form { display: flex; flex-direction: column; gap: 12px; width: min(400px, 100%); }
+.account-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.account-form .hint { font-size: 12px; }
+.account-about { margin: 0; font-size: 13px; color: var(--muted); }
+.account-about:empty, .account-error:empty { display: none; }
+.account-error { margin: 0; color: var(--accent); font-weight: 600; }
+a.account-user { text-decoration: underline; }
+button.danger { color: var(--accent); border-color: var(--accent); }
+#account-page .account-form { margin-top: 20px; }
+#account-page .account-form h2 { margin: 0; }
+#account-page .account-form p:not(.account-error) { margin: 0; font-size: 13px; color: var(--muted); }
+/* lifetime stats (STAT-11) */
+.acct-stats h2 { margin: 20px 0 8px; }
+.acct-stats h3 { margin: 16px 0 6px; font-size: 14px; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin: 0; }
+.stat-grid div { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.stat-grid dt { font-size: 12px; color: var(--muted); }
+.stat-grid dd { margin: 2px 0 0; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.partners { margin: 0; padding-left: 22px; }
+.partners .games { color: var(--muted); font-size: 13px; }
+.acct-rooms h2 { margin: 20px 0 8px; }
+.acct-room-list { margin: 0; padding-left: 22px; }
+.acct-room-list a { font-family: ui-monospace, monospace; font-weight: 600; }
+.acct-room-list .about { color: var(--muted); font-size: 13px; }
+.recovery-code { display: block; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+  font-size: 18px; text-align: center; overflow-wrap: anywhere; user-select: all; }
+button.link { background: none; border: 0; padding: 4px; color: var(--muted); text-decoration: underline; }
+
+/* the cookie notice (ACCT-14) */
+.cookies {
+  position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 9; margin: 0 auto; max-width: 640px;
+  display: flex; gap: 12px; align-items: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.25); font-size: 13px;
+}
+.cookies p { margin: 0; flex: 1; }
 .panel {
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   padding: 14px 16px; margin: 12px 0;

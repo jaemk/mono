@@ -489,6 +489,9 @@ async fn test_a_faster_reaction_beats_an_earlier_arrival() {
         g.discard_seq = 3;
         g.matchable = true;
         g.discard_at = Some(komino::models::now_ms() - 10_000);
+        // the window the first claim joins: long enough that the socket's
+        // claim always lands in it, however slow the machine
+        g.claim_deadline = Some(komino::models::now_ms() + 2_000);
         g.seats[0].slots = vec![Some(5), Some(1), Some(1), Some(1)];
         g.seats[1].slots = vec![Some(5), Some(2), Some(2), Some(2)];
     })
@@ -503,7 +506,7 @@ async fn test_a_faster_reaction_beats_an_earlier_arrival() {
 
     let m = |seat: usize| json!({ "type": "match", "seq": 3, "seat": seat, "slot": 0 });
     let socket_match = async {
-        // the http match claims first and opens the window
+        // the http match claims first
         for _ in 0..100 {
             if !game_state(&state, &code).await.claims.is_empty() {
                 break;
@@ -930,7 +933,7 @@ async fn test_tick_fires_scoring_after_the_delay() {
 async fn test_pages_and_static_assets_are_served() {
     let state = get_state().await;
     let server = client(&state);
-    for path in ["/r/ABCDEF", "/r/ABCDEF/watch"] {
+    for path in ["/r/ABCDEF", "/r/ABCDEF/watch", "/account"] {
         let resp = server.get(path).await;
         resp.assert_status_ok();
         assert!(resp.text().contains("/komino/static/app.js"));
@@ -2216,4 +2219,1220 @@ async fn test_reveal_requests_are_validated() {
         &sealed
     )
     .is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Accounts
+// ---------------------------------------------------------------------------
+
+async fn signup(server: &TestServer, username: &str, password: &str) -> axum_test::TestResponse {
+    server
+        .post("/api/signup")
+        .json(&json!({ "username": username, "password": password }))
+        .await
+}
+
+async fn login(server: &TestServer, username: &str, password: &str) -> axum_test::TestResponse {
+    server
+        .post("/api/login")
+        .json(&json!({ "username": username, "password": password }))
+        .await
+}
+
+/// A member's name as `viewer` sees the room.
+async fn member_name(viewer: &TestServer, code: &str, id: &str) -> String {
+    let view: Value = viewer.get(&format!("/api/rooms/{code}")).await.json();
+    view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == id)
+        .unwrap()["name"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// A browser with no cookies but the one given.
+fn bare(state: &State) -> TestServer {
+    TestServer::new(service::router(state.clone()).with_state(state.clone()))
+}
+
+#[tokio::test]
+async fn test_signup_keeps_the_player_and_its_rooms() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    let id = me(&host).await;
+    let resp = signup(&host, "  Ada_L ", "correct horse").await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    assert_eq!(body["id"], id.as_str());
+    assert_eq!(body["username"], "ada_l");
+    // the username is the default name
+    assert_eq!(body["name"], "ada_l");
+    let session = resp.cookie("komino_session");
+    assert_eq!(session.value().len(), 64);
+    assert_eq!(session.http_only(), Some(true));
+    assert_eq!(session.secure(), Some(true));
+    assert_eq!(session.path(), Some("/komino"));
+    // the anonymous cookie is dropped
+    assert_eq!(resp.cookie("komino_player").value(), "");
+    // still the same player, in the same room, renamed for everyone
+    assert_eq!(me(&host).await, id);
+    host.get(&format!("/api/rooms/{code}"))
+        .await
+        .assert_status_ok();
+    assert_eq!(member_name(&guest, &code, &id).await, "ada_l");
+    // only a hash of the token is stored
+    let stored: String = sqlx::query_scalar("SELECT token_hash FROM sessions")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_ne!(stored, session.value());
+    assert_eq!(stored, komino::accounts::token_hash(session.value()));
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM players WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert!(hash.starts_with("pbkdf2-sha512$"));
+    assert!(!hash.contains("correct horse"));
+}
+
+#[tokio::test]
+async fn test_signup_validates() {
+    let state = get_state().await;
+    let server = client(&state);
+    let resp = server
+        .post("/api/signup")
+        .json(&json!({ "username": "grace", "password": "hunter22", "name": "  Grace H " }))
+        .await;
+    resp.assert_status_ok();
+    assert_eq!(resp.json::<Value>()["name"], "Grace H");
+    // signed in, there is no second account
+    signup(&server, "grace2", "hunter22")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    let other = client(&state);
+    for (u, p) in [
+        ("gr", "hunter22"),
+        ("grace hopper", "hunter22"),
+        ("gracie", "short"),
+        ("gracie", &"x".repeat(257)),
+    ] {
+        let resp = signup(&other, u, p).await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(resp.json::<Value>()["code"], "invalid");
+    }
+    other
+        .post("/api/signup")
+        .json(&json!({ "username": "gracie", "password": "hunter22", "name": "a\u{7}b" }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    // usernames are case-insensitive
+    let resp = signup(&other, "GRACE", "hunter22").await;
+    resp.assert_status(StatusCode::CONFLICT);
+    assert_eq!(resp.json::<Value>()["code"], "taken");
+    // nothing failed changed the player
+    let body: Value = other.get("/api/me").await.json();
+    assert_eq!(body["username"], Value::Null);
+}
+
+#[tokio::test]
+async fn test_the_player_cookie_cannot_reach_an_account() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    let id = me(&host).await;
+    // the signed player cookie, as it was before signup
+    let signed = komino::handlers::sign_player(&id, &state.config.signing_key);
+    signup(&host, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let resp = bare(&state)
+        .get("/api/me")
+        .add_cookie(axum_extra::extract::cookie::Cookie::new(
+            "komino_player",
+            signed.clone(),
+        ))
+        .await;
+    assert_ne!(resp.json::<Value>()["id"], id.as_str());
+    // nor can it open the account's sockets
+    let sock = ws_client(&state);
+    sock.get_websocket(&format!("/r/{code}/ws"))
+        .add_cookie(axum_extra::extract::cookie::Cookie::new(
+            "komino_player",
+            signed,
+        ))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    // the session can
+    let sock = ws_client(&state);
+    login(&sock, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let mut socket = sock
+        .get_websocket(&format!("/r/{code}/ws"))
+        .await
+        .into_websocket()
+        .await;
+    let msg = next(&mut socket).await;
+    assert_eq!(msg["type"], "view");
+    assert_eq!(msg["view"]["me"], id.as_str());
+}
+
+#[tokio::test]
+async fn test_login_reaches_the_account_from_another_browser() {
+    let state = get_state().await;
+    let (host, _guest, code) = room_of_two(&state).await;
+    let id = me(&host).await;
+    signup(&host, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let laptop = client(&state);
+    let anon = me(&laptop).await;
+    assert_ne!(anon, id);
+    let resp = login(&laptop, " ADA ", "correct horse").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.json::<Value>()["id"], id.as_str());
+    assert_eq!(me(&laptop).await, id);
+    laptop
+        .get(&format!("/api/rooms/{code}"))
+        .await
+        .assert_status_ok();
+    // signing out returns this browser to its own anonymous player
+    laptop.post("/api/logout").await.assert_status_ok();
+    assert_eq!(me(&laptop).await, anon);
+    // the first browser is still signed in
+    assert_eq!(me(&host).await, id);
+}
+
+#[tokio::test]
+async fn test_wrong_logins_fail_alike_and_lock_the_account() {
+    let state = get_state().await;
+    let owner = client(&state);
+    signup(&owner, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let owner_id = me(&owner).await;
+    let other = client(&state);
+    for (u, p) in [("ada", "wrong horse"), ("nobody", "correct horse")] {
+        let resp = login(&other, u, p).await;
+        resp.assert_status(StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.json::<Value>()["message"],
+            "wrong username or password"
+        );
+        assert!(resp.maybe_cookie("komino_session").is_none());
+    }
+    // a success resets the count
+    login(&other, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let other = client(&state);
+    for _ in 0..komino::accounts::MAX_FAILED_LOGINS {
+        login(&other, "ada", "wrong horse")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    // locked, even with the right password
+    let resp = login(&other, "ada", "correct horse").await;
+    resp.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.json::<Value>()["code"], "locked");
+    // until the lock runs out
+    sqlx::query("UPDATE players SET locked_until = now() - interval '1 second'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    login(&other, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    // sessions already open were untouched by the lock
+    assert_eq!(me(&owner).await, owner_id);
+}
+
+#[tokio::test]
+async fn test_logout_ends_the_session_for_good() {
+    let state = get_state().await;
+    let server = client(&state);
+    let resp = signup(&server, "ada", "correct horse").await;
+    let token = resp.cookie("komino_session").value().to_string();
+    let id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
+    let replay = || {
+        bare(&state)
+            .get("/api/me")
+            .add_cookie(axum_extra::extract::cookie::Cookie::new(
+                "komino_session",
+                token.clone(),
+            ))
+    };
+    assert_eq!(replay().await.json::<Value>()["id"], id.as_str());
+    let resp = server.post("/api/logout").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.cookie("komino_session").value(), "");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    // a copy of the old token reaches nobody, and is told to drop it
+    let resp = replay().await;
+    assert_ne!(resp.json::<Value>()["id"], id.as_str());
+    assert_eq!(resp.cookie("komino_session").value(), "");
+    // signing out without a session is fine
+    bare(&state).post("/api/logout").await.assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_sessions_expire_and_extend() {
+    let state = get_state().await;
+    let server = client(&state);
+    signup(&server, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let id = me(&server).await;
+    // a fresh session is not sent again
+    assert!(server
+        .get("/api/me")
+        .await
+        .maybe_cookie("komino_session")
+        .is_none());
+    // a day old, it is extended and its cookie sent again
+    sqlx::query("UPDATE sessions SET expires = now() + interval '28 days'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let resp = server.get("/api/me").await;
+    assert_eq!(resp.json::<Value>()["id"], id.as_str());
+    assert!(resp.maybe_cookie("komino_session").is_some());
+    let left: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM expires - now())::float8 / 86400 FROM sessions",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert!(left > 29.9, "{left}");
+    // an expired session reaches nobody and is swept
+    sqlx::query("UPDATE sessions SET expires = now() - interval '1 second'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_ne!(me(&server).await, id);
+    komino::models::delete_stale_rooms(&state.db).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn test_an_account_default_name_falls_back_to_its_username() {
+    let state = get_state().await;
+    let server = client(&state);
+    signup(&server, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let resp = server
+        .post("/api/me")
+        .json(&json!({ "name": "Ada L" }))
+        .await;
+    assert_eq!(resp.json::<Value>()["name"], "Ada L");
+    let resp = server.post("/api/me").json(&json!({ "name": "  " })).await;
+    resp.assert_status_ok();
+    assert_eq!(resp.json::<Value>()["name"], "ada");
+    assert_eq!(resp.json::<Value>()["username"], "ada");
+}
+
+#[tokio::test]
+async fn test_a_room_name_overrides_the_default_in_that_room_only() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    let other = create_room(&host).await;
+    let id = me(&host).await;
+    host.post("/api/me")
+        .json(&json!({ "name": "ada" }))
+        .await
+        .assert_status_ok();
+    let resp = host
+        .post(&format!("/api/rooms/{code}/name"))
+        .json(&json!({ "name": "  the countess " }))
+        .await;
+    resp.assert_status_ok();
+    assert!(resp.json::<Value>()["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == id.as_str() && m["name"] == "the countess"));
+    assert_eq!(member_name(&guest, &code, &id).await, "the countess");
+    assert_eq!(member_name(&host, &other, &id).await, "ada");
+    // a new default leaves the room name alone
+    host.post("/api/me")
+        .json(&json!({ "name": "lovelace" }))
+        .await
+        .assert_status_ok();
+    assert_eq!(member_name(&guest, &code, &id).await, "the countess");
+    assert_eq!(member_name(&host, &other, &id).await, "lovelace");
+    // a blank room name shows the default again
+    host.post(&format!("/api/rooms/{code}/name"))
+        .json(&json!({ "name": "" }))
+        .await
+        .assert_status_ok();
+    assert_eq!(member_name(&guest, &code, &id).await, "lovelace");
+    // validated like any name, and only for members
+    host.post(&format!("/api/rooms/{code}/name"))
+        .json(&json!({ "name": "x".repeat(25) }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    let stranger = client(&state);
+    stranger
+        .post(&format!("/api/rooms/{code}/name"))
+        .json(&json!({ "name": "spy" }))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    host.post(&format!("/api/rooms/{code}/leave"))
+        .await
+        .assert_status_ok();
+    host.post(&format!("/api/rooms/{code}/name"))
+        .json(&json!({ "name": "back" }))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_stats_show_the_room_name() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    let id = me(&host).await;
+    host.post(&format!("/api/rooms/{code}/name"))
+        .json(&json!({ "name": "the countess" }))
+        .await
+        .assert_status_ok();
+    sqlx::query(
+        "INSERT INTO room_stats (room_id, player_id, wins)
+         SELECT r.id, $2, 1 FROM rooms r WHERE r.code = $1",
+    )
+    .bind(&code)
+    .bind(&id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["stats"][0]["player"], id.as_str());
+    assert_eq!(view["stats"][0]["name"], "the countess");
+}
+
+async fn change_password(server: &TestServer, current: &str, new: &str) -> axum_test::TestResponse {
+    server
+        .post("/api/account/password")
+        .json(&json!({ "current": current, "new": new }))
+        .await
+}
+
+async fn session_count(state: &State) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_changing_the_password_ends_every_other_session() {
+    let state = get_state().await;
+    let server = client(&state);
+    let resp = signup(&server, "ada", "correct horse").await;
+    let old = resp.cookie("komino_session").value().to_string();
+    let id = me(&server).await;
+    let laptop = client(&state);
+    login(&laptop, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    // only an account has a password to change
+    let resp = change_password(&client(&state), "correct horse", "battery staple").await;
+    resp.assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.json::<Value>()["message"], "sign in first");
+    let resp = change_password(&server, "wrong horse", "battery staple").await;
+    resp.assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.json::<Value>()["message"], "wrong password");
+    change_password(&server, "correct horse", "short")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    // nothing failed ended a session
+    assert_eq!(me(&laptop).await, id);
+
+    let resp = change_password(&server, "correct horse", "battery staple").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.json::<Value>()["id"], id.as_str());
+    let new = resp.cookie("komino_session").value().to_string();
+    assert_eq!(new.len(), 64);
+    assert_ne!(new, old);
+    // this browser stays signed in on its new session; the other is out
+    assert_eq!(me(&server).await, id);
+    assert_ne!(me(&laptop).await, id);
+    assert_eq!(session_count(&state).await, 1);
+    let replay = bare(&state)
+        .get("/api/me")
+        .add_cookie(axum_extra::extract::cookie::Cookie::new(
+            "komino_session",
+            old,
+        ))
+        .await;
+    assert_ne!(replay.json::<Value>()["id"], id.as_str());
+    login(&laptop, "ada", "correct horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    login(&laptop, "ada", "battery staple")
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_wrong_current_passwords_count_toward_the_lock() {
+    let state = get_state().await;
+    let server = client(&state);
+    signup(&server, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    for _ in 0..komino::accounts::MAX_FAILED_LOGINS {
+        change_password(&server, "wrong horse", "battery staple")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    let resp = change_password(&server, "correct horse", "battery staple").await;
+    resp.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.json::<Value>()["code"], "locked");
+    server
+        .post("/api/account/delete")
+        .json(&json!({ "password": "correct horse" }))
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    // the session itself still works
+    let body: Value = server.get("/api/me").await.json();
+    assert_eq!(body["username"], "ada");
+}
+
+async fn host_of(state: &State, code: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT host_player_id FROM rooms WHERE code = $1")
+        .bind(code)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_deleting_an_account_leaves_every_room_and_frees_the_username() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    signup(&host, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let id = me(&host).await;
+    let guest_id = me(&guest).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    // a room only the account was ever in
+    let alone = create_room(&host).await;
+    // a room everyone else has left
+    let emptied = create_room(&host).await;
+    let visitor = client(&state);
+    visitor
+        .post(&format!("/api/rooms/{emptied}/join"))
+        .await
+        .assert_status_ok();
+    visitor
+        .post(&format!("/api/rooms/{emptied}/leave"))
+        .await
+        .assert_status_ok();
+    let visitor_id = me(&visitor).await;
+
+    // only an account can be deleted, and only with its password
+    client(&state)
+        .post("/api/account/delete")
+        .json(&json!({ "password": "correct horse" }))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    let resp = host
+        .post("/api/account/delete")
+        .json(&json!({ "password": "wrong horse" }))
+        .await;
+    resp.assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.json::<Value>()["message"], "wrong password");
+    assert_eq!(me(&host).await, id);
+
+    let resp = host
+        .post("/api/account/delete")
+        .json(&json!({ "password": "correct horse" }))
+        .await;
+    resp.assert_status_ok();
+    assert_eq!(resp.cookie("komino_session").value(), "");
+    assert_eq!(session_count(&state).await, 0);
+    // this browser is a stranger now
+    assert_ne!(me(&host).await, id);
+    // the running game was forfeited and the host role passed on
+    let view: Value = guest.get(&format!("/api/rooms/{code}")).await.json();
+    assert_eq!(view["room"]["host"], guest_id.as_str());
+    assert_eq!(view["game"]["status"], "scored");
+    assert!(!view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == id.as_str()));
+    assert!(!view["stats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["player"] == id.as_str()));
+    // a room with no one else is gone, and one whose members all left goes
+    // to one of them until the next join
+    assert_eq!(host_of(&state, &alone).await, None);
+    assert_eq!(host_of(&state, &emptied).await, Some(visitor_id));
+    let players: i64 = sqlx::query_scalar("SELECT count(*) FROM players WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(players, 0);
+    // the username is free again
+    login(&client(&state), "ada", "correct horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    signup(&client(&state), "ada", "battery staple")
+        .await
+        .assert_status_ok();
+}
+
+// ---------------------------------------------------------------------------
+// Lifetime stats
+// ---------------------------------------------------------------------------
+
+async fn lifetime(server: &TestServer) -> Value {
+    let resp = server.get("/api/account/stats").await;
+    resp.assert_status_ok();
+    resp.json()
+}
+
+/// Partner names and game counts, as listed.
+fn partners(stats: &Value) -> Vec<(String, i64)> {
+    stats["partners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_string(),
+                p["games"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_lifetime_stats_add_up_across_rooms_and_outlive_them() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    signup(&host, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    guest
+        .post("/api/me")
+        .json(&json!({ "name": "bob" }))
+        .await
+        .assert_status_ok();
+    let fresh = lifetime(&host).await;
+    assert_eq!(fresh["games_played"], 0);
+    assert_eq!(
+        fresh["match_time"],
+        json!({ "timed": 0, "average_ms": null, "median_ms": null })
+    );
+    assert_eq!(fresh["partners"], json!([]));
+
+    // ada matches bob's 5, which landed 2s ago, then draws and swaps
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    set_game(&state, &code, |g| {
+        g.status = Status::Playing;
+        g.stage = Stage::Start;
+        g.ready_deadline = None;
+        g.turn = 0;
+        g.discard = vec![5];
+        g.discard_seq = 3;
+        g.matchable = true;
+        g.discard_at = Some(komino::models::now_ms() - 2_000);
+        g.seats[0].slots = vec![Some(1), Some(2), Some(3), Some(4)];
+        g.seats[1].slots = vec![Some(5), Some(6), Some(7), Some(8)];
+    })
+    .await;
+    act(
+        &host,
+        &code,
+        json!({ "type": "match", "seq": 3, "seat": 1, "slot": 0, "give_slot": 1 }),
+    )
+    .await
+    .assert_status_ok();
+    let seq = game_state(&state, &code).await.turn_seq;
+    act(&host, &code, json!({ "type": "draw", "turn_seq": seq }))
+        .await
+        .assert_status_ok();
+    let seq = game_state(&state, &code).await.turn_seq;
+    act(
+        &host,
+        &code,
+        json!({ "type": "swap", "slot": 0, "turn_seq": seq }),
+    )
+    .await
+    .assert_status_ok();
+    score_with(&state, &code, vec![[1; 4], [9; 4]]).await;
+    // the room keeps the new counters too
+    let view: Value = host.get(&format!("/api/rooms/{code}")).await.json();
+    let host_id = me(&host).await;
+    let row = view["stats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["player"] == host_id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(row["draws"], 1);
+    assert_eq!(row["swaps"], 1);
+    assert_eq!(row["others_matched"], 1);
+
+    // a second room, with a third player and a bot
+    let other = create_room(&host).await;
+    let carol = client(&state);
+    carol
+        .post("/api/me")
+        .json(&json!({ "name": "carol" }))
+        .await
+        .assert_status_ok();
+    for c in [&guest, &carol] {
+        c.post(&format!("/api/rooms/{other}/join"))
+            .await
+            .assert_status_ok();
+    }
+    host.post(&format!("/api/rooms/{other}/bots"))
+        .await
+        .assert_status_ok();
+    act(&host, &other, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    score_with(&state, &other, vec![[1; 4], [9; 4], [9; 4], [9; 4]]).await;
+
+    // the first room goes; the totals stay
+    sqlx::query("DELETE FROM rooms WHERE code = $1")
+        .bind(&code)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let ada = lifetime(&host).await;
+    assert_eq!(ada["games_played"], 2);
+    assert_eq!(ada["wins"], 2);
+    assert_eq!(ada["draws"], 1);
+    assert_eq!(ada["swaps"], 1);
+    assert_eq!(ada["matches"], 1);
+    assert_eq!(ada["others_matched"], 1);
+    assert_eq!(ada["bot_games"], 1);
+    assert_eq!(ada["match_time"]["timed"], 1);
+    let average = ada["match_time"]["average_ms"].as_i64().unwrap();
+    assert!((2_000..4_000).contains(&average), "{average}");
+    // one sample: the median is the middle of its band
+    assert_eq!(
+        ada["match_time"]["median_ms"].as_i64().unwrap(),
+        average / 50 * 50 + 25
+    );
+    // most played with first; no bots
+    assert_eq!(
+        partners(&ada),
+        vec![("bob".to_string(), 2), ("carol".to_string(), 1)]
+    );
+    let bob = lifetime(&guest).await;
+    assert_eq!(bob["games_played"], 2);
+    assert_eq!(bob["wins"], 0);
+    assert_eq!(bob["partners"][0]["username"], "ada");
+    assert_eq!(bob["partners"][0]["games"], 2);
+    let bot_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM player_stats s JOIN players p ON p.id = s.player_id
+                 WHERE p.bot)
+              + (SELECT count(*) FROM player_partners pp JOIN players p
+                     ON p.id IN (pp.player_id, pp.other_id) WHERE p.bot)",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(bot_rows, 0);
+
+    // a deleted account leaves the others' partner lists
+    host.post("/api/account/delete")
+        .json(&json!({ "password": "correct horse" }))
+        .await
+        .assert_status_ok();
+    assert_eq!(
+        partners(&lifetime(&guest).await),
+        vec![("carol".to_string(), 1)]
+    );
+    let left: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM player_stats WHERE player_id = $1)
+              + (SELECT count(*) FROM player_match_times WHERE player_id = $1)",
+    )
+    .bind(&host_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+}
+
+/// The lifetime totals migration, run on rooms seeded here.
+const BACKFILL_SQL: &str = include_str!(
+    "../../../migrations/komino/migrations/20261012000001_player_stats_backfill/up.sql"
+);
+
+#[tokio::test]
+async fn test_the_backfill_sums_each_players_room_counters() {
+    let state = get_state().await;
+    sqlx::raw_sql(
+        "INSERT INTO players (id, name, bot) VALUES
+             ('ann', 'ann', false), ('ben', 'ben', false), ('cat', 'cat', false),
+             ('bot', 'bot', true);
+         INSERT INTO rooms (id, code, host_player_id) VALUES (1, 'aaaaaa', 'ann'),
+             (2, 'bbbbbb', 'ann');
+         INSERT INTO room_stats (room_id, player_id, games_played, wins, komino_calls,
+                                 komino_wins, matches, failed_matches, special_moves,
+                                 cards_interacted, forfeits) VALUES
+             (1, 'ann', 3, 2, 1, 1, 4, 1, 2, 9, 0),
+             (2, 'ann', 2, 1, 1, 0, 1, 2, 3, 5, 1),
+             (1, 'ben', 3, 1, 0, 0, 2, 0, 1, 6, 1),
+             (1, 'bot', 3, 0, 0, 0, 5, 5, 5, 5, 0),
+             (1, 'cat', 1, 1, 1, 1, 1, 1, 1, 1, 1);
+         -- cat already has lifetime totals, which the backfill keeps
+         INSERT INTO player_stats (player_id, games_played, draws) VALUES ('cat', 7, 4);",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::raw_sql(BACKFILL_SQL)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let rows: Vec<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM player_stats s ORDER BY player_id")
+            .fetch_all(&state.db)
+            .await
+            .unwrap();
+    let pick = |r: &Value| {
+        let cols = [
+            "games_played",
+            "wins",
+            "komino_calls",
+            "komino_wins",
+            "matches",
+            "failed_matches",
+            "special_moves",
+            "cards_interacted",
+            "forfeits",
+            "draws",
+            "match_ms",
+        ];
+        (
+            r["player_id"].as_str().unwrap().to_string(),
+            cols.map(|c| r[c].as_i64().unwrap()),
+        )
+    };
+    assert_eq!(
+        rows.iter().map(pick).collect::<Vec<_>>(),
+        vec![
+            ("ann".to_string(), [5, 3, 2, 1, 5, 3, 5, 14, 1, 0, 0]),
+            ("ben".to_string(), [3, 1, 0, 0, 2, 0, 1, 6, 1, 0, 0]),
+            ("cat".to_string(), [7, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0]),
+        ]
+    );
+}
+
+async fn account_info(server: &TestServer) -> Value {
+    let resp = server.get("/api/account").await;
+    resp.assert_status_ok();
+    resp.json()
+}
+
+async fn recover(
+    server: &TestServer,
+    username: &str,
+    code: &str,
+    password: &str,
+) -> axum_test::TestResponse {
+    server
+        .post("/api/account/recover")
+        .json(&json!({ "username": username, "code": code, "password": password }))
+        .await
+}
+
+#[tokio::test]
+async fn test_a_recovery_code_sets_a_new_password_once() {
+    let state = get_state().await;
+    let server = client(&state);
+    let resp = signup(&server, "ada", "correct horse").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.header("cache-control"), "no-store");
+    let code = resp.json::<Value>()["recovery_code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(code.len(), komino::accounts::RECOVERY_CHARS + 4);
+    let id = me(&server).await;
+    assert_eq!(account_info(&server).await["recovery"], true);
+    // only its hash is stored
+    let stored: String = sqlx::query_scalar("SELECT recovery_hash FROM players WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(stored, komino::accounts::recovery_hash(&code));
+    // the account gets locked out by someone else
+    for _ in 0..komino::accounts::MAX_FAILED_LOGINS {
+        login(&client(&state), "ada", "wrong horse")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    let phone = client(&state);
+    for (user, c) in [
+        ("ada", "00000-00000-00000-00000-00000"),
+        ("nobody", code.as_str()),
+    ] {
+        let resp = recover(&phone, user, c, "battery staple").await;
+        resp.assert_status(StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.json::<Value>()["message"],
+            "wrong username or recovery code"
+        );
+    }
+    recover(&phone, "ada", &code, "short")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    // typed back loosely, it still works, and lifts the lock
+    let typed = code.to_uppercase().replace('-', " ");
+    let resp = recover(&phone, " ADA ", &typed, "battery staple").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.header("cache-control"), "no-store");
+    let body: Value = resp.json();
+    assert_eq!(body["id"], id.as_str());
+    let next = body["recovery_code"].as_str().unwrap().to_string();
+    assert_ne!(next, code);
+    assert_eq!(me(&phone).await, id);
+    // every other session ended
+    assert_ne!(me(&server).await, id);
+    assert_eq!(session_count(&state).await, 1);
+    login(&client(&state), "ada", "correct horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    login(&client(&state), "ada", "battery staple")
+        .await
+        .assert_status_ok();
+    // a used code is spent; the new one works
+    recover(&client(&state), "ada", &code, "another one")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    recover(&client(&state), "ada", &next, "another one")
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_a_new_recovery_code_replaces_the_old() {
+    let state = get_state().await;
+    let server = client(&state);
+    let resp = signup(&server, "ada", "correct horse").await;
+    let old = resp.json::<Value>()["recovery_code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let anon = client(&state);
+    assert_eq!(account_info(&anon).await["recovery"], false);
+    let ask = |s: &TestServer, pw: &str| {
+        s.post("/api/account/recovery")
+            .json(&json!({ "password": pw }))
+    };
+    ask(&anon, "correct horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    let resp = ask(&server, "wrong horse").await;
+    resp.assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.json::<Value>()["message"], "wrong password");
+    let resp = ask(&server, "correct horse").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.header("cache-control"), "no-store");
+    let new = resp.json::<Value>()["recovery_code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(new, old);
+    // asking for one signs nobody out
+    assert_eq!(account_info(&server).await["username"], "ada");
+    assert_eq!(session_count(&state).await, 1);
+    recover(&client(&state), "ada", &old, "battery staple")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    recover(&client(&state), "ada", &new, "battery staple")
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_signing_out_other_devices_keeps_this_one() {
+    let state = get_state().await;
+    let server = client(&state);
+    signup(&server, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let id = me(&server).await;
+    let laptop = client(&state);
+    let phone = client(&state);
+    for c in [&laptop, &phone] {
+        login(c, "ada", "correct horse").await.assert_status_ok();
+    }
+    assert_eq!(account_info(&server).await["sessions"], 3);
+    client(&state)
+        .post("/api/account/sign-out-others")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    let resp = server.post("/api/account/sign-out-others").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.json::<Value>()["ended"], 2);
+    assert_eq!(me(&server).await, id);
+    assert_ne!(me(&laptop).await, id);
+    assert_ne!(me(&phone).await, id);
+    assert_eq!(account_info(&server).await["sessions"], 1);
+}
+
+#[tokio::test]
+async fn test_changing_the_username() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    signup(&host, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let id = me(&host).await;
+    let other = client(&state);
+    let resp = other
+        .post("/api/signup")
+        .json(&json!({ "username": "grace", "password": "hunter22", "name": "Grace H" }))
+        .await;
+    resp.assert_status_ok();
+    let rename = |s: &TestServer, username: &str, pw: &str| {
+        s.post("/api/account/username")
+            .json(&json!({ "username": username, "password": pw }))
+    };
+    rename(&client(&state), "ada2", "correct horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    rename(&host, "ada2", "wrong horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    rename(&host, "a!", "correct horse")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    let resp = rename(&host, "Grace", "correct horse").await;
+    resp.assert_status(StatusCode::CONFLICT);
+    assert_eq!(resp.json::<Value>()["code"], "taken");
+    // the same name is no change
+    rename(&host, "ADA", "correct horse")
+        .await
+        .assert_status_ok();
+
+    // a default name that was the username follows it, into the room too
+    let resp = rename(&host, " Countess ", "correct horse").await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    assert_eq!(body["id"], id.as_str());
+    assert_eq!(body["username"], "countess");
+    assert_eq!(body["name"], "countess");
+    assert_eq!(member_name(&guest, &code, &id).await, "countess");
+    login(&client(&state), "ada", "correct horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    login(&client(&state), "countess", "correct horse")
+        .await
+        .assert_status_ok();
+    // the old one is free again
+    signup(&client(&state), "ada", "battery staple")
+        .await
+        .assert_status_ok();
+    // a chosen default name stays
+    let resp = rename(&other, "grace_h", "hunter22").await;
+    resp.assert_status_ok();
+    assert_eq!(resp.json::<Value>()["name"], "Grace H");
+}
+
+#[tokio::test]
+async fn test_the_account_page_lists_the_rooms_you_are_in() {
+    let state = get_state().await;
+    let (host, guest, code) = room_of_two(&state).await;
+    act(&host, &code, json!({ "type": "start" }))
+        .await
+        .assert_status_ok();
+    let quiet = create_room(&guest).await;
+    let left = create_room(&guest).await;
+    host.post(&format!("/api/rooms/{quiet}/join"))
+        .await
+        .assert_status_ok();
+    host.post(&format!("/api/rooms/{left}/join"))
+        .await
+        .assert_status_ok();
+    host.post(&format!("/api/rooms/{left}/leave"))
+        .await
+        .assert_status_ok();
+    sqlx::query("UPDATE rooms SET last_active = now() - interval '1 day' WHERE code = $1")
+        .bind(&quiet)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    // works the same for an anonymous player
+    let info = account_info(&host).await;
+    assert_eq!(info["username"], Value::Null);
+    assert_eq!(info["sessions"], 0);
+    assert_eq!(info["recovery"], false);
+    let rooms: Vec<(String, bool, i64, bool)> = info["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["code"].as_str().unwrap().to_string(),
+                r["host"].as_bool().unwrap(),
+                r["members"].as_i64().unwrap(),
+                r["playing"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rooms, vec![(code, true, 2, true), (quiet, false, 2, false)]);
+    assert_eq!(account_info(&client(&state)).await["rooms"], json!([]));
+}
+
+#[tokio::test]
+async fn test_stale_password_hashes_are_rehashed_at_sign_in() {
+    let state = get_state().await;
+    let server = client(&state);
+    signup(&server, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let stored = || async {
+        sqlx::query_scalar::<_, String>("SELECT password_hash FROM players WHERE username = 'ada'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap()
+    };
+    let old = common::crypto::hash_password_with(b"correct horse", 1_000).unwrap();
+    sqlx::query("UPDATE players SET password_hash = $1 WHERE username = 'ada'")
+        .bind(&old)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    // a wrong password changes nothing
+    login(&client(&state), "ada", "wrong horse")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(stored().await, old);
+    login(&client(&state), "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let new = stored().await;
+    assert!(new.starts_with("pbkdf2-sha512$210000$"), "{new}");
+    assert!(!common::crypto::password_needs_rehash(&new));
+    login(&client(&state), "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    assert_eq!(stored().await, new);
+}
+
+#[tokio::test]
+async fn test_password_checks_are_limited_per_address() {
+    let state = get_state().await;
+    let server = client(&state);
+    let from = |addr: &'static str, path: &str, body: Value| {
+        server
+            .post(path)
+            .add_header(komino::handlers::CLIENT_IP_HEADER, addr)
+            .json(&body)
+    };
+    // sign ups refused before any hashing still use the bucket up, quickly
+    // enough that none of it refills meanwhile
+    let bad = json!({ "username": "a!", "password": "correct horse" });
+    for _ in 0..komino::accounts::AUTH_BURST as usize {
+        from("1.2.3.4", "/api/signup", bad.clone())
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+    }
+    // every password route draws from the same bucket
+    let guess = json!({ "username": "nobody", "password": "guess" });
+    let resp = from("1.2.3.4", "/api/login", guess.clone()).await;
+    resp.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.json::<Value>()["code"], "slow_down");
+    from(
+        "1.2.3.4",
+        "/api/account/recover",
+        json!({
+            "username": "nobody", "code": "x", "password": "correct horse",
+        }),
+    )
+    .await
+    .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    // another address is not held back
+    from("5.6.7.8", "/api/login", guess)
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_quiet_anonymous_players_are_forgotten() {
+    let state = get_state().await;
+    let (host, guest, _code) = room_of_two(&state).await;
+    let in_room = me(&guest).await;
+    let account = client(&state);
+    signup(&account, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let account_id = me(&account).await;
+    let host_id = me(&host).await;
+    sqlx::raw_sql(
+        "INSERT INTO players (id, name, last_seen) VALUES
+             ('played_long_ago', 'a', now() - interval '91 days'),
+             ('played_lately', 'b', now() - interval '30 days'),
+             ('never_played', 'c', now() - interval '8 days'),
+             ('just_visited', 'd', now() - interval '1 day');
+         INSERT INTO player_stats (player_id, games_played) VALUES
+             ('played_long_ago', 1), ('played_lately', 1);
+         INSERT INTO player_partners (player_id, other_id, games) VALUES
+             ('played_long_ago', 'played_lately', 1), ('played_lately', 'played_long_ago', 1);",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE players SET last_seen = now() - interval '200 days' WHERE id = ANY($1)")
+        .bind(vec![in_room.clone(), account_id.clone(), host_id.clone()])
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let forgotten = komino::models::forget_anonymous_players(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(forgotten, 2);
+    let mut left: Vec<String> = sqlx::query_scalar("SELECT id FROM players")
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+    left.sort();
+    let mut want = vec![
+        "played_lately".to_string(),
+        "just_visited".to_string(),
+        in_room,
+        account_id,
+        host_id,
+    ];
+    want.sort();
+    assert_eq!(left, want);
+    // their partner rows went with them
+    let partners: i64 = sqlx::query_scalar("SELECT count(*) FROM player_partners")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(partners, 0);
 }

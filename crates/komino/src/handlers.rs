@@ -2,14 +2,14 @@ use crate::bot::Level;
 use crate::game::{Action, Secret, Settings};
 use crate::lag::{self, Rtt, Seen};
 use crate::models::{self, Acted, ApiError, ClientAction, Player, Result, Room, Snapshot};
-use crate::{sealed, State};
+use crate::{accounts, sealed, stats, State};
 use axum::body::Bytes;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State as AxumState,
     },
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -22,6 +22,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
 pub const PLAYER_COOKIE: &str = "komino_player";
+pub const SESSION_COOKIE: &str = "komino_session";
 const COOKIE_DAYS: i64 = 365;
 const HEARTBEAT: Duration = Duration::from_secs(10);
 
@@ -49,14 +50,50 @@ fn player_cookie(id: &str, key: &str) -> Cookie<'static> {
         .build()
 }
 
+/// The session token cookie (ACCT-6). Same attributes as the player cookie,
+/// but it lives only as long as the session.
+fn session_cookie(token: &str) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, token.to_string()))
+        .secure(true)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(time::Duration::days(accounts::SESSION_DAYS))
+        .path("/komino")
+        .build()
+}
+
+/// A cookie to pass to [`CookieJar::remove`], matching the path it was set
+/// on.
+fn expired(name: &'static str) -> Cookie<'static> {
+    Cookie::build(name).path("/komino").build()
+}
+
 fn cookie_id(state: &State, jar: &CookieJar) -> Option<String> {
     jar.get(PLAYER_COOKIE)
         .and_then(|c| verify_player(c.value(), &state.config.signing_key))
 }
 
-/// The requesting player, issuing a fresh identity when the cookie is
-/// missing, forged, or unknown.
+/// The account behind the session cookie, if it is live. A dead one is
+/// dropped from the jar.
+async fn session(state: &State, jar: CookieJar) -> Result<(Option<Player>, CookieJar)> {
+    let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value().to_string()) else {
+        return Ok((None, jar));
+    };
+    Ok(match accounts::session_player(&state.db, &token).await? {
+        Some((player, true)) => (Some(player), jar.add(session_cookie(&token))),
+        Some((player, false)) => (Some(player), jar),
+        None => (None, jar.remove(expired(SESSION_COOKIE))),
+    })
+}
+
+/// The requesting player: a live session's account, else the anonymous
+/// player cookie's player, issuing a fresh anonymous identity when that
+/// cookie is missing, forged, or unknown, or names an account (ACCT-7).
 async fn identify(state: &State, jar: CookieJar) -> Result<(Player, CookieJar)> {
+    let (account, jar) = session(state, jar).await?;
+    if let Some(player) = account {
+        return Ok((player, jar));
+    }
     let id = cookie_id(state, &jar);
     let (player, fresh) = models::ensure_player(&state.db, id.as_deref()).await?;
     let jar = if fresh {
@@ -67,6 +104,39 @@ async fn identify(state: &State, jar: CookieJar) -> Result<(Player, CookieJar)> 
     Ok((player, jar))
 }
 
+/// The requesting player for a socket, which can't set cookies: the same
+/// rules as [`identify`], but never a new player.
+async fn socket_player(state: &State, jar: CookieJar) -> Result<Option<String>> {
+    if let (Some(player), _) = session(state, jar.clone()).await? {
+        return Ok(Some(player.id));
+    }
+    match cookie_id(state, &jar) {
+        Some(id) if models::is_anonymous(&state.db, &id).await? => Ok(Some(id)),
+        _ => Ok(None),
+    }
+}
+
+fn me_json(player: &Player) -> Value {
+    json!({ "id": player.id, "name": player.name, "username": player.username })
+}
+
+/// The client's address as the fly proxy saw it, which it sets on every
+/// request it forwards.
+pub const CLIENT_IP_HEADER: &str = "fly-client-ip";
+
+/// Count a password check against the client's address (ACCT-22).
+fn limit(state: &State, headers: &HeaderMap) -> Result<()> {
+    let addr = headers.get(CLIENT_IP_HEADER).and_then(|v| v.to_str().ok());
+    state.limiter.check(addr)
+}
+
+/// The account and its new recovery code, shown once (ACCT-18).
+fn signed_json(signed: &accounts::Signed) -> Value {
+    let mut body = me_json(&signed.player);
+    body["recovery_code"] = json!(signed.recovery_code);
+    body
+}
+
 async fn room_view(state: &State, room: &Room, player: &str) -> Result<Value> {
     models::view(&state.db, room, Some(player), &state.config.real_hostname).await
 }
@@ -75,7 +145,7 @@ async fn room_view(state: &State, room: &Room, player: &str) -> Result<Value> {
 // Pages
 // ---------------------------------------------------------------------------
 
-/// The spa shell for `/komino` and `/komino/r/<code>`. Issues the cookie on
+/// The spa shell for `/komino`, `/komino/account`, and `/komino/r/<code>`. Issues the cookie on
 /// first visit so the websocket that follows already carries it.
 pub async fn index(AxumState(state): AxumState<State>, jar: CookieJar) -> Response {
     let jar = match identify(&state, jar).await {
@@ -97,7 +167,7 @@ pub async fn index(AxumState(state): AxumState<State>, jar: CookieJar) -> Respon
 
 pub async fn me(AxumState(state): AxumState<State>, jar: CookieJar) -> Result<Response> {
     let (player, jar) = identify(&state, jar).await?;
-    Ok((jar, Json(json!({ "id": player.id, "name": player.name }))).into_response())
+    Ok((jar, Json(me_json(&player))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -105,14 +175,228 @@ pub struct RenameRequest {
     pub name: String,
 }
 
+/// Set the default display name. An account's blank name goes back to its
+/// username (ACCT-11).
 pub async fn rename(
     AxumState(state): AxumState<State>,
     jar: CookieJar,
     Json(req): Json<RenameRequest>,
 ) -> Result<Response> {
+    let (mut player, jar) = identify(&state, jar).await?;
+    let raw = match (&player.username, req.name.trim()) {
+        (Some(username), "") => username.clone(),
+        _ => req.name,
+    };
+    player.name = models::set_name(&state.db, &player.id, &raw).await?;
+    Ok((jar, Json(me_json(&player))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct SignupRequest {
+    pub username: String,
+    pub password: String,
+    pub name: Option<String>,
+}
+
+/// Make the current anonymous player an account and sign it in (ACCT-2).
+/// The player cookie is dropped: it can't reach an account (ACCT-7).
+pub async fn signup(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<SignupRequest>,
+) -> Result<Response> {
+    limit(&state, &headers)?;
     let (player, jar) = identify(&state, jar).await?;
-    let name = models::set_name(&state.db, &player.id, &req.name).await?;
-    Ok((jar, Json(json!({ "id": player.id, "name": name }))).into_response())
+    let signed = accounts::signup(
+        &state.db,
+        &player,
+        &req.username,
+        &req.password,
+        req.name.as_deref(),
+    )
+    .await?;
+    let jar = jar
+        .remove(expired(PLAYER_COOKIE))
+        .add(session_cookie(&signed.token));
+    Ok((jar, no_store(), Json(signed_json(&signed))).into_response())
+}
+
+/// A response that holds a secret, so no cache keeps it.
+fn no_store() -> [(header::HeaderName, &'static str); 1] {
+    [(header::CACHE_CONTROL, "no-store")]
+}
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Sign in to an account (ACCT-5). The anonymous player cookie is kept, so
+/// signing out returns this browser to that player.
+pub async fn login(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<LoginRequest>,
+) -> Result<Response> {
+    limit(&state, &headers)?;
+    let (account, token) = accounts::login(&state.db, &req.username, &req.password).await?;
+    // a session this browser held before is replaced, not left behind
+    if let Some(old) = jar.get(SESSION_COOKIE) {
+        accounts::logout(&state.db, old.value()).await?;
+    }
+    let jar = jar.add(session_cookie(&token));
+    Ok((jar, Json(me_json(&account))).into_response())
+}
+
+/// End this browser's session (ACCT-8).
+pub async fn logout(AxumState(state): AxumState<State>, jar: CookieJar) -> Result<Response> {
+    if let Some(token) = jar.get(SESSION_COOKIE) {
+        accounts::logout(&state.db, token.value()).await?;
+    }
+    let jar = jar.remove(expired(SESSION_COOKIE));
+    Ok((jar, Json(json!({ "ok": true }))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct PasswordRequest {
+    pub current: String,
+    pub new: String,
+}
+
+/// Change the signed in account's password (ACCT-15). Its other sessions
+/// end, and this browser gets a new one.
+pub async fn change_password(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<PasswordRequest>,
+) -> Result<Response> {
+    limit(&state, &headers)?;
+    let (player, jar) = identify(&state, jar).await?;
+    let token = accounts::change_password(&state.db, &player, &req.current, &req.new).await?;
+    let jar = jar.add(session_cookie(&token));
+    Ok((jar, Json(me_json(&player))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct UsernameRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Change the signed in account's username (ACCT-20).
+pub async fn change_username(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<UsernameRequest>,
+) -> Result<Response> {
+    limit(&state, &headers)?;
+    let (player, jar) = identify(&state, jar).await?;
+    let account =
+        accounts::change_username(&state.db, &player, &req.username, &req.password).await?;
+    Ok((jar, Json(me_json(&account))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct RecoverRequest {
+    pub username: String,
+    pub code: String,
+    pub password: String,
+}
+
+/// Set a new password with a recovery code and sign in (ACCT-18). A
+/// session this browser held before is replaced, as at sign in.
+pub async fn recover(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<RecoverRequest>,
+) -> Result<Response> {
+    limit(&state, &headers)?;
+    let signed = accounts::recover(&state.db, &req.username, &req.code, &req.password).await?;
+    if let Some(old) = jar.get(SESSION_COOKIE) {
+        accounts::logout(&state.db, old.value()).await?;
+    }
+    let jar = jar.add(session_cookie(&signed.token));
+    Ok((jar, no_store(), Json(signed_json(&signed))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct PasswordOnly {
+    pub password: String,
+}
+
+/// Replace the signed in account's recovery code (ACCT-18).
+pub async fn new_recovery(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<PasswordOnly>,
+) -> Result<Response> {
+    limit(&state, &headers)?;
+    let (player, jar) = identify(&state, jar).await?;
+    let code = accounts::new_recovery(&state.db, &player, &req.password).await?;
+    Ok((jar, no_store(), Json(json!({ "recovery_code": code }))).into_response())
+}
+
+/// Sign the account out everywhere but this browser (ACCT-19).
+pub async fn sign_out_others(
+    AxumState(state): AxumState<State>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let token = jar
+        .get(SESSION_COOKIE)
+        .map(|c| c.value().to_string())
+        .unwrap_or_default();
+    let ended = accounts::end_other_sessions(&state.db, &player, &token).await?;
+    Ok((jar, Json(json!({ "ended": ended }))).into_response())
+}
+
+/// The account page's details (ACCT-17), for any player.
+pub async fn account(AxumState(state): AxumState<State>, jar: CookieJar) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let body = accounts::account_info(&state.db, &player).await?;
+    Ok((jar, Json(body)).into_response())
+}
+
+/// The requesting player's lifetime stats (STAT-11).
+pub async fn account_stats(AxumState(state): AxumState<State>, jar: CookieJar) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let body = stats::player_stats(&state.db, &player.id).await?;
+    Ok((jar, Json(body)).into_response())
+}
+
+/// Delete the signed in account (ACCT-16).
+pub async fn delete_account(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<PasswordOnly>,
+) -> Result<Response> {
+    limit(&state, &headers)?;
+    let (player, jar) = identify(&state, jar).await?;
+    accounts::delete_account(&state.db, &player, &req.password).await?;
+    let jar = jar.remove(expired(SESSION_COOKIE));
+    Ok((jar, Json(json!({ "ok": true }))).into_response())
+}
+
+/// Set or clear this member's name for one room (ACCT-12).
+pub async fn room_name(
+    AxumState(state): AxumState<State>,
+    Path(code): Path<String>,
+    jar: CookieJar,
+    Json(req): Json<RenameRequest>,
+) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let room = models::room_by_code(&state.db, &code).await?;
+    models::set_room_name(&state.db, &room, &player.id, &req.name).await?;
+    let view = room_view(&state, &room, &player.id).await?;
+    Ok((jar, Json(view)).into_response())
 }
 
 /// The settings for a new room (SET-2): an empty body takes every default.
@@ -328,8 +612,9 @@ pub async fn ws(
     jar: CookieJar,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response> {
-    let player =
-        cookie_id(&state, &jar).ok_or_else(|| ApiError::forbidden("load the room page first"))?;
+    let player = socket_player(&state, jar)
+        .await?
+        .ok_or_else(|| ApiError::forbidden("load the room page first"))?;
     let room = models::room_by_code(&state.db, &code).await?;
     models::require_member(&state.db, room.id, &player).await?;
     Ok(upgrade.on_upgrade(move |socket| socket_loop(state, room, Who::Member(player), socket)))
@@ -343,8 +628,9 @@ pub async fn watch_ws(
     jar: CookieJar,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response> {
-    let player =
-        cookie_id(&state, &jar).ok_or_else(|| ApiError::forbidden("load the watch page first"))?;
+    let player = socket_player(&state, jar)
+        .await?
+        .ok_or_else(|| ApiError::forbidden("load the watch page first"))?;
     let room = models::room_by_code(&state.db, &code).await?;
     models::require_not_removed(&state.db, room.id, &player).await?;
     Ok(upgrade.on_upgrade(move |socket| watch_loop(state, room, player, socket)))
@@ -686,5 +972,17 @@ mod tests {
         assert_eq!(c.secure(), Some(true));
         assert_eq!(c.path(), Some("/komino"));
         assert_eq!(c.max_age(), Some(time::Duration::days(365)));
+    }
+
+    #[test]
+    fn session_cookie_attributes() {
+        let c = session_cookie("tok");
+        assert_eq!(c.name(), SESSION_COOKIE);
+        assert_eq!(c.value(), "tok");
+        assert_eq!(c.http_only(), Some(true));
+        assert_eq!(c.secure(), Some(true));
+        assert_eq!(c.same_site(), Some(SameSite::Lax));
+        assert_eq!(c.path(), Some("/komino"));
+        assert_eq!(c.max_age(), Some(time::Duration::days(30)));
     }
 }

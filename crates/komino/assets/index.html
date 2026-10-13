@@ -12,9 +12,13 @@
     <a class="brand" href="/komino">komino</a>
     <button id="guide-btn" class="small guide-btn">rules</button>
     <label class="name">
-      <span>name</span>
+      <span id="name-label">name</span>
       <input id="name" maxlength="24" autocomplete="off">
     </label>
+    <div class="account">
+      <a id="account-user" class="account-user" href="/komino/account" hidden></a>
+      <button id="account-btn" class="small">sign in</button>
+    </div>
   </header>
 
   <main id="lobby" hidden>
@@ -161,6 +165,82 @@
     </section>
   </main>
 
+  <main id="account-page" hidden>
+    <section class="panel">
+      <h1>account</h1>
+      <p id="acct-anon">You are playing without an account, so these rooms and stats belong to this
+        browser. <button type="button" id="acct-signin" class="link">Create an account or sign in</button>
+        to keep them on any device.</p>
+      <p id="acct-who" hidden>signed in as <strong id="acct-username"></strong>
+        <span id="acct-sessions" class="hint"></span></p>
+      <section class="acct-rooms">
+        <h2>your rooms</h2>
+        <p id="rooms-error" class="account-error" role="alert"></p>
+        <ul id="acct-rooms" class="acct-room-list"></ul>
+      </section>
+      <section class="acct-stats">
+        <h2>your stats</h2>
+        <p id="stats-error" class="account-error" role="alert"></p>
+        <dl id="stats-totals" class="stat-grid"></dl>
+        <h3>played with most</h3>
+        <ol id="stats-partners" class="partners"></ol>
+      </section>
+      <div id="acct-body" hidden>
+        <section class="account-form">
+          <h2>devices</h2>
+          <p id="sessions-text"></p>
+          <p id="sessions-error" class="account-error" role="alert"></p>
+          <button type="button" id="sessions-submit">sign out other devices</button>
+        </section>
+        <form id="username-form" class="account-form">
+          <h2>change username</h2>
+          <label>new username
+            <input id="un-new" maxlength="24" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+          </label>
+          <label>password
+            <input id="un-password" type="password" maxlength="256" autocomplete="current-password" required>
+          </label>
+          <p id="un-error" class="account-error" role="alert"></p>
+          <button id="un-submit" class="primary">change username</button>
+          <p class="hint">A display name that was your username changes with it.</p>
+        </form>
+        <form id="password-form" class="account-form">
+          <h2>change password</h2>
+          <input id="pw-username" type="text" autocomplete="username" hidden>
+          <label>current password
+            <input id="pw-current" type="password" maxlength="256" autocomplete="current-password" required>
+          </label>
+          <label>new password <span class="hint">at least 8 characters</span>
+            <input id="pw-new" type="password" maxlength="256" autocomplete="new-password" required>
+          </label>
+          <p id="pw-error" class="account-error" role="alert"></p>
+          <button id="pw-submit" class="primary">change password</button>
+          <p class="hint">This signs you out on every other device.</p>
+        </form>
+        <form id="recovery-form" class="account-form">
+          <h2>recovery code</h2>
+          <p id="recovery-status"></p>
+          <label>password
+            <input id="recovery-password" type="password" maxlength="256" autocomplete="current-password" required>
+          </label>
+          <p id="recovery-error" class="account-error" role="alert"></p>
+          <button id="recovery-submit">make a new recovery code</button>
+          <p class="hint">A new code replaces the old one.</p>
+        </form>
+        <form id="delete-form" class="account-form">
+          <h2>delete account</h2>
+          <p>Deletes your account and your stats, and takes you out of every room, for good. A game you
+            are playing is forfeited, and rooms you host pass to someone else.</p>
+          <label>password
+            <input id="delete-password" type="password" maxlength="256" autocomplete="current-password" required>
+          </label>
+          <p id="delete-error" class="account-error" role="alert"></p>
+          <button id="delete-submit" class="danger">delete account</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
   <main id="gone" hidden>
     <section class="panel">
       <h1 id="gone-title"></h1>
@@ -180,6 +260,51 @@
       </div>
       <div id="guide-body" class="guide"></div>
     </div>
+  </div>
+
+  <div id="account" class="confirm-backdrop" hidden>
+    <form id="account-form" class="modal account-form" role="dialog" aria-modal="true" aria-labelledby="account-title">
+      <div class="modal-head">
+        <h2 id="account-title">sign in</h2>
+        <button type="button" id="account-close" class="small">close</button>
+      </div>
+      <p id="account-about" class="account-about"></p>
+      <label>username
+        <input id="account-username" maxlength="24" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </label>
+      <label id="account-code-row" hidden>recovery code
+        <input id="account-code" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false">
+      </label>
+      <label><span id="account-password-label">password</span>
+        <input id="account-password" type="password" maxlength="256" autocomplete="current-password" required>
+      </label>
+      <label id="account-name-row" hidden>display name <span class="hint">optional, your username if blank</span>
+        <input id="account-name" maxlength="24" autocomplete="nickname">
+      </label>
+      <p id="account-error" class="account-error" role="alert"></p>
+      <button id="account-submit" class="primary">sign in</button>
+      <button type="button" id="account-switch" class="link">new here? create an account</button>
+      <button type="button" id="account-forgot" class="link">forgot your password?</button>
+    </form>
+  </div>
+
+  <div id="recovery" class="confirm-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="recovery-title">
+      <h2 id="recovery-title">your recovery code</h2>
+      <p>Keep this somewhere safe. If you forget your password, it is the only way back into your
+        account. It is shown only now, and works once; using it gives you a new one.</p>
+      <p><code id="recovery-code" class="recovery-code"></code></p>
+      <div class="confirm-buttons">
+        <button type="button" id="recovery-copy">copy</button>
+        <button type="button" id="recovery-done" class="primary">I saved it</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cookies" class="cookies" role="region" aria-label="cookie notice" hidden>
+    <p>komino only uses cookies it needs to work: one remembers which player you are, and one keeps
+      you signed in if you have an account. There are no tracking, analytics, or advertising cookies.</p>
+    <button id="cookies-ok" class="small">ok</button>
   </div>
 
   <div id="toast" class="toast" role="status" hidden></div>

@@ -15,6 +15,9 @@ pub const SCORE_DELAY_MS: i64 = 2_000;
 /// slower connections (RT-17). Covers the most latency credit a claim can
 /// carry (`lag::MAX_CREDIT`) plus some jitter.
 pub const MATCH_WINDOW_MS: i64 = 250;
+/// The longest match reaction a stat records, so one stale untimed claim
+/// can't swamp a player's average (STAT-8).
+pub const MAX_STAT_MS: i64 = 60_000;
 /// Settled claim results kept for the claimers waiting on them.
 const SETTLED_KEPT: usize = 32;
 /// How long a matcher has to give a card for a match on another player's
@@ -488,10 +491,24 @@ pub enum Stat {
     SpecialMoves,
     CardsInteracted,
     Forfeits,
+    /// Cards drawn from the deck (STAT-2).
+    Draws,
+    /// Swaps made: a drawn or taken card, a blind swap, or a look and swap.
+    Swaps,
+    /// Cards looked at with a special move.
+    Views,
+    /// Matches made on a card in another player's hand.
+    OthersMatched,
+    /// Reaction time summed over correct matches, in ms (STAT-8).
+    MatchMs,
+    /// Correct matches with a reaction time, the divisor for `MatchMs`.
+    TimedMatches,
+    /// Games played with a bot seated, since bots are not partners (STAT-10).
+    BotGames,
 }
 
 impl Stat {
-    pub const ALL: [Stat; 9] = [
+    pub const ALL: [Stat; 16] = [
         Stat::GamesPlayed,
         Stat::Wins,
         Stat::KominoCalls,
@@ -501,6 +518,13 @@ impl Stat {
         Stat::SpecialMoves,
         Stat::CardsInteracted,
         Stat::Forfeits,
+        Stat::Draws,
+        Stat::Swaps,
+        Stat::Views,
+        Stat::OthersMatched,
+        Stat::MatchMs,
+        Stat::TimedMatches,
+        Stat::BotGames,
     ];
 
     /// Column in `room_stats`.
@@ -515,6 +539,13 @@ impl Stat {
             Stat::SpecialMoves => "special_moves",
             Stat::CardsInteracted => "cards_interacted",
             Stat::Forfeits => "forfeits",
+            Stat::Draws => "draws",
+            Stat::Swaps => "swaps",
+            Stat::Views => "views",
+            Stat::OthersMatched => "others_matched",
+            Stat::MatchMs => "match_ms",
+            Stat::TimedMatches => "timed_matches",
+            Stat::BotGames => "bot_games",
         }
     }
 }
@@ -531,6 +562,9 @@ pub struct Event {
 pub struct Outcome {
     pub events: Vec<Event>,
     pub stats: Vec<(String, Stat, i32)>,
+    /// Each correct match's player and reaction time in ms, for the
+    /// lifetime match time bands (STAT-9).
+    pub match_times: Vec<(String, i32)>,
     /// True when state changed even if nothing public happened.
     pub changed: bool,
     /// A match claimed by this action: its id and when its window closes.
@@ -727,6 +761,7 @@ impl Game {
             Ok(o) => {
                 out.events.extend(o.events);
                 out.stats.extend(o.stats);
+                out.match_times.extend(o.match_times);
                 out.changed = true;
                 true
             }
@@ -1009,6 +1044,7 @@ impl Game {
                     .ok_or_else(|| Reject::invalid("the draw pile is empty"))?;
                 self.stage = Stage::Drawn { card };
                 out.stat(player, Stat::CardsInteracted, 1);
+                out.stat(player, Stat::Draws, 1);
                 out.event(Some(player), "draw", json!({}));
             }
             Action::Take => {
@@ -1039,6 +1075,7 @@ impl Game {
                 self.touch(me, slot);
                 self.push_discard(old, now);
                 out.stat(player, Stat::CardsInteracted, 2);
+                out.stat(player, Stat::Swaps, 1);
                 out.event(
                     Some(player),
                     "swap",
@@ -1103,6 +1140,7 @@ impl Game {
                 self.seats[me].tally.specials += 1;
                 out.stat(player, Stat::SpecialMoves, 1);
                 out.stat(player, Stat::CardsInteracted, 1);
+                out.stat(player, Stat::Views, 1);
                 out.event(Some(player), "peek", json!({ "seat": seat, "slot": slot }));
                 if matches!(self.stage, Stage::Special { mv: Move::LookSwap }) {
                     self.stage = Stage::Looked { seat, slot };
@@ -1130,6 +1168,7 @@ impl Game {
                 self.seats[me].tally.specials += 1;
                 out.stat(player, Stat::SpecialMoves, 1);
                 out.stat(player, Stat::CardsInteracted, 2);
+                out.stat(player, Stat::Swaps, 1);
                 out.event(
                     Some(player),
                     "blind_swap",
@@ -1154,6 +1193,7 @@ impl Game {
                     let theirs = self.require_target(me, tseat, tslot)?;
                     self.exchange((me, slot, mine), (tseat, tslot, theirs));
                     out.stat(player, Stat::CardsInteracted, 2);
+                    out.stat(player, Stat::Swaps, 1);
                     out.event(
                         Some(player),
                         "look_swap",
@@ -1439,6 +1479,13 @@ impl Game {
             }
             self.seats[me].tally.matches += 1;
             out.stat(player, Stat::Matches, 1);
+            if seat != me {
+                out.stat(player, Stat::OthersMatched, 1);
+            }
+            let ms = c.reaction_ms.clamp(0, MAX_STAT_MS);
+            out.stat(player, Stat::MatchMs, ms as i32);
+            out.stat(player, Stat::TimedMatches, 1);
+            out.match_times.push((player.to_string(), ms as i32));
             out.event(
                 Some(player),
                 "match",
@@ -1636,8 +1683,12 @@ impl Game {
         self.score_at = None;
         self.turn_deadline = None;
         self.reveals.clear();
+        let with_bots = self.seats.iter().any(|s| s.bot);
         for (i, seat) in self.seats.iter().enumerate() {
             out.stat(&seat.player, Stat::GamesPlayed, 1);
+            if with_bots && !seat.bot {
+                out.stat(&seat.player, Stat::BotGames, 1);
+            }
             if seat.won {
                 out.stat(&seat.player, Stat::Wins, 1);
                 if Some(i) == caller {
@@ -1907,6 +1958,7 @@ mod tests {
             let settled = g.settle(deadline, &mut rng());
             out.events.extend(settled.events);
             out.stats.extend(settled.stats);
+            out.match_times.extend(settled.match_times);
             g.claim_result(&id).expect("the claim settled")?;
         }
         Ok(out)
@@ -2221,6 +2273,95 @@ mod tests {
         act(&mut g, "p1", Action::LookSwap { slot: None });
         assert_eq!(g.seats[0].slots[0], Some(1));
         assert_eq!(g.turn, 0);
+    }
+
+    fn has(out: &Outcome, p: &str, stat: Stat, n: i32) -> bool {
+        out.stats.contains(&(p.to_string(), stat, n))
+    }
+
+    #[test]
+    fn lifetime_counters_follow_each_move() {
+        let mut g = playing(&[[1, 2, 3, 5], [5, 6, 7, 8]], 0, &[9, 7]);
+        let out = act(&mut g, "p0", Action::Draw);
+        assert!(has(&out, "p0", Stat::Draws, 1));
+        let out = act(&mut g, "p0", Action::Swap { slot: 3 }); // discards 5
+        assert!(has(&out, "p0", Stat::Swaps, 1));
+        assert!(!out.stats.iter().any(|s| s.1 == Stat::Draws));
+        // p0 matches p1's 5, timed from when it landed
+        claim(&mut g, "p0", 420, 10, 1, 0);
+        let out = g.settle(10 + MATCH_WINDOW_MS, &mut rng());
+        assert!(has(&out, "p0", Stat::Matches, 1));
+        assert!(has(&out, "p0", Stat::OthersMatched, 1));
+        assert!(has(&out, "p0", Stat::MatchMs, 420));
+        assert!(has(&out, "p0", Stat::TimedMatches, 1));
+        assert_eq!(out.match_times, vec![("p0".to_string(), 420)]);
+        // a look with a special move is a view
+        act(&mut g, "p1", Action::Draw);
+        act(&mut g, "p1", Action::Discard);
+        act(&mut g, "p1", Action::UseSpecial);
+        let out = act(&mut g, "p1", Action::Peek { seat: 1, slot: 1 });
+        assert!(has(&out, "p1", Stat::Views, 1));
+        assert!(!out.stats.iter().any(|s| s.1 == Stat::Swaps));
+    }
+
+    #[test]
+    fn a_match_on_your_own_card_is_not_from_others_and_slow_times_are_capped() {
+        let mut g = fives();
+        claim(&mut g, "p0", 90_000, 10, 0, 0);
+        let out = g.settle(10 + MATCH_WINDOW_MS, &mut rng());
+        assert!(has(&out, "p0", Stat::Matches, 1));
+        assert!(!out.stats.iter().any(|s| s.1 == Stat::OthersMatched));
+        assert!(has(&out, "p0", Stat::MatchMs, MAX_STAT_MS as i32));
+        assert_eq!(
+            out.match_times,
+            vec![("p0".to_string(), MAX_STAT_MS as i32)]
+        );
+        // a miss has no time
+        let mut g = fives();
+        claim(&mut g, "p1", 300, 10, 1, 1);
+        let out = g.settle(10 + MATCH_WINDOW_MS, &mut rng());
+        assert!(has(&out, "p1", Stat::FailedMatches, 1));
+        assert!(out.match_times.is_empty());
+        assert!(!out.stats.iter().any(|s| s.1 == Stat::TimedMatches));
+    }
+
+    #[test]
+    fn blind_and_look_swaps_count_as_swaps() {
+        let mut g = playing(&[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[11, 13]);
+        act(&mut g, "p0", Action::Draw);
+        act(&mut g, "p0", Action::Discard);
+        act(&mut g, "p0", Action::UseSpecial);
+        let out = act(
+            &mut g,
+            "p0",
+            Action::BlindSwap {
+                slot: 0,
+                seat: 1,
+                target_slot: 3,
+            },
+        );
+        assert!(has(&out, "p0", Stat::Swaps, 1));
+        act(&mut g, "p1", Action::Draw);
+        act(&mut g, "p1", Action::Discard);
+        act(&mut g, "p1", Action::UseSpecial);
+        let out = act(&mut g, "p1", Action::Peek { seat: 0, slot: 1 });
+        assert!(has(&out, "p1", Stat::Views, 1));
+        let out = act(&mut g, "p1", Action::LookSwap { slot: Some(2) });
+        assert!(has(&out, "p1", Stat::Swaps, 1));
+    }
+
+    #[test]
+    fn games_with_a_bot_count_for_the_people_in_them() {
+        let mut g = with_bot(&[[1, 2, 3, 4], [5, 6, 7, 8]], 0, &[]);
+        let out = g.forfeit("p0", 0);
+        assert!(has(&out, "p0", Stat::GamesPlayed, 1));
+        assert!(has(&out, "p0", Stat::BotGames, 1));
+        assert!(has(&out, "p1", Stat::GamesPlayed, 1));
+        assert!(!has(&out, "p1", Stat::BotGames, 1));
+        let mut g = playing(&[[1; 4], [2; 4]], 0, &[]);
+        let out = g.forfeit("p0", 0);
+        assert!(has(&out, "p0", Stat::GamesPlayed, 1));
+        assert!(!out.stats.iter().any(|s| s.1 == Stat::BotGames));
     }
 
     #[test]

@@ -162,6 +162,76 @@ pub fn derive_encryption_key(pw: &[u8], salt: &[u8]) -> [u8; 32] {
 }
 
 // ---------------------------------------------------------------------------
+// Password hashing
+// ---------------------------------------------------------------------------
+
+/// PBKDF2-HMAC-SHA512 rounds for a new password hash (the OWASP floor).
+pub const PASSWORD_ITERATIONS: u32 = 210_000;
+const PASSWORD_SCHEME: &str = "pbkdf2-sha512";
+const PASSWORD_HASH_LEN: usize = 64;
+
+/// Hash `pw` for storage as `pbkdf2-sha512$<rounds>$<salt>$<hash>`, salt and
+/// hash in base64. The rounds travel with the hash so they can be raised
+/// later without breaking stored hashes.
+pub fn hash_password(pw: &[u8]) -> crate::Result<String> {
+    hash_password_with(pw, PASSWORD_ITERATIONS)
+}
+
+/// [`hash_password`] with chosen rounds, for tests and stored hashes made
+/// under older settings.
+pub fn hash_password_with(pw: &[u8], rounds: u32) -> crate::Result<String> {
+    use base64::Engine as _;
+    let salt = new_salt()?;
+    let mut out = [0u8; PASSWORD_HASH_LEN];
+    let n = NonZeroU32::new(rounds).ok_or("password rounds must be positive")?;
+    pbkdf2::derive(pbkdf2::PBKDF2_HMAC_SHA512, n, &salt, pw, &mut out);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    Ok(format!(
+        "{PASSWORD_SCHEME}${rounds}${}${}",
+        b64.encode(&salt),
+        b64.encode(out)
+    ))
+}
+
+/// Whether `pw` matches a hash from [`hash_password`], compared in constant
+/// time. A malformed hash never matches.
+pub fn verify_password(pw: &[u8], encoded: &str) -> bool {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut parts = encoded.split('$');
+    let (Some(PASSWORD_SCHEME), Some(rounds), Some(salt), Some(hash), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    let (Some(rounds), Ok(salt), Ok(hash)) = (
+        rounds.parse().ok().and_then(NonZeroU32::new),
+        b64.decode(salt),
+        b64.decode(hash),
+    ) else {
+        return false;
+    };
+    pbkdf2::verify(pbkdf2::PBKDF2_HMAC_SHA512, rounds, &salt, pw, &hash).is_ok()
+}
+
+/// Whether a hash from [`hash_password`] was made under weaker settings than
+/// today's, so it should be made again the next time its password is known.
+pub fn password_needs_rehash(encoded: &str) -> bool {
+    let mut parts = encoded.split('$');
+    match (
+        parts.next(),
+        parts.next().and_then(|r| r.parse::<u32>().ok()),
+    ) {
+        (Some(PASSWORD_SCHEME), Some(rounds)) => rounds < PASSWORD_ITERATIONS,
+        _ => true,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AES-256-GCM helpers (no KDF — key must already be 32 bytes)
 // ---------------------------------------------------------------------------
 
@@ -572,6 +642,68 @@ mod tests {
         let k1 = derive_encryption_key(b"password-a", salt);
         let k2 = derive_encryption_key(b"password-b", salt);
         assert_ne!(k1, k2);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Password hashing
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn password_hash_round_trips() {
+        let h = hash_password(b"correct horse").unwrap();
+        assert!(h.starts_with("pbkdf2-sha512$210000$"));
+        assert!(verify_password(b"correct horse", &h));
+        assert!(!verify_password(b"correct horsf", &h));
+        assert!(!verify_password(b"", &h));
+    }
+
+    #[test]
+    fn password_hashes_are_salted() {
+        let a = hash_password_with(b"pw", 1).unwrap();
+        let b = hash_password_with(b"pw", 1).unwrap();
+        assert_ne!(a, b);
+        assert!(verify_password(b"pw", &a));
+        assert!(verify_password(b"pw", &b));
+    }
+
+    #[test]
+    fn password_hash_keeps_its_rounds() {
+        let h = hash_password_with(b"pw", 7).unwrap();
+        assert!(h.starts_with("pbkdf2-sha512$7$"));
+        assert!(verify_password(b"pw", &h));
+        // the same salt and hash under other rounds do not match
+        assert!(!verify_password(b"pw", &h.replacen("$7$", "$8$", 1)));
+    }
+
+    #[test]
+    fn hashes_under_fewer_rounds_need_rehashing() {
+        assert!(!password_needs_rehash(&hash_password(b"pw").unwrap()));
+        assert!(password_needs_rehash(
+            &hash_password_with(b"pw", 1_000).unwrap()
+        ));
+        assert!(!password_needs_rehash(
+            &hash_password_with(b"pw", PASSWORD_ITERATIONS + 1).unwrap()
+        ));
+        assert!(password_needs_rehash(""));
+        assert!(password_needs_rehash("bcrypt$12$x$y"));
+    }
+
+    #[test]
+    fn malformed_password_hashes_never_match() {
+        let h = hash_password_with(b"pw", 1).unwrap();
+        let bad = [
+            String::new(),
+            "pw".to_string(),
+            h.replacen("pbkdf2-sha512", "pbkdf2-sha256", 1),
+            h.replacen("$1$", "$0$", 1),
+            h.replacen("$1$", "$x$", 1),
+            format!("{h}$extra"),
+            h.rsplit_once('$').unwrap().0.to_string(),
+            format!("{}$!!!", h.rsplit_once('$').unwrap().0),
+        ];
+        for b in bad {
+            assert!(!verify_password(b"pw", &b), "{b:?} matched");
+        }
     }
 
     // ---------------------------------------------------------------------------

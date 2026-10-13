@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod bot;
 pub mod config;
 pub mod game;
@@ -6,6 +7,7 @@ pub mod lag;
 pub mod models;
 pub mod sealed;
 pub mod service;
+pub mod stats;
 pub mod test_utils;
 
 pub use config::Config;
@@ -21,6 +23,8 @@ pub struct Resources {
     pub hub: Hub,
     /// Static ECDH key that seals private card values (SEAL-3).
     pub server_key: sealed::ServerKey,
+    /// Password checks per client address (ACCT-22).
+    pub limiter: accounts::Limiter,
 }
 
 /// One room's snapshot for the newest change this machine heard of, loaded
