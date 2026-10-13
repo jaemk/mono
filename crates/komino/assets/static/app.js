@@ -30,6 +30,7 @@
   const ALERTS_KEY = "komino.alerts";
   const TIPS_KEY = "komino.tips";
   const MARKS_KEY = "komino.marks";
+  const COOKIES_KEY = "komino.cookies";
   // how long a press on a card opens the mark picker (SET-17)
   const LONG_PRESS_MS = 450;
   // how long a fresh discard glows, fading as it ages (UI-41)
@@ -86,6 +87,40 @@
 
   const esc = (s) =>
     String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+  // a short name for a session's device from its user agent (ACCT-19)
+  function deviceName(agent) {
+    const a = String(agent || "");
+    const browser =
+      [
+        [/Edg\//, "Edge"],
+        [/OPR\/|Opera/, "Opera"],
+        [/Firefox\/|FxiOS/, "Firefox"],
+        [/Chrome\/|CriOS/, "Chrome"],
+        [/Safari\//, "Safari"],
+      ].find(([re]) => re.test(a)) || [];
+    const os =
+      [
+        [/iPhone|iPad|iPod/, "iOS"],
+        [/Android/, "Android"],
+        [/Windows/, "Windows"],
+        [/Mac OS X|Macintosh/, "macOS"],
+        [/CrOS/, "ChromeOS"],
+        [/Linux/, "Linux"],
+      ].find(([re]) => re.test(a)) || [];
+    if (browser[1] && os[1]) return `${browser[1]} on ${os[1]}`;
+    return browser[1] || os[1] || (a ? a.slice(0, 40) : "unknown device");
+  }
+
+  // how long ago `then` was, roughly
+  function ago(then, now) {
+    const s = Math.max(0, Math.round((now - then) / 1000));
+    if (s < 3600) return "within the hour";
+    const h = Math.floor(s / 3600);
+    if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+    const d = Math.floor(h / 24);
+    return `${d} day${d === 1 ? "" : "s"} ago`;
+  }
 
   // ---------------------------------------------------------------- cards
 
@@ -351,8 +386,14 @@
     // canonical upper-case code, so it must match the decrypt aad
     const code = path[1] && path[1].toUpperCase();
     const watching = Boolean(path[2]);
+    const accountPage = /^\/komino\/account\/?$/.test(win.location.pathname);
     let view = null;
     let me = null;
+    // the account's username, null when anonymous, and the default name
+    // (ACCT-11)
+    let username = null;
+    let defaultName = "";
+    let accountMode = "signin";
     let ws = null;
     let backoff = 500;
     let sel = null; // pending selection: { key, kind, ...fields }
@@ -1662,6 +1703,7 @@
       renderMembers();
       renderLog(g);
       renderStats();
+      renderName();
     }
 
     function applyView(v) {
@@ -1724,6 +1766,326 @@
       }
     }
 
+    // ---------------------------------------------------------------- account
+
+    // in a room the name field edits this room's name (ACCT-12); anywhere
+    // else, the default name (ACCT-11)
+    function roomName() {
+      return Boolean(code && !watching);
+    }
+
+    function myMember() {
+      return ((view && view.members) || []).find((m) => m.id === me);
+    }
+
+    function renderName() {
+      const input = $("name");
+      if (doc.activeElement === input) return;
+      const m = roomName() ? myMember() : null;
+      const value = m ? m.name : defaultName;
+      if (input.value !== value) input.value = value;
+    }
+
+    function renderAccount() {
+      $("account-user").hidden = !username;
+      $("account-user").textContent = username ? `signed in as ${username}` : "";
+      $("account-btn").textContent = username ? "sign out" : "sign in";
+    }
+
+    // signin, signup, or recover (ACCT-18)
+    function setAccountMode(next) {
+      accountMode = next;
+      const up = next === "signup";
+      const recover = next === "recover";
+      $("account-title").textContent = up ? "create an account" : recover ? "use a recovery code" : "sign in";
+      $("account-submit").textContent = up ? "create account" : recover ? "set password and sign in" : "sign in";
+      $("account-switch").textContent = up || recover ? "have an account? sign in" : "new here? create an account";
+      $("account-forgot").hidden = next !== "signin";
+      $("account-name-row").hidden = !up;
+      $("account-code-row").hidden = !recover;
+      $("account-code").required = recover;
+      $("account-password-label").textContent = recover ? "new password" : "password";
+      $("account-password").setAttribute("autocomplete", up || recover ? "new-password" : "current-password");
+      $("account-about").textContent = up
+        ? "Your player, rooms, and stats so far become the account's, so you can sign in on any device. Passwords are at least 8 characters."
+        : recover
+          ? "Enter the recovery code you saved and a new password. Your other devices are signed out."
+          : "";
+      $("account-error").textContent = "";
+    }
+
+    function openAccount() {
+      setAccountMode("signin");
+      $("account").hidden = false;
+      $("account-username").focus();
+    }
+
+    function closeAccount() {
+      $("account").hidden = true;
+      $("account-password").value = "";
+      $("account-code").value = "";
+    }
+
+    const ACCOUNT_URLS = {
+      signin: "/komino/api/login",
+      signup: "/komino/api/signup",
+      recover: "/komino/api/account/recover",
+    };
+
+    async function submitAccount(e) {
+      e.preventDefault();
+      const body = { username: $("account-username").value, password: $("account-password").value };
+      if (accountMode === "signup") body.name = $("account-name").value;
+      if (accountMode === "recover") body.code = $("account-code").value;
+      $("account-submit").disabled = true;
+      try {
+        const signed = await api("POST", ACCOUNT_URLS[accountMode], body);
+        // a new identity: load the page again so the room and its socket
+        // follow it, once a new recovery code is saved
+        const reload = () => go(win.location.pathname);
+        if (signed && signed.recovery_code) {
+          closeAccount();
+          showRecovery(signed.recovery_code, reload);
+        } else {
+          reload();
+        }
+      } catch (err) {
+        $("account-error").textContent = err.message;
+        $("account-submit").disabled = false;
+      }
+    }
+
+    // a recovery code, shown once until the player says it is saved (ACCT-18)
+    let recoveryDone = null;
+    function showRecovery(code, done) {
+      recoveryDone = done;
+      $("recovery-code").textContent = code;
+      $("recovery").hidden = false;
+      $("recovery-done").focus();
+    }
+
+    function closeRecovery() {
+      $("recovery").hidden = true;
+      $("recovery-code").textContent = "";
+      const done = recoveryDone;
+      recoveryDone = null;
+      if (done) done();
+    }
+
+    async function signOut() {
+      try {
+        await api("POST", "/komino/api/logout");
+        go(win.location.pathname);
+      } catch (err) {
+        toast(err.message);
+      }
+    }
+
+    // the account page (ACCT-17): rooms and stats for anyone, the rest for
+    // an account
+    function showAccountPage() {
+      $("account-page").hidden = false;
+      $("acct-anon").hidden = Boolean(username);
+      $("acct-who").hidden = !username;
+      $("acct-body").hidden = !username;
+      $("acct-username").textContent = username || "";
+      // lets a password manager file the new password under this account
+      $("pw-username").value = username || "";
+      loadAccount();
+      loadStats();
+    }
+
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+    async function loadAccount() {
+      let a;
+      try {
+        a = await api("GET", "/komino/api/account");
+      } catch (err) {
+        $("rooms-error").textContent = err.message;
+        return;
+      }
+      $("rooms-error").textContent = "";
+      const rooms = a.rooms || [];
+      $("acct-rooms").innerHTML = rooms.length
+        ? rooms
+            .map((r) => {
+              const about = [
+                r.host ? "host" : null,
+                plural(r.members, "player"),
+                r.playing ? "playing" : null,
+                r.games ? `you played ${plural(r.games, "game")}, won ${r.wins}` : null,
+              ]
+                .filter(Boolean)
+                .join(", ");
+              const c = esc(r.code);
+              return `<li><a href="/komino/r/${c}">${c}</a> <span class="about">${esc(about)}</span></li>`;
+            })
+            .join("")
+        : "<li>none right now</li>";
+      if (!username) return;
+      $("acct-sessions").textContent = `(${plural(a.sessions, "device")})`;
+      $("sessions-text").textContent = `Signed in on ${plural(a.sessions, "device")}, including this one.`;
+      $("sessions-submit").disabled = a.sessions <= 1;
+      const now = Date.now();
+      $("acct-devices").innerHTML = (a.devices || [])
+        .map((d) => {
+          const used = d.current ? "this device" : `last used ${ago(Date.parse(d.last_used), now)}`;
+          const out = d.current
+            ? ""
+            : ` <button type="button" class="link" data-device="${esc(d.id)}">sign out</button>`;
+          return `<li title="${esc(d.agent)}">${esc(deviceName(d.agent))} <span class="about">${esc(used)}</span>${out}</li>`;
+        })
+        .join("");
+      $("recovery-status").textContent = a.recovery
+        ? "You have a recovery code. If you forget your password, it lets you set a new one."
+        : "You have no recovery code, so a forgotten password can't be reset. Make one now.";
+    }
+
+    // a match time in seconds, "-" before any timed match
+    function seconds(ms) {
+      if (ms === null || ms === undefined) return "-";
+      // rounded in whole hundredths first, so a band middle like 725 reads
+      // 0.73s and not whatever toFixed makes of 0.725
+      return `${(Math.round(ms / 10) / 100).toFixed(2)}s`;
+    }
+
+    // lifetime stats (STAT-11)
+    async function loadStats() {
+      let s;
+      try {
+        s = await api("GET", "/komino/api/account/stats");
+      } catch (err) {
+        $("stats-error").textContent = err.message;
+        return;
+      }
+      const t = s.match_time || {};
+      const rate = s.games_played ? ` (${Math.round((100 * s.wins) / s.games_played)}%)` : "";
+      const items = [
+        ["games played", s.games_played],
+        ["games won", `${s.wins}${rate}`],
+        ["cards drawn", s.draws],
+        ["cards swapped", s.swaps],
+        ["cards viewed", s.views],
+        ["matches", s.matches],
+        ["matched from others", s.others_matched],
+        ["missed matches", s.failed_matches],
+        ["average match time", seconds(t.average_ms)],
+        // the top band holds everything from 5s up (STAT-9)
+        ["median match time", t.median_ms >= 5000 ? "5s+" : seconds(t.median_ms)],
+        ["games with bots", s.bot_games],
+      ];
+      $("stats-totals").innerHTML = items
+        .map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(String(value))}</dd></div>`)
+        .join("");
+      const partners = s.partners || [];
+      // games with partners since forgotten or deleted (STAT-10)
+      const gone = s.partners_gone || 0;
+      $("stats-partners").innerHTML = partners.length
+        ? partners
+            .map((p) => {
+              const who = p.username && p.username !== p.name ? `${esc(p.name)} (${esc(p.username)})` : esc(p.name);
+              return `<li>${who} <span class="games">${p.games} game${p.games === 1 ? "" : "s"}</span></li>`;
+            })
+            .join("")
+        : gone
+          ? ""
+          : "<li>nobody yet</li>";
+      $("stats-partners-gone").hidden = !gone;
+      $("stats-partners-gone").textContent = gone
+        ? `${partners.length ? "and " : ""}${plural(gone, "game")} with players no longer here`
+        : "";
+    }
+
+    async function submitPassword(e) {
+      e.preventDefault();
+      $("pw-submit").disabled = true;
+      $("pw-error").textContent = "";
+      try {
+        await api("POST", "/komino/api/account/password", { current: $("pw-current").value, new: $("pw-new").value });
+        $("pw-current").value = "";
+        $("pw-new").value = "";
+        toast("password changed; other devices are signed out");
+      } catch (err) {
+        $("pw-error").textContent = err.message;
+      }
+      $("pw-submit").disabled = false;
+    }
+
+    async function submitUsername(e) {
+      e.preventDefault();
+      $("un-submit").disabled = true;
+      $("un-error").textContent = "";
+      try {
+        const account = await api("POST", "/komino/api/account/username", {
+          username: $("un-new").value,
+          password: $("un-password").value,
+        });
+        username = account.username;
+        defaultName = account.name;
+        $("un-new").value = "";
+        $("un-password").value = "";
+        renderAccount();
+        renderName();
+        $("acct-username").textContent = username;
+        $("pw-username").value = username;
+        toast(`username is now ${username}`);
+      } catch (err) {
+        $("un-error").textContent = err.message;
+      }
+      $("un-submit").disabled = false;
+    }
+
+    async function submitRecovery(e) {
+      e.preventDefault();
+      $("recovery-submit").disabled = true;
+      $("recovery-error").textContent = "";
+      try {
+        const r = await api("POST", "/komino/api/account/recovery", { password: $("recovery-password").value });
+        $("recovery-password").value = "";
+        showRecovery(r.recovery_code, loadAccount);
+      } catch (err) {
+        $("recovery-error").textContent = err.message;
+      }
+      $("recovery-submit").disabled = false;
+    }
+
+    async function signOutDevice(id) {
+      $("sessions-error").textContent = "";
+      try {
+        await api("POST", "/komino/api/account/sign-out-device", { id });
+        toast("signed out that device");
+        await loadAccount();
+      } catch (err) {
+        $("sessions-error").textContent = err.message;
+      }
+    }
+
+    async function signOutOthers() {
+      $("sessions-error").textContent = "";
+      try {
+        const r = await api("POST", "/komino/api/account/sign-out-others");
+        toast(`signed out ${plural(r.ended, "other device")}`);
+        await loadAccount();
+      } catch (err) {
+        $("sessions-error").textContent = err.message;
+      }
+    }
+
+    async function submitDelete(e) {
+      e.preventDefault();
+      if (!win.confirm("delete your account for good? this cannot be undone.")) return;
+      $("delete-submit").disabled = true;
+      $("delete-error").textContent = "";
+      try {
+        await api("POST", "/komino/api/account/delete", { password: $("delete-password").value });
+        go("/komino");
+      } catch (err) {
+        $("delete-error").textContent = err.message;
+        $("delete-submit").disabled = false;
+      }
+    }
+
     // the rules as this room plays them, read when opened (UI-34)
     function openGuide() {
       const s = view && view.room ? view.room.settings : null;
@@ -1755,7 +2117,8 @@
         if ($("guide").hidden) openGuide();
         return;
       }
-      if (!$("confirm").hidden || !$("guide").hidden || !$("marks").hidden || !code) return;
+      const dialog = ["confirm", "guide", "marks", "account", "recovery"].some((id) => !$(id).hidden);
+      if (dialog || !code) return;
       const g = game();
       const key = e.key.toLowerCase();
       if (KEYS[key]) {
@@ -1789,6 +2152,9 @@
       });
       doc.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
+        // a recovery code stays until the player says it is saved
+        if (!$("recovery").hidden) return;
+        if (!$("account").hidden) return closeAccount();
         if (!$("marks").hidden) return closeMarks();
         if (!$("guide").hidden) return closeGuide();
         clearSel();
@@ -1827,11 +2193,54 @@
 
       $("name").addEventListener("change", async (e) => {
         try {
-          const r = await api("POST", "/komino/api/me", { name: e.target.value });
-          e.target.value = r.name;
+          if (roomName()) {
+            // a blank room name shows the default again
+            applyView(await api("POST", `/komino/api/rooms/${code}/name`, { name: e.target.value }));
+            const m = myMember();
+            e.target.value = m ? m.name : defaultName;
+          } else {
+            const r = await api("POST", "/komino/api/me", { name: e.target.value });
+            defaultName = r.name;
+            e.target.value = r.name;
+          }
         } catch (err) {
           toast(err.message);
         }
+      });
+
+      $("account-btn").addEventListener("click", () => (username ? signOut() : openAccount()));
+      $("account-close").addEventListener("click", closeAccount);
+      $("account").addEventListener("click", (e) => {
+        if (e.target === $("account")) closeAccount();
+      });
+      $("account-switch").addEventListener("click", () => setAccountMode(accountMode === "signin" ? "signup" : "signin"));
+      $("account-forgot").addEventListener("click", () => setAccountMode("recover"));
+      $("account-form").addEventListener("submit", submitAccount);
+      $("recovery-done").addEventListener("click", closeRecovery);
+      $("recovery-copy").addEventListener("click", async () => {
+        try {
+          await win.navigator.clipboard.writeText($("recovery-code").textContent);
+          toast("recovery code copied");
+        } catch (_) {
+          toast("select the code to copy it");
+        }
+      });
+      $("acct-signin").addEventListener("click", openAccount);
+      $("sessions-submit").addEventListener("click", signOutOthers);
+      $("acct-devices").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-device]");
+        if (b) signOutDevice(Number(b.dataset.device));
+      });
+      $("username-form").addEventListener("submit", submitUsername);
+      $("password-form").addEventListener("submit", submitPassword);
+      $("recovery-form").addEventListener("submit", submitRecovery);
+      $("delete-form").addEventListener("submit", submitDelete);
+
+      // only needed cookies are set, so this is a notice, not a choice (ACCT-14)
+      $("cookies").hidden = loadPref(win, COOKIES_KEY, "") === "ok";
+      $("cookies-ok").addEventListener("click", () => {
+        savePref(win, COOKIES_KEY, "ok");
+        $("cookies").hidden = true;
       });
 
       $("create").addEventListener("click", async () => {
@@ -1893,10 +2302,18 @@
       try {
         const who = await api("GET", "/komino/api/me");
         me = who.id;
+        username = who.username || null;
+        defaultName = who.name;
         $("name").value = who.name;
       } catch (err) {
         return toast(err.message);
       }
+      renderAccount();
+      if (roomName()) {
+        $("name-label").textContent = "name here";
+        $("name").title = "your name in this room; leave blank for your default name";
+      }
+      if (accountPage) return showAccountPage();
       if (!code) {
         $("lobby").hidden = false;
         return;
@@ -1929,7 +2346,19 @@
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createKomino, face, back, cardLabel, guideHtml, openSealed, importServerKey, b64d, b64e };
+    module.exports = {
+      createKomino,
+      face,
+      back,
+      cardLabel,
+      guideHtml,
+      openSealed,
+      importServerKey,
+      b64d,
+      b64e,
+      deviceName,
+      ago,
+    };
   } else {
     createKomino(root).start();
   }

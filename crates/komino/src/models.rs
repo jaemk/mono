@@ -2,8 +2,8 @@
 //! state; each action locks the game row, applies the rules engine, and saves
 //! state, events, and stats in one transaction that also notifies the room.
 
-use crate::bot;
 use crate::game::{self, Action, Game, Outcome, Reject, Secret, Settings, Stat};
+use crate::{bot, stats};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -123,7 +123,10 @@ pub fn now_ms() -> i64 {
 #[derive(Clone, Debug)]
 pub struct Player {
     pub id: String,
+    /// The default display name (ACCT-11).
     pub name: String,
+    /// Set for an account (ACCT-1); `None` for an anonymous player.
+    pub username: Option<String>,
 }
 
 /// Names are rendered as text only, so the limits are length and no control
@@ -147,18 +150,23 @@ pub fn validate_name(raw: &str) -> Result<String> {
 }
 
 /// The player for a verified cookie id, or a brand new player when the id is
-/// missing or unknown.
+/// missing or unknown. The player cookie only ever names an anonymous
+/// player: once that player becomes an account, only a session reaches it
+/// (ACCT-7).
 pub async fn ensure_player(db: &DbPool, id: Option<&str>) -> Result<(Player, bool)> {
     if let Some(id) = id {
-        let row = sqlx::query("UPDATE players SET last_seen = now() WHERE id = $1 RETURNING name")
-            .bind(id)
-            .fetch_optional(db)
-            .await?;
+        let row = sqlx::query(
+            "UPDATE players SET last_seen = now() WHERE id = $1 AND username IS NULL RETURNING name",
+        )
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
         if let Some(row) = row {
             return Ok((
                 Player {
                     id: id.to_string(),
                     name: row.get("name"),
+                    username: None,
                 },
                 false,
             ));
@@ -171,10 +179,42 @@ pub async fn ensure_player(db: &DbPool, id: Option<&str>) -> Result<(Player, boo
         .bind(&name)
         .execute(db)
         .await?;
-    Ok((Player { id, name }, true))
+    Ok((
+        Player {
+            id,
+            name,
+            username: None,
+        },
+        true,
+    ))
 }
 
-/// Rename a player and refresh every room they are in.
+/// Whether a verified player cookie id still names an anonymous player
+/// (ACCT-7).
+pub async fn is_anonymous(db: &DbPool, id: &str) -> Result<bool> {
+    let found: Option<bool> =
+        sqlx::query_scalar("SELECT username IS NULL FROM players WHERE id = $1")
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
+    Ok(found == Some(true))
+}
+
+/// Notify every room the player is a current member of.
+pub async fn notify_rooms_of(tx: &mut Tx<'_>, player: &str) -> Result<()> {
+    let rooms: Vec<i64> = sqlx::query_scalar(
+        "SELECT room_id FROM room_members WHERE player_id = $1 AND left_at IS NULL AND NOT removed",
+    )
+    .bind(player)
+    .fetch_all(&mut **tx)
+    .await?;
+    for room in rooms {
+        notify(tx, room).await?;
+    }
+    Ok(())
+}
+
+/// Set a player's default display name and refresh every room they are in.
 pub async fn set_name(db: &DbPool, player: &str, raw: &str) -> Result<String> {
     let name = validate_name(raw)?;
     let mut tx = db.begin().await?;
@@ -183,17 +223,35 @@ pub async fn set_name(db: &DbPool, player: &str, raw: &str) -> Result<String> {
         .bind(player)
         .execute(&mut *tx)
         .await?;
-    let rooms: Vec<i64> = sqlx::query_scalar(
-        "SELECT room_id FROM room_members WHERE player_id = $1 AND left_at IS NULL AND NOT removed",
-    )
-    .bind(player)
-    .fetch_all(&mut *tx)
-    .await?;
-    for room in rooms {
-        notify(&mut tx, room).await?;
-    }
+    notify_rooms_of(&mut tx, player).await?;
     tx.commit().await?;
     Ok(name)
+}
+
+/// Set a member's display name for one room, over their default (ACCT-12).
+/// A blank name clears it, so the default shows again.
+pub async fn set_room_name(db: &DbPool, room: &Room, player: &str, raw: &str) -> Result<()> {
+    let name = match raw.trim() {
+        "" => None,
+        _ => Some(validate_name(raw)?),
+    };
+    let mut tx = db.begin().await?;
+    let n = sqlx::query(
+        "UPDATE room_members SET name = $3
+         WHERE room_id = $1 AND player_id = $2 AND left_at IS NULL AND NOT removed",
+    )
+    .bind(room.id)
+    .bind(player)
+    .bind(name)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(ApiError::forbidden("join the room first"));
+    }
+    notify(&mut tx, room.id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -582,15 +640,24 @@ async fn forfeit(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<()> {
 pub async fn leave(db: &DbPool, room: &Room, player: &str) -> Result<()> {
     let mut tx = db.begin().await?;
     let room = lock_room(&mut tx, room.id).await?;
-    forfeit(&mut tx, &room, player).await?;
+    leave_locked(&mut tx, &room, player).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// [`leave`] inside the caller's transaction, with the room locked. True
+/// when the player was the host and handed the role on.
+async fn leave_locked(tx: &mut Tx<'_>, room: &Room, player: &str) -> Result<bool> {
+    forfeit(tx, room, player).await?;
     sqlx::query(
         "UPDATE room_members SET left_at = now(), present_until = NULL
          WHERE room_id = $1 AND player_id = $2",
     )
     .bind(room.id)
     .bind(player)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
+    let mut handed = false;
     if room.host == player {
         // longest-standing present member first, then anyone still here;
         // never a bot (BOT-2)
@@ -603,18 +670,66 @@ pub async fn leave(db: &DbPool, room: &Room, player: &str) -> Result<()> {
         )
         .bind(room.id)
         .bind(player)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         if let Some(next) = next {
             sqlx::query("UPDATE rooms SET host_player_id = $1 WHERE id = $2")
                 .bind(next)
                 .bind(room.id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
+            handed = true;
         }
     }
-    notify(&mut tx, room.id).await?;
-    tx.commit().await?;
+    notify(tx, room.id).await?;
+    Ok(handed)
+}
+
+/// Take a player out of every room before their account is deleted
+/// (ACCT-16): leave each one, forfeiting a running game. A room the player
+/// still hosts, with no one here to take over, goes to whoever joined it
+/// first and was not removed, as a placeholder until the next join takes the
+/// role (ROOM-20). A room with no such member is deleted. Rooms are locked in
+/// id order.
+pub async fn leave_everywhere(tx: &mut Tx<'_>, player: &str) -> Result<()> {
+    let rooms: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM rooms WHERE host_player_id = $1
+         UNION SELECT room_id FROM room_members WHERE player_id = $1
+         ORDER BY 1",
+    )
+    .bind(player)
+    .fetch_all(&mut **tx)
+    .await?;
+    for id in rooms {
+        let room = lock_room(tx, id).await?;
+        if leave_locked(tx, &room, player).await? || room.host != player {
+            continue;
+        }
+        let next: Option<String> = sqlx::query_scalar(
+            "SELECT m.player_id FROM room_members m JOIN players p ON p.id = m.player_id
+             WHERE m.room_id = $1 AND m.player_id <> $2 AND NOT m.removed AND NOT p.bot
+             ORDER BY m.joined LIMIT 1",
+        )
+        .bind(room.id)
+        .bind(player)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match next {
+            Some(next) => {
+                sqlx::query("UPDATE rooms SET host_player_id = $1 WHERE id = $2")
+                    .bind(next)
+                    .bind(room.id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            None => {
+                sqlx::query("DELETE FROM rooms WHERE id = $1")
+                    .bind(room.id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -660,7 +775,7 @@ pub async fn add_bot(db: &DbPool, room: &Room, host: &str, level: bot::Level) ->
         return Err(ApiError::forbidden("only the host can add bots"));
     }
     let members: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT p.name, p.bot FROM room_members m JOIN players p ON p.id = m.player_id
+        "SELECT coalesce(m.name, p.name), p.bot FROM room_members m JOIN players p ON p.id = m.player_id
          WHERE m.room_id = $1 AND m.left_at IS NULL AND NOT m.removed",
     )
     .bind(room.id)
@@ -745,8 +860,10 @@ async fn lock_game(tx: &mut Tx<'_>, room_id: i64) -> Result<Option<(i64, Game)>>
 }
 
 /// The single statement behind [`save`]: game state, its events, the stat
-/// deltas, the room's activity, and the notify. The stat columns come from
-/// a fixed enum, never from input.
+/// deltas for the room and each player's lifetime totals (STAT-7), match
+/// time bands, partners once a game scores, the room's activity, and the
+/// notify. Bots get no lifetime rows. The stat columns come from a fixed
+/// enum, never from input.
 static SAVE_SQL: LazyLock<String> = LazyLock::new(|| {
     let cols: Vec<&str> = Stat::ALL.iter().map(Stat::column).collect();
     let list = cols.join(", ");
@@ -760,11 +877,13 @@ static SAVE_SQL: LazyLock<String> = LazyLock::new(|| {
         .map(|c| format!("s.{c}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let sums = cols
-        .iter()
-        .map(|c| format!("{c} = room_stats.{c} + excluded.{c}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let sums = |table: &str| {
+        cols.iter()
+            .map(|c| format!("{c} = {table}.{c} + excluded.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (room_sums, player_sums) = (sums("room_stats"), sums("player_stats"));
     format!(
         "WITH g AS (
              UPDATE games SET state = $1, status = $2, version = version + 1,
@@ -780,7 +899,28 @@ static SAVE_SQL: LazyLock<String> = LazyLock::new(|| {
              INSERT INTO room_stats (room_id, player_id, {list})
              SELECT $5, s.player, {from_s}
              FROM jsonb_to_recordset($6) AS s(player text, {typed})
-             ON CONFLICT (room_id, player_id) DO UPDATE SET {sums}
+             ON CONFLICT (room_id, player_id) DO UPDATE SET {room_sums}
+         ), ps AS (
+             INSERT INTO player_stats (player_id, {list})
+             SELECT s.player, {from_s}
+             FROM jsonb_to_recordset($6) AS s(player text, {typed})
+                 JOIN players p ON p.id = s.player AND NOT p.bot
+             ON CONFLICT (player_id) DO UPDATE SET {player_sums}
+         ), mt AS (
+             INSERT INTO player_match_times (player_id, band, n)
+             SELECT t.player, t.band, t.n
+             FROM jsonb_to_recordset($10) AS t(player text, band smallint, n int)
+                 JOIN players p ON p.id = t.player AND NOT p.bot
+             ON CONFLICT (player_id, band) DO UPDATE SET n = player_match_times.n + excluded.n
+         ), pp AS (
+             INSERT INTO player_partners (player_id, other_id, games)
+             SELECT a.id, b.id, 1
+             FROM jsonb_array_elements_text($11) AS a(id)
+                 JOIN jsonb_array_elements_text($11) AS b(id) ON a.id <> b.id
+                 JOIN players pa ON pa.id = a.id AND NOT pa.bot
+                 JOIN players pb ON pb.id = b.id AND NOT pb.bot
+             ON CONFLICT (player_id, other_id)
+                 DO UPDATE SET games = player_partners.games + 1, last_played = now()
          ), r AS (
              UPDATE rooms SET last_active = now(), last_winner = coalesce($7, last_winner),
                  history = coalesce($9, history)
@@ -833,12 +973,15 @@ async fn save(
         .map(|e| json!({ "player": e.player, "kind": e.kind, "payload": e.payload }))
         .collect();
     let winner = game.winners().first().map(|w| w.to_string());
-    // the game just scored adds its result to the room's history (SET-14)
-    let history = out
-        .events
-        .iter()
-        .any(|e| e.kind == "scored")
-        .then(|| room.history_after(game));
+    // the game just scored adds its result to the room's history (SET-14),
+    // and its players to each other's partners (STAT-10)
+    let scored = out.events.iter().any(|e| e.kind == "scored");
+    let history = scored.then(|| room.history_after(game));
+    let partners: Vec<&str> = if scored {
+        game.seats.iter().map(|s| s.player.as_str()).collect()
+    } else {
+        vec![]
+    };
     sqlx::query(&SAVE_SQL)
         .bind(serde_json::to_value(game)?)
         .bind(game.status.as_str())
@@ -849,6 +992,8 @@ async fn save(
         .bind(winner)
         .bind(NOTIFY_CHANNEL)
         .bind(history)
+        .bind(stats::band_rows(&out.match_times))
+        .bind(json!(partners))
         .fetch_one(&mut **tx)
         .await?;
     Ok(())
@@ -1185,6 +1330,10 @@ pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
     sqlx::query("DELETE FROM client_keys WHERE first_seen < now() - interval '1 day'")
         .execute(db)
         .await?;
+    sqlx::query("DELETE FROM sessions WHERE expires <= now()")
+        .execute(db)
+        .await?;
+    crate::accounts::forget_login_locks(db).await?;
     // leases left behind by a machine that died mid-socket
     sqlx::query("DELETE FROM room_observers WHERE until <= now()")
         .execute(db)
@@ -1202,6 +1351,51 @@ pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
     .await?;
     Ok(rooms)
 }
+
+/// Days an anonymous player is kept after it was last seen, or after it was
+/// last seen without ever playing a game (ACCT-21).
+pub const ANONYMOUS_DAYS: i32 = 90;
+pub const UNPLAYED_DAYS: i32 = 7;
+
+/// Forget anonymous players gone quiet (ACCT-21): with them go their stats,
+/// match times, and partner rows, and their partners count those games as
+/// games with someone no longer here. A player still in a room, current or
+/// past, waits for the room to be deleted first, so no game or host loses
+/// a player it refers to. Returns how many were forgotten.
+pub async fn forget_anonymous_players(db: &DbPool) -> Result<u64> {
+    let forgotten: i64 = sqlx::query_scalar(&format!(
+        "WITH gone AS (
+             DELETE FROM players p
+             WHERE p.username IS NULL AND NOT p.bot
+                 AND p.last_seen < now() - make_interval(days => $1)
+                 AND (p.last_seen < now() - make_interval(days => $2)
+                      OR NOT EXISTS (SELECT 1 FROM player_stats s WHERE s.player_id = p.id))
+                 AND NOT EXISTS (SELECT 1 FROM room_members m WHERE m.player_id = p.id)
+                 AND NOT EXISTS (SELECT 1 FROM rooms r WHERE r.host_player_id = p.id)
+             RETURNING p.id
+         ), folded AS ({FOLD_PARTNERS_GONE})
+         SELECT count(*) FROM gone"
+    ))
+    .bind(UNPLAYED_DAYS)
+    .bind(ANONYMOUS_DAYS)
+    .fetch_one(db)
+    .await?;
+    Ok(forgotten as u64)
+}
+
+/// Fold the partner rows of the players in a `gone` CTE (column `id`) into
+/// each remaining partner's games with players no longer here (STAT-10).
+/// Every statement in one query sees the rows before its deletes, so this
+/// works beside the delete that takes those rows away.
+pub const FOLD_PARTNERS_GONE: &str =
+    "INSERT INTO player_partners_gone (player_id, games, last_played)
+     SELECT pp.player_id, sum(pp.games), max(pp.last_played)
+     FROM player_partners pp JOIN gone ON gone.id = pp.other_id
+     WHERE pp.player_id NOT IN (SELECT id FROM gone)
+     GROUP BY pp.player_id
+     ON CONFLICT (player_id) DO UPDATE SET
+         games = player_partners_gone.games + excluded.games,
+         last_played = greatest(player_partners_gone.last_played, excluded.last_played)";
 
 // ---------------------------------------------------------------------------
 // Views
@@ -1235,7 +1429,7 @@ static SNAPSHOT_SQL: LazyLock<String> = LazyLock::new(|| {
                 (SELECT count(*) FROM room_observers o
                  WHERE o.room_id = r.id AND o.until > now()) AS observers,
                 (SELECT coalesce(jsonb_agg(jsonb_build_object(
-                     'id', m.player_id, 'name', p.name, 'removed', m.removed,
+                     'id', m.player_id, 'name', coalesce(m.name, p.name), 'removed', m.removed,
                      'left', m.left_at IS NOT NULL,
                      'present', coalesce(m.present_until > now(), false), 'bot', p.bot,
                      'bot_level', CASE WHEN p.bot THEN p.bot_level END
@@ -1249,9 +1443,10 @@ static SNAPSHOT_SQL: LazyLock<String> = LazyLock::new(|| {
                  FROM (SELECT * FROM game_events WHERE game_id = g.id
                        ORDER BY id DESC LIMIT 40) e) AS events,
                 (SELECT coalesce(jsonb_agg(jsonb_build_object(
-                     'player', s.player_id, 'name', p.name, {stats}
-                 ) ORDER BY s.wins DESC, s.games_played DESC, p.name), '[]')
+                     'player', s.player_id, 'name', coalesce(sm.name, p.name), {stats}
+                 ) ORDER BY s.wins DESC, s.games_played DESC, coalesce(sm.name, p.name)), '[]')
                  FROM room_stats s JOIN players p ON p.id = s.player_id
+                 LEFT JOIN room_members sm ON sm.room_id = s.room_id AND sm.player_id = s.player_id
                  WHERE s.room_id = r.id) AS stats
          FROM rooms r
          LEFT JOIN LATERAL (

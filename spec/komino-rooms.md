@@ -6,8 +6,9 @@ Anonymous cookie-identified players, room creation, share codes, joining, leavin
 
 ### ROOM-1
 A player is identified by a random 128-bit player id stored in an http-only, secure,
-`SameSite=Lax` cookie named `komino_player`, scoped to path `/komino`, max age 365 days. No
-account, email, or password exists.
+`SameSite=Lax` cookie named `komino_player`, scoped to path `/komino`, max age 365 days. An
+anonymous player can become an account with a username and password (ACCT-1), after which a
+session cookie identifies them instead (ACCT-7).
 
 ### ROOM-2
 The cookie is issued on the first request to any `/komino` route that lacks a valid one. A
@@ -19,13 +20,13 @@ The cookie value is the player id signed with `KOMINO_SIGNING_KEY` (hmac). A coo
 signature fails is treated as missing (ROOM-2).
 
 ### ROOM-4
-A player has one display name, shared across all rooms. New players get a generated default
-(e.g. `player-4821`). The name is 1-24 characters after trimming, with no control characters,
-and is rendered as text only.
+A player has a default display name, shared across the rooms they haven't named themselves in
+(ACCT-12). New players get a generated default (e.g. `player-4821`). A name is 1-24 characters
+after trimming, with no control characters, and is rendered as text only.
 
 ### ROOM-5
-A player can change their name at any time, including mid-game. The change is broadcast to
-every room the player is a current member of.
+A player can change their default name at any time, including mid-game. The change is
+broadcast to every room the player is a current member of.
 
 ## Rooms
 

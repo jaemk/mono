@@ -472,6 +472,10 @@ test("komino plays a sealed round with an observer watching", async (t) => {
     json: { type: "swap", slot: 0, turn_seq: view.game.turn_seq },
   });
   assert.notEqual(view.game.seats[view.game.turn].player, turnPlayer, "the turn should pass");
+  // the draw and swap count toward the mover's lifetime stats too
+  const lifetime = await mover.json("GET", "/komino/api/account/stats");
+  assert.equal(lifetime.draws, 1, "a draw counts for life");
+  assert.equal(lifetime.swaps, 1, "a swap counts for life");
 
   // the host matches its own slot 2 against the swapped-out discard; a miss
   // shows the card's value to everyone in a room that shows misses
@@ -681,6 +685,166 @@ test("komino hands an emptied room to the next joiner", async (t) => {
   const joined = await guest.json("POST", `/komino/api/rooms/${code}/join`);
   const me = await guest.json("GET", "/komino/api/me");
   assert.equal(joined.room.host, me.id, "the joiner hosts a room its host left empty");
+});
+
+// sign up itself is left to the integration tests: accounts are never swept,
+// so a live run checks everything around it without leaving one behind
+test("komino offers accounts, room names, and a cookie notice", async (t) => {
+  const host = new Client();
+  const guest = new Client();
+  const page = await expectStatus(await host.get("/komino"), 200, "komino page");
+  for (const id of ["account-btn", "account-form", "account-username", "account-password", "account-switch", "name-label", "cookies", "cookies-ok"]) {
+    assert.match(page, new RegExp(`id="${id}"`), `komino page #${id}`);
+  }
+  const script = await expectStatus(await host.get("/komino/static/app.js"), 200, "komino app.js");
+  for (const word of ["/komino/api/signup", "/komino/api/login", "/komino/api/logout", "komino.cookies"]) {
+    assert.ok(script.includes(word), `komino app.js ${word}`);
+  }
+  await expectStatus(await guest.get("/komino"), 200, "komino page");
+
+  const anon = await host.json("GET", "/komino/api/me");
+  assert.equal(anon.username, null, "a fresh player is anonymous");
+  // wrong logins all read alike and set no session
+  const user = `nobody-${crypto.randomUUID().slice(0, 8)}`;
+  const wrong = await host.json("POST", "/komino/api/login", { json: { username: user, password: "not the password" } }, 401);
+  assert.equal(wrong.message, "wrong username or password");
+  assert.equal(host.cookies.has("komino_session"), false);
+  // sign up checks its input before touching anything
+  for (const bad of [{ username: "ab", password: "long enough pw" }, { username: user, password: "short" }]) {
+    const err = await host.json("POST", "/komino/api/signup", { json: bad }, 400);
+    assert.equal(err.code, "invalid");
+  }
+  assert.equal((await host.json("GET", "/komino/api/me")).id, anon.id, "a refused sign up keeps the player");
+  // signing out with no session is harmless
+  await host.json("POST", "/komino/api/logout");
+  assert.equal((await host.json("GET", "/komino/api/me")).id, anon.id);
+
+  // a room name shows in that room only, and a blank one shows the default
+  await host.json("POST", "/komino/api/me", { json: { name: "accept-host" } });
+  const room = await host.json("POST", "/komino/api/rooms");
+  const code = room.room.code;
+  t.after(async () => {
+    await guest.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+    await host.post(`/komino/api/rooms/${code}/leave`).then((r) => r.text());
+  });
+  await guest.json("POST", `/komino/api/rooms/${code}/join`);
+  const nameIn = (v) => v.members.find((m) => m.id === anon.id).name;
+  assert.equal(nameIn(await host.json("POST", `/komino/api/rooms/${code}/name`, { json: { name: "accept-room" } })), "accept-room");
+  assert.equal(nameIn(await guest.json("GET", `/komino/api/rooms/${code}`)), "accept-room");
+  assert.equal((await host.json("GET", "/komino/api/me")).name, "accept-host", "the default name is unchanged");
+  assert.equal(nameIn(await host.json("POST", `/komino/api/rooms/${code}/name`, { json: { name: " " } })), "accept-host");
+  const outsider = new Client();
+  await expectStatus(await outsider.get("/komino"), 200, "komino page");
+  await outsider.json("POST", `/komino/api/rooms/${code}/name`, { json: { name: "spy" } }, 403);
+});
+
+test("komino accounts sign up, recover, rename, and delete without a trace", async (t) => {
+  const phone = new Client();
+  const laptop = new Client();
+  const tablet = new Client();
+  const page = await expectStatus(await phone.get("/komino/account"), 200, "komino account page");
+  const ids = [
+    "account-page", "password-form", "pw-current", "pw-new", "delete-form", "delete-password", "stats-totals",
+    "stats-partners", "acct-rooms", "username-form", "recovery-form", "sessions-submit", "account-forgot",
+    "account-code", "recovery-code", "acct-devices", "stats-partners-gone",
+  ];
+  for (const id of ids) {
+    assert.match(page, new RegExp(`id="${id}"`), `komino account page #${id}`);
+  }
+  const script = await expectStatus(await phone.get("/komino/static/app.js"), 200, "komino app.js");
+  const urls = [
+    "/komino/api/account/password", "/komino/api/account/delete", "/komino/api/account/stats",
+    "/komino/api/account/username", "/komino/api/account/recover", "/komino/api/account/recovery",
+    "/komino/api/account/sign-out-others", "/komino/api/account/sign-out-device", "\"/komino/api/account\"",
+  ];
+  for (const word of urls) {
+    assert.ok(script.includes(word), `komino app.js ${word}`);
+  }
+  await expectStatus(await laptop.get("/komino"), 200, "komino page");
+  // only an account has a password to change or an account to delete
+  const anon = await laptop.json("POST", "/komino/api/account/password", { json: { current: "x", new: "long enough pw" } }, 401);
+  assert.equal(anon.message, "sign in first");
+  await laptop.json("POST", "/komino/api/account/delete", { json: { password: "x" } }, 401);
+
+  const username = `accept-${crypto.randomUUID().slice(0, 8)}`;
+  let password = "acceptance pw 1";
+  const anonId = (await phone.json("GET", "/komino/api/me")).id;
+  const made = await phone.json("POST", "/komino/api/signup", { json: { username, password } });
+  // the account goes even if a step below fails, from whichever browser is
+  // still signed in to it
+  t.after(async () => {
+    for (const c of [phone, tablet]) {
+      await c.post("/komino/api/account/delete", { json: { password } }).then((r) => r.text()).catch(() => {});
+    }
+  });
+  assert.equal(made.id, anonId, "sign up keeps the player");
+  assert.equal(made.username, username);
+  assert.equal(made.name, username, "the username is the default name");
+  assert.ok(phone.cookies.has("komino_session"), "sign up sets the session cookie");
+  assert.match(made.recovery_code, /^[0-9a-z]{5}(-[0-9a-z]{5}){4}$/, "sign up hands out a recovery code");
+  const info = await phone.json("GET", "/komino/api/account");
+  assert.equal(info.sessions, 1);
+  assert.equal(info.recovery, true);
+  assert.deepEqual(info.rooms, []);
+  // a new account has lifetime stats with nothing in them yet
+  const stats = await phone.json("GET", "/komino/api/account/stats");
+  for (const key of ["games_played", "wins", "draws", "swaps", "views", "matches", "others_matched", "bot_games"]) {
+    assert.equal(stats[key], 0, `lifetime ${key}`);
+  }
+  assert.deepEqual(stats.match_time, { timed: 0, average_ms: null, median_ms: null });
+  assert.deepEqual(stats.partners, []);
+  assert.equal(stats.partners_gone, 0);
+
+  const signedIn = await laptop.json("POST", "/komino/api/login", { json: { username, password } });
+  assert.equal(signedIn.id, anonId, "the account signs in from another browser");
+  const wrong = await phone.json("POST", "/komino/api/account/password", { json: { current: "not it", new: "acceptance pw 2" } }, 401);
+  assert.equal(wrong.message, "wrong password");
+  await phone.json("POST", "/komino/api/account/password", { json: { current: password, new: "acceptance pw 2" } });
+  password = "acceptance pw 2";
+  assert.equal((await phone.json("GET", "/komino/api/me")).id, anonId, "the changing browser stays signed in");
+  assert.notEqual((await laptop.json("GET", "/komino/api/me")).id, anonId, "other sessions end");
+  await laptop.json("POST", "/komino/api/login", { json: { username, password: "acceptance pw 1" } }, 401);
+
+  // signing out the other devices keeps this one
+  await laptop.json("POST", "/komino/api/login", { json: { username, password } });
+  assert.equal((await phone.json("GET", "/komino/api/account")).sessions, 2);
+  assert.equal((await phone.json("POST", "/komino/api/account/sign-out-others")).ended, 1);
+  assert.notEqual((await laptop.json("GET", "/komino/api/me")).id, anonId, "the other device is signed out");
+  assert.equal((await phone.json("GET", "/komino/api/me")).id, anonId);
+
+  // the device list signs out one device at a time, never this one
+  await laptop.json("POST", "/komino/api/login", { json: { username, password } });
+  const { devices } = await phone.json("GET", "/komino/api/account");
+  assert.equal(devices.length, 2);
+  assert.equal(devices[0].current, true, "this device is listed first");
+  assert.equal(typeof devices[1].agent, "string");
+  assert.ok(!Number.isNaN(Date.parse(devices[1].last_used)), "a device has its last use");
+  await phone.json("POST", "/komino/api/account/sign-out-device", { json: { id: devices[0].id } }, 404);
+  await phone.json("POST", "/komino/api/account/sign-out-device", { json: { id: devices[1].id } });
+  assert.notEqual((await laptop.json("GET", "/komino/api/me")).id, anonId, "the chosen device is signed out");
+  assert.equal((await phone.json("GET", "/komino/api/account")).sessions, 1);
+
+  // a new username carries the default name with it
+  const renamed = `${username}-2`;
+  const after = await phone.json("POST", "/komino/api/account/username", { json: { username: renamed, password } });
+  assert.equal(after.username, renamed);
+  assert.equal(after.name, renamed);
+
+  // the recovery code sets a new password once, and hands out the next one
+  await expectStatus(await tablet.get("/komino"), 200, "komino page");
+  const recovered = await tablet.json("POST", "/komino/api/account/recover", {
+    json: { username: renamed, code: made.recovery_code.toUpperCase(), password: "acceptance pw 3" },
+  });
+  password = "acceptance pw 3";
+  assert.equal(recovered.id, anonId, "recovery signs in to the account");
+  assert.notEqual(recovered.recovery_code, made.recovery_code, "a used code is replaced");
+  assert.notEqual((await phone.json("GET", "/komino/api/me")).id, anonId, "recovery ends the other sessions");
+  await phone.json("POST", "/komino/api/login", { json: { username: renamed, password } });
+
+  await phone.json("POST", "/komino/api/account/delete", { json: { password: "not it" } }, 401);
+  await phone.json("POST", "/komino/api/account/delete", { json: { password } });
+  assert.notEqual((await phone.json("GET", "/komino/api/me")).id, anonId, "a deleted account is signed out");
+  await laptop.json("POST", "/komino/api/login", { json: { username: renamed, password } }, 401);
 });
 
 test("komino rejects unknown rooms", async () => {

@@ -20,11 +20,30 @@ where
 {
     Router::new()
         .route("/", get(handlers::index))
+        .route("/account", get(handlers::index))
         .route("/r/{code}", get(handlers::index))
         .route("/r/{code}/ws", get(handlers::ws))
         .route("/r/{code}/watch", get(handlers::index))
         .route("/r/{code}/watch/ws", get(handlers::watch_ws))
         .route("/api/me", get(handlers::me).post(handlers::rename))
+        .route("/api/signup", post(handlers::signup))
+        .route("/api/login", post(handlers::login))
+        .route("/api/logout", post(handlers::logout))
+        .route("/api/account", get(handlers::account))
+        .route("/api/account/password", post(handlers::change_password))
+        .route("/api/account/username", post(handlers::change_username))
+        .route("/api/account/recover", post(handlers::recover))
+        .route("/api/account/recovery", post(handlers::new_recovery))
+        .route(
+            "/api/account/sign-out-others",
+            post(handlers::sign_out_others),
+        )
+        .route(
+            "/api/account/sign-out-device",
+            post(handlers::sign_out_device),
+        )
+        .route("/api/account/delete", post(handlers::delete_account))
+        .route("/api/account/stats", get(handlers::account_stats))
         .route("/api/key", get(handlers::server_key))
         .route("/api/rooms/{code}/reveal", post(handlers::reveal))
         .route("/api/rooms", post(handlers::create_room))
@@ -35,6 +54,7 @@ where
         .route("/api/rooms/{code}/remove", post(handlers::remove_member))
         .route("/api/rooms/{code}/unban", post(handlers::unban_member))
         .route("/api/rooms/{code}/bots", post(handlers::add_bot))
+        .route("/api/rooms/{code}/name", post(handlers::room_name))
         .route("/api/rooms/{code}/action", post(handlers::action))
         .nest_service("/static", ServeDir::new("crates/komino/assets/static"))
 }
@@ -85,7 +105,7 @@ const LEADER_RETRY: Duration = Duration::from_secs(5);
 const LEADER_CHECK_TICKS: u64 = 15;
 
 /// Fire ready, away, scoring, and match window deadlines, and drop rooms
-/// idle for 30 days. One machine at a time sweeps: it takes the advisory
+/// idle for 30 days and quiet anonymous players. One machine at a time sweeps: it takes the advisory
 /// lock once on a dedicated connection and keeps it while that connection
 /// lives. Each due game is still re-checked under its row lock, so a deadline
 /// applies once even if two machines briefly both sweep.
@@ -135,6 +155,11 @@ async fn lead(state: &State) -> Result<(), sqlx::Error> {
                 Ok(n) => info!("deleted {n} idle komino rooms"),
                 Err(e) => error!("komino room cleanup error: {e:?}"),
             }
+            match models::forget_anonymous_players(&state.db).await {
+                Ok(0) => {}
+                Ok(n) => info!("forgot {n} quiet anonymous komino players"),
+                Err(e) => error!("komino player cleanup error: {e:?}"),
+            }
         }
     }
 }
@@ -148,6 +173,7 @@ pub async fn init(config: crate::Config) -> anyhow::Result<State> {
         config,
         hub: Default::default(),
         server_key,
+        limiter: Default::default(),
     });
     init_listener(state.clone());
     init_sweeper(state.clone());
