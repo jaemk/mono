@@ -156,7 +156,7 @@ Accounts are never deleted this way.
 ### ACCT-22
 Every request that checks or sets a password (sign up, sign in, recovery, a new recovery code,
 password and username changes, and deletion) draws from a bucket per client address, as the
-`fly-client-ip` header gives it: 30 at once, refilled one every 2 seconds, per machine. An empty
+`fly-client-ip` header gives it, with an IPv6 address counted by its /64: 30 at once, refilled one every 2 seconds, per machine. An empty
 bucket gets `429 slow_down` before any password work. A machine runs at most half its cores'
 worth of password hashes at once; a request that waits 10 seconds for one gets `503 busy`.
 

@@ -182,14 +182,31 @@ impl Limiter {
     /// refused. A request without an address (not through the proxy) is
     /// left to the hashing slots.
     pub fn check(&self, addr: Option<&str>) -> Result<()> {
-        match addr {
-            Some(addr) if !self.take(addr, Instant::now()) => Err(ApiError::new(
+        match addr.map(limit_key) {
+            Some(key) if !self.take(&key, Instant::now()) => Err(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "slow_down",
                 "too many attempts, try again in a minute",
             )),
             _ => Ok(()),
         }
+    }
+}
+
+/// The bucket a client address draws from (ACCT-22). An IPv6 client
+/// usually holds a whole /64, so the /64 shares one bucket.
+pub fn limit_key(addr: &str) -> String {
+    use std::net::IpAddr;
+    match addr.trim().parse::<IpAddr>() {
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        Ok(IpAddr::V4(v4)) => v4.to_string(),
+        Err(_) => addr.trim().to_string(),
     }
 }
 
@@ -382,7 +399,9 @@ pub async fn login(db: &DbPool, username: &str, password: &str) -> Result<(Playe
         .fetch_optional(db)
         .await?;
     let Some(row) = row else {
-        verify_password(password.to_string(), DUMMY_HASH.clone()).await?;
+        // the dummy hash is first made inside the slot too, never on a worker
+        let pw = password.to_string();
+        hashing(move || common::crypto::verify_password(pw.as_bytes(), &DUMMY_HASH)).await?;
         return Err(unauthorized());
     };
     let id: String = row.get("id");
@@ -742,6 +761,28 @@ mod tests {
             assert!(limiter.take("a", later));
         }
         assert!(!limiter.take("a", later));
+    }
+
+    #[test]
+    fn an_ipv6_slash_64_shares_one_bucket() {
+        assert_eq!(limit_key("1.2.3.4"), "1.2.3.4");
+        assert_eq!(limit_key(" 1.2.3.4 "), "1.2.3.4");
+        assert_eq!(limit_key("::ffff:1.2.3.4"), "1.2.3.4");
+        assert_eq!(
+            limit_key("2001:db8:1:2:aaaa::1"),
+            limit_key("2001:db8:1:2:bbbb:cccc:dddd:eeee")
+        );
+        assert_eq!(limit_key("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+        assert_ne!(limit_key("2001:db8:1:2::1"), limit_key("2001:db8:1:3::1"));
+        assert_eq!(limit_key("not an address"), "not an address");
+        let limiter = Limiter::default();
+        for i in 0..AUTH_BURST as usize {
+            assert!(limiter.check(Some(&format!("2001:db8::{i:x}"))).is_ok());
+        }
+        assert_eq!(
+            limiter.check(Some("2001:db8::ffff")).unwrap_err().code,
+            "slow_down"
+        );
     }
 
     #[test]
