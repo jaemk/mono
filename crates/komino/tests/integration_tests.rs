@@ -2439,7 +2439,7 @@ async fn test_wrong_logins_fail_alike_and_lock_the_account() {
     resp.assert_status(StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(resp.json::<Value>()["code"], "locked");
     // until the lock runs out
-    sqlx::query("UPDATE players SET locked_until = now() - interval '1 second'")
+    sqlx::query("UPDATE login_locks SET locked_until = now() - interval '1 second'")
         .execute(&state.db)
         .await
         .unwrap();
@@ -2448,6 +2448,67 @@ async fn test_wrong_logins_fail_alike_and_lock_the_account() {
         .assert_status_ok();
     // sessions already open were untouched by the lock
     assert_eq!(me(&owner).await, owner_id);
+}
+
+#[tokio::test]
+async fn test_wrong_passwords_lock_only_the_address_they_came_from() {
+    let state = get_state().await;
+    let owner = client(&state);
+    signup(&owner, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let from = |addr: &'static str, pw: &'static str| {
+        let s = client(&state);
+        async move {
+            s.post("/api/login")
+                .add_header(komino::handlers::CLIENT_IP_HEADER, addr)
+                .json(&json!({ "username": "ada", "password": pw }))
+                .await
+        }
+    };
+    for _ in 0..komino::accounts::MAX_FAILED_LOGINS {
+        from("6.6.6.6", "wrong horse")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    let resp = from("6.6.6.6", "correct horse").await;
+    resp.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.json::<Value>()["code"], "locked");
+    // the owner signs in from home all the same, and an IPv6 neighbor of
+    // the stranger's /64 is locked with it
+    from("1.2.3.4", "correct horse").await.assert_status_ok();
+    for _ in 0..komino::accounts::MAX_FAILED_LOGINS {
+        from("2001:db8::1", "wrong horse")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    from("2001:db8::2", "correct horse")
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    from("2001:db8:1::1", "correct horse")
+        .await
+        .assert_status_ok();
+    // counts and locks gone quiet are swept, live locks are kept
+    sqlx::query("UPDATE login_locks SET updated = now() - interval '2 days'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        komino::accounts::forget_login_locks(&state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("UPDATE login_locks SET locked_until = now() - interval '1 second'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        komino::accounts::forget_login_locks(&state.db)
+            .await
+            .unwrap(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -2782,6 +2843,12 @@ async fn test_deleting_an_account_leaves_every_room_and_frees_the_username() {
         .unwrap()
         .iter()
         .any(|s| s["player"] == id.as_str()));
+    // the forfeited game stays in the guest's lifetime stats, played with
+    // someone no longer here
+    let stats = lifetime(&guest).await;
+    assert_eq!(stats["games_played"], 1);
+    assert_eq!(stats["partners"], json!([]));
+    assert_eq!(stats["partners_gone"], 1);
     // a room with no one else is gone, and one whose members all left goes
     // to one of them until the next join
     assert_eq!(host_of(&state, &alone).await, None);
@@ -3204,6 +3271,84 @@ async fn test_signing_out_other_devices_keeps_this_one() {
 }
 
 #[tokio::test]
+async fn test_the_account_page_lists_devices_to_sign_out_one_by_one() {
+    let state = get_state().await;
+    let server = client(&state);
+    signup(&server, "ada", "correct horse")
+        .await
+        .assert_status_ok();
+    let id = me(&server).await;
+    let sign_in = |s: &TestServer, agent: &str| {
+        s.post("/api/login")
+            .add_header("user-agent", agent.to_string())
+            .json(&json!({ "username": "ada", "password": "correct horse" }))
+    };
+    let laptop = client(&state);
+    let phone = client(&state);
+    sign_in(&laptop, "Mozilla/5.0 (X11; Linux x86_64) Firefox/131.0")
+        .await
+        .assert_status_ok();
+    let long = format!("Phone\t{}", "x".repeat(500));
+    sign_in(&phone, &long).await.assert_status_ok();
+    let info = account_info(&laptop).await;
+    assert_eq!(info["sessions"], 3);
+    let devices = info["devices"].as_array().unwrap().clone();
+    // this device first, and only it is current
+    assert_eq!(devices[0]["current"], true);
+    assert_eq!(
+        devices[0]["agent"],
+        "Mozilla/5.0 (X11; Linux x86_64) Firefox/131.0"
+    );
+    assert!(devices[1..].iter().all(|d| d["current"] == false));
+    assert!(devices[0]["last_used"].is_string());
+    let phone_row = devices
+        .iter()
+        .find(|d| d["agent"].as_str().unwrap().starts_with("Phone"))
+        .unwrap();
+    // cut short, with no control characters
+    let agent = phone_row["agent"].as_str().unwrap();
+    assert_eq!(agent.chars().count(), komino::accounts::MAX_AGENT_CHARS);
+    assert!(agent.starts_with("Phonexxx"));
+    let out = |s: &TestServer, device: &Value| {
+        s.post("/api/account/sign-out-device")
+            .json(&json!({ "id": device.clone() }))
+    };
+    // not this device, not another account's, not anonymously
+    out(&laptop, &devices[0]["id"])
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let other = client(&state);
+    signup(&other, "grace", "hunter2222")
+        .await
+        .assert_status_ok();
+    out(&other, &phone_row["id"])
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    out(&client(&state), &phone_row["id"])
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    out(&laptop, &phone_row["id"]).await.assert_status_ok();
+    assert_ne!(me(&phone).await, id);
+    assert_eq!(me(&laptop).await, id);
+    assert_eq!(me(&server).await, id);
+    assert_eq!(account_info(&laptop).await["sessions"], 2);
+    // a session in use has its last use written, at most hourly
+    sqlx::query("UPDATE sessions SET last_used = now() - interval '2 hours'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    me(&server).await;
+    let stale: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sessions WHERE last_used < now() - interval '1 hour'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    // the laptop's and the other account's, not the one just used
+    assert_eq!(stale, 2);
+}
+
+#[tokio::test]
 async fn test_changing_the_username() {
     let state = get_state().await;
     let (host, guest, code) = room_of_two(&state).await;
@@ -3303,7 +3448,26 @@ async fn test_the_account_page_lists_the_rooms_you_are_in() {
             )
         })
         .collect();
-    assert_eq!(rooms, vec![(code, true, 2, true), (quiet, false, 2, false)]);
+    assert_eq!(
+        rooms,
+        vec![(code.clone(), true, 2, true), (quiet, false, 2, false)]
+    );
+    // with the player's games and wins in each, 0 before any
+    assert_eq!(info["rooms"][1]["games"], 0);
+    assert_eq!(info["rooms"][1]["wins"], 0);
+    sqlx::query(
+        "INSERT INTO room_stats (room_id, player_id, games_played, wins)
+         SELECT id, $1, 3, 2 FROM rooms WHERE code = $2
+         ON CONFLICT (room_id, player_id) DO UPDATE SET games_played = 3, wins = 2",
+    )
+    .bind(me(&host).await)
+    .bind(&code)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let info = account_info(&host).await;
+    assert_eq!(info["rooms"][0]["games"], 3);
+    assert_eq!(info["rooms"][0]["wins"], 2);
     assert_eq!(account_info(&client(&state)).await["rooms"], json!([]));
 }
 
@@ -3401,7 +3565,9 @@ async fn test_quiet_anonymous_players_are_forgotten() {
          INSERT INTO player_stats (player_id, games_played) VALUES
              ('played_long_ago', 1), ('played_lately', 1);
          INSERT INTO player_partners (player_id, other_id, games) VALUES
-             ('played_long_ago', 'played_lately', 1), ('played_lately', 'played_long_ago', 1);",
+             ('played_long_ago', 'played_lately', 2), ('played_lately', 'played_long_ago', 2),
+             ('never_played', 'played_lately', 1), ('played_lately', 'never_played', 1),
+             ('played_long_ago', 'never_played', 5), ('never_played', 'played_long_ago', 5);",
     )
     .execute(&state.db)
     .await
@@ -3429,10 +3595,22 @@ async fn test_quiet_anonymous_players_are_forgotten() {
     ];
     want.sort();
     assert_eq!(left, want);
-    // their partner rows went with them
+    // their partner rows went with them, and the partner left behind keeps
+    // the games as games with someone no longer here
     let partners: i64 = sqlx::query_scalar("SELECT count(*) FROM player_partners")
         .fetch_one(&state.db)
         .await
         .unwrap();
     assert_eq!(partners, 0);
+    let gone: Vec<(String, i32)> =
+        sqlx::query_as("SELECT player_id, games FROM player_partners_gone")
+            .fetch_all(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(gone, vec![("played_lately".to_string(), 3)]);
+    let stats = komino::stats::player_stats(&state.db, "played_lately")
+        .await
+        .unwrap();
+    assert_eq!(stats["partners"], json!([]));
+    assert_eq!(stats["partners_gone"], 3);
 }

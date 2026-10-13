@@ -79,7 +79,9 @@ pub async fn player_stats(db: &DbPool, player: &str) -> Result<Value> {
               ) ORDER BY pp.games DESC, pp.last_played DESC), '[]')
               FROM (SELECT * FROM player_partners WHERE player_id = $1
                     ORDER BY games DESC, last_played DESC LIMIT $2) pp
-                  JOIN players p ON p.id = pp.other_id) AS partners",
+                  JOIN players p ON p.id = pp.other_id) AS partners,
+             coalesce((SELECT games FROM player_partners_gone WHERE player_id = $1), 0)
+                 AS partners_gone",
     )
     .bind(player)
     .bind(PARTNERS_SHOWN)
@@ -117,6 +119,11 @@ pub async fn player_stats(db: &DbPool, player: &str) -> Result<Value> {
         }),
     );
     totals.insert("partners".into(), row.get("partners"));
+    // games with partners since forgotten or deleted (STAT-10)
+    totals.insert(
+        "partners_gone".into(),
+        json!(row.get::<i32, _>("partners_gone")),
+    );
     Ok(Value::Object(totals))
 }
 

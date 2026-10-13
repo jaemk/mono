@@ -97,6 +97,9 @@ button.danger { color: var(--accent); border-color: var(--accent); }
 .acct-room-list { margin: 0; padding-left: 22px; }
 .acct-room-list a { font-family: ui-monospace, monospace; font-weight: 600; }
 .acct-room-list .about { color: var(--muted); font-size: 13px; }
+.acct-device-list { margin: 0 0 8px; padding-left: 22px; }
+.acct-device-list li { margin: 4px 0; }
+.acct-device-list .about { color: var(--muted); font-size: 13px; }
 .recovery-code { display: block; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
   font-size: 18px; text-align: center; overflow-wrap: anywhere; user-select: all; }
 button.link { background: none; border: 0; padding: 4px; color: var(--muted); text-decoration: underline; }

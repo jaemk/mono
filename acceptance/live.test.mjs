@@ -746,7 +746,7 @@ test("komino accounts sign up, recover, rename, and delete without a trace", asy
   const ids = [
     "account-page", "password-form", "pw-current", "pw-new", "delete-form", "delete-password", "stats-totals",
     "stats-partners", "acct-rooms", "username-form", "recovery-form", "sessions-submit", "account-forgot",
-    "account-code", "recovery-code",
+    "account-code", "recovery-code", "acct-devices", "stats-partners-gone",
   ];
   for (const id of ids) {
     assert.match(page, new RegExp(`id="${id}"`), `komino account page #${id}`);
@@ -755,7 +755,7 @@ test("komino accounts sign up, recover, rename, and delete without a trace", asy
   const urls = [
     "/komino/api/account/password", "/komino/api/account/delete", "/komino/api/account/stats",
     "/komino/api/account/username", "/komino/api/account/recover", "/komino/api/account/recovery",
-    "/komino/api/account/sign-out-others", "\"/komino/api/account\"",
+    "/komino/api/account/sign-out-others", "/komino/api/account/sign-out-device", "\"/komino/api/account\"",
   ];
   for (const word of urls) {
     assert.ok(script.includes(word), `komino app.js ${word}`);
@@ -793,6 +793,7 @@ test("komino accounts sign up, recover, rename, and delete without a trace", asy
   }
   assert.deepEqual(stats.match_time, { timed: 0, average_ms: null, median_ms: null });
   assert.deepEqual(stats.partners, []);
+  assert.equal(stats.partners_gone, 0);
 
   const signedIn = await laptop.json("POST", "/komino/api/login", { json: { username, password } });
   assert.equal(signedIn.id, anonId, "the account signs in from another browser");
@@ -810,6 +811,18 @@ test("komino accounts sign up, recover, rename, and delete without a trace", asy
   assert.equal((await phone.json("POST", "/komino/api/account/sign-out-others")).ended, 1);
   assert.notEqual((await laptop.json("GET", "/komino/api/me")).id, anonId, "the other device is signed out");
   assert.equal((await phone.json("GET", "/komino/api/me")).id, anonId);
+
+  // the device list signs out one device at a time, never this one
+  await laptop.json("POST", "/komino/api/login", { json: { username, password } });
+  const { devices } = await phone.json("GET", "/komino/api/account");
+  assert.equal(devices.length, 2);
+  assert.equal(devices[0].current, true, "this device is listed first");
+  assert.equal(typeof devices[1].agent, "string");
+  assert.ok(!Number.isNaN(Date.parse(devices[1].last_used)), "a device has its last use");
+  await phone.json("POST", "/komino/api/account/sign-out-device", { json: { id: devices[0].id } }, 404);
+  await phone.json("POST", "/komino/api/account/sign-out-device", { json: { id: devices[1].id } });
+  assert.notEqual((await laptop.json("GET", "/komino/api/me")).id, anonId, "the chosen device is signed out");
+  assert.equal((await phone.json("GET", "/komino/api/account")).sessions, 1);
 
   // a new username carries the default name with it
   const renamed = `${username}-2`;

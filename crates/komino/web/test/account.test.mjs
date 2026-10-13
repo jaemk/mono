@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { boot, flush, makeView, member } from "../helpers.mjs";
+import { boot, flush, komino, makeView, member } from "../helpers.mjs";
+
+const { deviceName, ago } = komino;
 
 const signedIn = { id: "p0", name: "ada", username: "ada" };
 
@@ -230,8 +232,8 @@ const info = (over = {}) => ({ id: "p0", name: "ada", username: "ada", sessions:
 test("the account page lists your rooms, for an anonymous player too", async (t) => {
   const rooms = [
     { code: "ABCDEF", host: true, members: 3, playing: true },
-    { code: "GHJKMN", host: false, members: 1, playing: false },
-    { code: "<b>x</b>", host: false, members: 2, playing: false },
+    { code: "GHJKMN", host: false, members: 1, playing: false, games: 4, wins: 1 },
+    { code: "<b>x</b>", host: false, members: 2, playing: false, games: 0, wins: 0 },
   ];
   const page = await boot({
     path: "/komino/account",
@@ -241,7 +243,7 @@ test("the account page lists your rooms, for an anonymous player too", async (t)
   const items = [...page.$("acct-rooms").querySelectorAll("li")];
   assert.deepEqual(
     items.map((li) => li.textContent),
-    ["ABCDEF host, 3 players, playing", "GHJKMN 1 player", "<b>x</b> 2 players"],
+    ["ABCDEF host, 3 players, playing", "GHJKMN 1 player, you played 4 games, won 1", "<b>x</b> 2 players"],
   );
   assert.equal(items[0].querySelector("a").getAttribute("href"), "/komino/r/ABCDEF");
   assert.equal(page.$("acct-rooms").querySelector("b"), null);
@@ -282,6 +284,68 @@ test("an account sees its devices and can sign the others out", async (t) => {
   assert.equal(page.$("acct-sessions").textContent, "(1 device)");
   // nothing left to sign out
   assert.equal(page.$("sessions-submit").disabled, true);
+});
+
+test("an account signs out one device from the device list", async (t) => {
+  const hour = 3600 * 1000;
+  const at = (ms) => new Date(Date.now() - ms).toISOString();
+  let devices = [
+    { id: 1, agent: "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/131.0", last_used: at(0), current: true },
+    { id: 7, agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Version/17.0 Mobile Safari/604.1", last_used: at(3 * hour), current: false },
+    { id: 9, agent: "<b>x</b>", last_used: at(50 * hour), current: false },
+  ];
+  const page = await boot({
+    path: "/komino/account",
+    me: signedIn,
+    routes: {
+      "GET /komino/api/account": () => [200, info({ sessions: devices.length, devices })],
+      "POST /komino/api/account/sign-out-device": () => {
+        devices = devices.filter((d) => d.id !== 7);
+        return [200, { ok: true }];
+      },
+    },
+  });
+  t.after(page.stop);
+  const rows = () => [...page.$("acct-devices").querySelectorAll("li")];
+  assert.deepEqual(
+    rows().map((li) => li.textContent),
+    ["Firefox on Linux this device", "Safari on iOS last used 3 hours ago sign out", "<b>x</b> last used 2 days ago sign out"],
+  );
+  assert.equal(page.$("acct-devices").querySelector("b"), null);
+  // this device has no sign out button; sign out ends it instead
+  assert.equal(rows()[0].querySelector("button"), null);
+  rows()[1].querySelector("button").click();
+  await flush();
+  const calls = page.callsTo("POST /komino/api/account/sign-out-device");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].body, { id: 7 });
+  assert.equal(page.toast(), "signed out that device");
+  assert.equal(rows().length, 2);
+  assert.equal(page.$("acct-sessions").textContent, "(2 devices)");
+  // a tap beside the buttons does nothing
+  rows()[0].click();
+  await flush();
+  assert.equal(page.callsTo("POST /komino/api/account/sign-out-device").length, 1);
+});
+
+test("a failed sign out of one device says why", async (t) => {
+  const devices = [
+    { id: 1, agent: "", last_used: new Date().toISOString(), current: true },
+    { id: 2, agent: "", last_used: new Date().toISOString(), current: false },
+  ];
+  const page = await boot({
+    path: "/komino/account",
+    me: signedIn,
+    routes: {
+      "GET /komino/api/account": [200, info({ sessions: 2, devices })],
+      "POST /komino/api/account/sign-out-device": [404, { message: "no such device" }],
+    },
+  });
+  t.after(page.stop);
+  page.$("acct-devices").querySelector("button").click();
+  await flush();
+  assert.equal(page.$("sessions-error").textContent, "no such device");
+  assert.equal(page.$("acct-devices").querySelectorAll("li").length, 2);
 });
 
 test("a failed sign out of other devices says why", async (t) => {
@@ -588,12 +652,51 @@ test("stats before any game, and a median in the top band", async (t) => {
   assert.equal(statValue(page, "average match time"), "-");
   assert.equal(statValue(page, "median match time"), "-");
   assert.equal(page.$("stats-partners").textContent, "nobody yet");
+  assert.equal(page.$("stats-partners-gone").hidden, true);
 
   const slow = { ...lifetime, match_time: { timed: 3, average_ms: 6400, median_ms: 5000 } };
   const page2 = await boot({ path: "/komino/account", me: signedIn, routes: { "GET /komino/api/account/stats": [200, slow] } });
   t.after(page2.stop);
   assert.equal(statValue(page2, "average match time"), "6.40s");
   assert.equal(statValue(page2, "median match time"), "5s+");
+});
+
+test("games with players no longer here are counted under the partners", async (t) => {
+  const page = await boot({
+    path: "/komino/account",
+    me: signedIn,
+    routes: { "GET /komino/api/account/stats": [200, { ...lifetime, partners_gone: 3 }] },
+  });
+  t.after(page.stop);
+  assert.equal(page.$("stats-partners").querySelectorAll("li").length, 3);
+  assert.equal(page.$("stats-partners-gone").hidden, false);
+  assert.equal(page.$("stats-partners-gone").textContent, "and 3 games with players no longer here");
+
+  const only = { ...lifetime, partners: [], partners_gone: 1 };
+  const page2 = await boot({ path: "/komino/account", me: signedIn, routes: { "GET /komino/api/account/stats": [200, only] } });
+  t.after(page2.stop);
+  assert.equal(page2.$("stats-partners").textContent, "");
+  assert.equal(page2.$("stats-partners-gone").textContent, "1 game with players no longer here");
+});
+
+test("devices are named from their user agent, and times read roughly", () => {
+  const cases = [
+    ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/129.0 Safari/537.36 Edg/129.0", "Edge on Windows"],
+    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15", "Safari on macOS"],
+    ["Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/129.0 Mobile Safari/537.36", "Chrome on Android"],
+    ["Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) FxiOS/131.0 Mobile/15E148", "Firefox on iOS"],
+    ["curl/8.5.0", "curl/8.5.0"],
+    ["", "unknown device"],
+  ];
+  for (const [agent, name] of cases) assert.equal(deviceName(agent), name, agent);
+  const h = 3600 * 1000;
+  assert.equal(ago(0, 10 * 60 * 1000), "within the hour");
+  assert.equal(ago(0, h), "1 hour ago");
+  assert.equal(ago(0, 23 * h), "23 hours ago");
+  assert.equal(ago(0, 24 * h), "1 day ago");
+  assert.equal(ago(0, 75 * h), "3 days ago");
+  // a clock a little behind the server's is not in the future
+  assert.equal(ago(1000, 0), "within the hour");
 });
 
 test("stats that fail to load say so, and anonymous players see theirs too", async (t) => {

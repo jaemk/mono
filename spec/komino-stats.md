@@ -71,12 +71,14 @@ reads as `5s+`.
 `player_partners` counts, for each pair of players, the games they were seated in together,
 one row each way, added once per game when it scores. It grows with distinct partners, not
 with games. Bots are left out; a player's games with bots are counted instead (STAT-2).
-Deleting a player removes their rows on both sides.
+Deleting a player removes their rows on both sides; each partner left behind adds the games
+to `player_partners_gone`, their games with players no longer here, kept as one count.
 
 ### STAT-11
 `GET /komino/api/account/stats` returns the requesting player's totals, `match_time` with
 `timed`, `average_ms`, and `median_ms` (null before any timed match), and the 20 partners they
-played the most games with, most first, by their current default name and username. The
-account page (ACCT-17), for an anonymous player too, shows games played, games won with the win rate, cards drawn, swapped,
-and viewed, matches, matches from others, missed matches, average and median match time in
-seconds, games with bots, and the partner list.
+played the most games with, most first, by their current default name and username, and
+`partners_gone` (STAT-10). The account page (ACCT-17), for an anonymous player too, shows
+games played, games won with the win rate, cards drawn, swapped, and viewed, matches, matches
+from others, missed matches, average and median match time in seconds, games with bots, and
+the partner list, with the games with players no longer here under it when there are any.

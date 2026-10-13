@@ -124,10 +124,23 @@ fn me_json(player: &Player) -> Value {
 /// request it forwards.
 pub const CLIENT_IP_HEADER: &str = "fly-client-ip";
 
-/// Count a password check against the client's address (ACCT-22).
-fn limit(state: &State, headers: &HeaderMap) -> Result<()> {
-    let addr = headers.get(CLIENT_IP_HEADER).and_then(|v| v.to_str().ok());
-    state.limiter.check(addr)
+fn client_addr(headers: &HeaderMap) -> Option<&str> {
+    headers.get(CLIENT_IP_HEADER).and_then(|v| v.to_str().ok())
+}
+
+/// Count a password check against the client's address (ACCT-22), and say
+/// who the client is for the per-address lock (ACCT-9) and its session's
+/// device (ACCT-19).
+fn limit(state: &State, headers: &HeaderMap) -> Result<accounts::Client> {
+    state.limiter.check(client_addr(headers))?;
+    let agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    Ok(accounts::Client::new(client_addr(headers), agent))
+}
+
+fn session_token(jar: &CookieJar) -> Option<String> {
+    jar.get(SESSION_COOKIE).map(|c| c.value().to_string())
 }
 
 /// The account and its new recovery code, shown once (ACCT-18).
@@ -206,7 +219,7 @@ pub async fn signup(
     jar: CookieJar,
     Json(req): Json<SignupRequest>,
 ) -> Result<Response> {
-    limit(&state, &headers)?;
+    let client = limit(&state, &headers)?;
     let (player, jar) = identify(&state, jar).await?;
     let signed = accounts::signup(
         &state.db,
@@ -214,6 +227,7 @@ pub async fn signup(
         &req.username,
         &req.password,
         req.name.as_deref(),
+        &client,
     )
     .await?;
     let jar = jar
@@ -241,8 +255,9 @@ pub async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<Response> {
-    limit(&state, &headers)?;
-    let (account, token) = accounts::login(&state.db, &req.username, &req.password).await?;
+    let client = limit(&state, &headers)?;
+    let (account, token) =
+        accounts::login(&state.db, &req.username, &req.password, &client).await?;
     // a session this browser held before is replaced, not left behind
     if let Some(old) = jar.get(SESSION_COOKIE) {
         accounts::logout(&state.db, old.value()).await?;
@@ -274,9 +289,10 @@ pub async fn change_password(
     jar: CookieJar,
     Json(req): Json<PasswordRequest>,
 ) -> Result<Response> {
-    limit(&state, &headers)?;
+    let client = limit(&state, &headers)?;
     let (player, jar) = identify(&state, jar).await?;
-    let token = accounts::change_password(&state.db, &player, &req.current, &req.new).await?;
+    let token =
+        accounts::change_password(&state.db, &player, &req.current, &req.new, &client).await?;
     let jar = jar.add(session_cookie(&token));
     Ok((jar, Json(me_json(&player))).into_response())
 }
@@ -294,10 +310,11 @@ pub async fn change_username(
     jar: CookieJar,
     Json(req): Json<UsernameRequest>,
 ) -> Result<Response> {
-    limit(&state, &headers)?;
+    let client = limit(&state, &headers)?;
     let (player, jar) = identify(&state, jar).await?;
     let account =
-        accounts::change_username(&state.db, &player, &req.username, &req.password).await?;
+        accounts::change_username(&state.db, &player, &req.username, &req.password, &client)
+            .await?;
     Ok((jar, Json(me_json(&account))).into_response())
 }
 
@@ -316,8 +333,9 @@ pub async fn recover(
     jar: CookieJar,
     Json(req): Json<RecoverRequest>,
 ) -> Result<Response> {
-    limit(&state, &headers)?;
-    let signed = accounts::recover(&state.db, &req.username, &req.code, &req.password).await?;
+    let client = limit(&state, &headers)?;
+    let signed =
+        accounts::recover(&state.db, &req.username, &req.code, &req.password, &client).await?;
     if let Some(old) = jar.get(SESSION_COOKIE) {
         accounts::logout(&state.db, old.value()).await?;
     }
@@ -337,9 +355,9 @@ pub async fn new_recovery(
     jar: CookieJar,
     Json(req): Json<PasswordOnly>,
 ) -> Result<Response> {
-    limit(&state, &headers)?;
+    let client = limit(&state, &headers)?;
     let (player, jar) = identify(&state, jar).await?;
-    let code = accounts::new_recovery(&state.db, &player, &req.password).await?;
+    let code = accounts::new_recovery(&state.db, &player, &req.password, &client).await?;
     Ok((jar, no_store(), Json(json!({ "recovery_code": code }))).into_response())
 }
 
@@ -349,18 +367,33 @@ pub async fn sign_out_others(
     jar: CookieJar,
 ) -> Result<Response> {
     let (player, jar) = identify(&state, jar).await?;
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .unwrap_or_default();
+    let token = session_token(&jar).unwrap_or_default();
     let ended = accounts::end_other_sessions(&state.db, &player, &token).await?;
     Ok((jar, Json(json!({ "ended": ended }))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct DeviceRequest {
+    pub id: i64,
+}
+
+/// Sign the account out on one other device (ACCT-19).
+pub async fn sign_out_device(
+    AxumState(state): AxumState<State>,
+    jar: CookieJar,
+    Json(req): Json<DeviceRequest>,
+) -> Result<Response> {
+    let (player, jar) = identify(&state, jar).await?;
+    let token = session_token(&jar).unwrap_or_default();
+    accounts::end_session(&state.db, &player, req.id, &token).await?;
+    Ok((jar, Json(json!({ "ok": true }))).into_response())
 }
 
 /// The account page's details (ACCT-17), for any player.
 pub async fn account(AxumState(state): AxumState<State>, jar: CookieJar) -> Result<Response> {
     let (player, jar) = identify(&state, jar).await?;
-    let body = accounts::account_info(&state.db, &player).await?;
+    let token = session_token(&jar);
+    let body = accounts::account_info(&state.db, &player, token.as_deref()).await?;
     Ok((jar, Json(body)).into_response())
 }
 
@@ -378,9 +411,9 @@ pub async fn delete_account(
     jar: CookieJar,
     Json(req): Json<PasswordOnly>,
 ) -> Result<Response> {
-    limit(&state, &headers)?;
+    let client = limit(&state, &headers)?;
     let (player, jar) = identify(&state, jar).await?;
-    accounts::delete_account(&state.db, &player, &req.password).await?;
+    accounts::delete_account(&state.db, &player, &req.password, &client).await?;
     let jar = jar.remove(expired(SESSION_COOKIE));
     Ok((jar, Json(json!({ "ok": true }))).into_response())
 }

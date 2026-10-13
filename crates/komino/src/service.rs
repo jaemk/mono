@@ -38,6 +38,10 @@ where
             "/api/account/sign-out-others",
             post(handlers::sign_out_others),
         )
+        .route(
+            "/api/account/sign-out-device",
+            post(handlers::sign_out_device),
+        )
         .route("/api/account/delete", post(handlers::delete_account))
         .route("/api/account/stats", get(handlers::account_stats))
         .route("/api/key", get(handlers::server_key))

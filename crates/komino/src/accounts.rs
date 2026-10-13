@@ -22,9 +22,17 @@ pub const SESSION_DAYS: i64 = 30;
 /// A session is extended at most once a day: when less than this is left.
 const SESSION_REFRESH_DAYS: i64 = 29;
 
-/// Wrong passwords in a row before an account locks (ACCT-9).
+/// Wrong passwords in a row from one address before the account locks for
+/// that address (ACCT-9).
 pub const MAX_FAILED_LOGINS: i32 = 5;
 pub const LOCK_SECS: i64 = 300;
+/// How long an address's wrong password count is kept without a new one.
+const LOCK_KEPT_HOURS: i32 = 24;
+
+/// The most of a user agent a session keeps (ACCT-19).
+pub const MAX_AGENT_CHARS: usize = 200;
+/// A session's last use is written at most this often.
+const LAST_USED_SECS: f64 = 3_600.0;
 
 /// Password checks one address may start at once, and how fast it gets
 /// more after (ACCT-22).
@@ -210,6 +218,30 @@ pub fn limit_key(addr: &str) -> String {
     }
 }
 
+/// Who is asking: the address a wrong password locks the account for
+/// (ACCT-9), and the device a new session is shown as (ACCT-19).
+#[derive(Clone, Debug, Default)]
+pub struct Client {
+    /// The client address as [`limit_key`] gives it, empty without one.
+    pub addr: String,
+    /// The user agent, cut to [`MAX_AGENT_CHARS`].
+    pub agent: String,
+}
+
+impl Client {
+    pub fn new(addr: Option<&str>, agent: Option<&str>) -> Client {
+        Client {
+            addr: addr.map(limit_key).unwrap_or_default(),
+            agent: agent
+                .unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_AGENT_CHARS)
+                .collect(),
+        }
+    }
+}
+
 /// A new recovery code: [`RECOVERY_CHARS`] random characters in groups of
 /// five (ACCT-18).
 pub fn new_recovery_code() -> Result<String> {
@@ -250,18 +282,19 @@ pub fn recovery_hash(code: &str) -> String {
 
 /// Start a session for `player`, returning the cookie token. Only the
 /// token's hash is stored, so a read of the table can't sign anyone in.
-async fn new_session<'e, E>(db: E, player: &str) -> Result<String>
+async fn new_session<'e, E>(db: E, player: &str, client: &Client) -> Result<String>
 where
     E: sqlx::PgExecutor<'e>,
 {
     let token = hex::encode(common::crypto::rand_bytes(32).map_err(|_| internal("session"))?);
     sqlx::query(
-        "INSERT INTO sessions (token_hash, player_id, expires)
-         VALUES ($1, $2, now() + make_interval(days => $3))",
+        "INSERT INTO sessions (token_hash, player_id, expires, agent)
+         VALUES ($1, $2, now() + make_interval(days => $3), $4)",
     )
     .bind(token_hash(&token))
     .bind(player)
     .bind(SESSION_DAYS as i32)
+    .bind(&client.agent)
     .execute(db)
     .await?;
     Ok(token)
@@ -284,6 +317,7 @@ pub async fn signup(
     username: &str,
     password: &str,
     name: Option<&str>,
+    client: &Client,
 ) -> Result<Signed> {
     if player.username.is_some() {
         return Err(ApiError::invalid(
@@ -316,7 +350,7 @@ pub async fn signup(
         Err(e) => return Err(e),
     }
     models::notify_rooms_of(&mut tx, &player.id).await?;
-    let token = new_session(&mut *tx, &player.id).await?;
+    let token = new_session(&mut *tx, &player.id, client).await?;
     tx.commit().await?;
     Ok(Signed {
         player: Player {
@@ -339,15 +373,21 @@ fn taken_or(e: sqlx::Error) -> ApiError {
     }
 }
 
-/// Check `password` against account `id`. A wrong one counts toward the lock
-/// after [`MAX_FAILED_LOGINS`] in a row, and a right one resets the count
-/// (ACCT-9). False for a wrong password or an id that is not an account.
-async fn check_password(db: &DbPool, id: &str, password: &str) -> Result<bool> {
+/// Check `password` against account `id` from `client`. A wrong one counts
+/// toward locking the account for the client's address after
+/// [`MAX_FAILED_LOGINS`] in a row, and a right one resets that address's
+/// count (ACCT-9). False for a wrong password or an id that is not an
+/// account.
+async fn check_password(db: &DbPool, id: &str, password: &str, client: &Client) -> Result<bool> {
     let row = sqlx::query(
-        "SELECT password_hash, coalesce(locked_until > now(), false) AS locked
-         FROM players WHERE id = $1 AND username IS NOT NULL",
+        "SELECT p.password_hash, EXISTS (
+             SELECT 1 FROM login_locks l
+             WHERE l.player_id = p.id AND l.addr = $2 AND l.locked_until > now()
+         ) AS locked
+         FROM players p WHERE p.id = $1 AND p.username IS NOT NULL",
     )
     .bind(id)
+    .bind(&client.addr)
     .fetch_optional(db)
     .await?;
     let Some(row) = row else {
@@ -360,20 +400,28 @@ async fn check_password(db: &DbPool, id: &str, password: &str) -> Result<bool> {
     let stale = common::crypto::password_needs_rehash(&hash);
     if !verify_password(password.to_string(), hash).await? {
         sqlx::query(
-            "UPDATE players SET
-                 failed_logins = CASE WHEN failed_logins + 1 >= $2 THEN 0 ELSE failed_logins + 1 END,
-                 locked_until = CASE WHEN failed_logins + 1 >= $2
-                     THEN now() + make_interval(secs => $3) ELSE locked_until END
-             WHERE id = $1",
+            "INSERT INTO login_locks (player_id, addr, failures) VALUES ($1, $2, 1)
+             ON CONFLICT (player_id, addr) DO UPDATE SET
+                 failures = CASE WHEN login_locks.failures + 1 >= $3
+                     THEN 0 ELSE login_locks.failures + 1 END,
+                 locked_until = CASE WHEN login_locks.failures + 1 >= $3
+                     THEN now() + make_interval(secs => $4) ELSE login_locks.locked_until END,
+                 updated = now()",
         )
         .bind(id)
+        .bind(&client.addr)
         .bind(MAX_FAILED_LOGINS)
         .bind(LOCK_SECS as f64)
         .execute(db)
         .await?;
         return Ok(false);
     }
-    sqlx::query("UPDATE players SET failed_logins = 0, last_seen = now() WHERE id = $1")
+    sqlx::query("DELETE FROM login_locks WHERE player_id = $1 AND addr = $2")
+        .bind(id)
+        .bind(&client.addr)
+        .execute(db)
+        .await?;
+    sqlx::query("UPDATE players SET last_seen = now() WHERE id = $1")
         .bind(id)
         .execute(db)
         .await?;
@@ -391,8 +439,13 @@ async fn check_password(db: &DbPool, id: &str, password: &str) -> Result<bool> {
 }
 
 /// Check a username and password and start a session (ACCT-5). Wrong
-/// passwords lock the account for a while (ACCT-9).
-pub async fn login(db: &DbPool, username: &str, password: &str) -> Result<(Player, String)> {
+/// passwords lock the account for a while from this address (ACCT-9).
+pub async fn login(
+    db: &DbPool,
+    username: &str,
+    password: &str,
+    client: &Client,
+) -> Result<(Player, String)> {
     let username = normalize_username(username);
     let row = sqlx::query("SELECT id, name FROM players WHERE username = $1")
         .bind(&username)
@@ -405,10 +458,10 @@ pub async fn login(db: &DbPool, username: &str, password: &str) -> Result<(Playe
         return Err(unauthorized());
     };
     let id: String = row.get("id");
-    if !check_password(db, &id, password).await? {
+    if !check_password(db, &id, password, client).await? {
         return Err(unauthorized());
     }
-    let token = new_session(db, &id).await?;
+    let token = new_session(db, &id, client).await?;
     let account = Player {
         id,
         name: row.get("name"),
@@ -433,12 +486,13 @@ pub async fn change_password(
     player: &Player,
     current: &str,
     new: &str,
+    client: &Client,
 ) -> Result<String> {
     if player.username.is_none() {
         return Err(sign_in_first());
     }
     validate_password(new)?;
-    if !check_password(db, &player.id, current).await? {
+    if !check_password(db, &player.id, current, client).await? {
         return Err(wrong_password());
     }
     let hash = hash_password(new.to_string()).await?;
@@ -452,22 +506,35 @@ pub async fn change_password(
         .bind(&player.id)
         .execute(&mut *tx)
         .await?;
-    let token = new_session(&mut *tx, &player.id).await?;
+    let token = new_session(&mut *tx, &player.id, client).await?;
     tx.commit().await?;
     Ok(token)
 }
 
 /// Delete an account for good, given its password (ACCT-16): it leaves every
-/// room, and its sessions, memberships, and stats go with it.
-pub async fn delete_account(db: &DbPool, player: &Player, password: &str) -> Result<()> {
+/// room, and its sessions, memberships, and stats go with it. Its partners
+/// keep their games with it as games with someone no longer here (STAT-10).
+pub async fn delete_account(
+    db: &DbPool,
+    player: &Player,
+    password: &str,
+    client: &Client,
+) -> Result<()> {
     if player.username.is_none() {
         return Err(sign_in_first());
     }
-    if !check_password(db, &player.id, password).await? {
+    if !check_password(db, &player.id, password, client).await? {
         return Err(wrong_password());
     }
     let mut tx = db.begin().await?;
     models::leave_everywhere(&mut tx, &player.id).await?;
+    sqlx::query(&format!(
+        "WITH gone AS (SELECT $1::text AS id) {}",
+        models::FOLD_PARTNERS_GONE
+    ))
+    .bind(&player.id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM players WHERE id = $1")
         .bind(&player.id)
         .execute(&mut *tx)
@@ -485,9 +552,15 @@ fn wrong_recovery() -> ApiError {
 }
 
 /// Set a new password with the account's recovery code (ACCT-18). The code
-/// is used up and replaced, every session ends, the lock lifts, and this
+/// is used up and replaced, every session ends, every lock lifts, and this
 /// browser signs in.
-pub async fn recover(db: &DbPool, username: &str, code: &str, password: &str) -> Result<Signed> {
+pub async fn recover(
+    db: &DbPool,
+    username: &str,
+    code: &str,
+    password: &str,
+    client: &Client,
+) -> Result<Signed> {
     validate_password(password)?;
     let username = normalize_username(username);
     let row = sqlx::query("SELECT id, name, recovery_hash FROM players WHERE username = $1")
@@ -509,8 +582,7 @@ pub async fn recover(db: &DbPool, username: &str, code: &str, password: &str) ->
     let mut tx = db.begin().await?;
     // the code must still be the one checked, so it is used at most once
     let updated = sqlx::query(
-        "UPDATE players SET password_hash = $2, recovery_hash = $3, failed_logins = 0,
-             locked_until = NULL, last_seen = now()
+        "UPDATE players SET password_hash = $2, recovery_hash = $3, last_seen = now()
          WHERE id = $1 AND recovery_hash = $4",
     )
     .bind(&id)
@@ -522,11 +594,15 @@ pub async fn recover(db: &DbPool, username: &str, code: &str, password: &str) ->
     if updated.rows_affected() != 1 {
         return Err(wrong_recovery());
     }
+    sqlx::query("DELETE FROM login_locks WHERE player_id = $1")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM sessions WHERE player_id = $1")
         .bind(&id)
         .execute(&mut *tx)
         .await?;
-    let token = new_session(&mut *tx, &id).await?;
+    let token = new_session(&mut *tx, &id, client).await?;
     tx.commit().await?;
     Ok(Signed {
         player: Player {
@@ -541,11 +617,16 @@ pub async fn recover(db: &DbPool, username: &str, code: &str, password: &str) ->
 
 /// Replace the account's recovery code, given its password (ACCT-18). The
 /// old code stops working.
-pub async fn new_recovery(db: &DbPool, player: &Player, password: &str) -> Result<String> {
+pub async fn new_recovery(
+    db: &DbPool,
+    player: &Player,
+    password: &str,
+    client: &Client,
+) -> Result<String> {
     if player.username.is_none() {
         return Err(sign_in_first());
     }
-    if !check_password(db, &player.id, password).await? {
+    if !check_password(db, &player.id, password, client).await? {
         return Err(wrong_password());
     }
     let code = new_recovery_code()?;
@@ -572,6 +653,30 @@ pub async fn end_other_sessions(db: &DbPool, player: &Player, token: &str) -> Re
     Ok(ended)
 }
 
+/// End one other session of the account, by its id on the account page
+/// (ACCT-19). This browser's own session is ended by signing out instead.
+pub async fn end_session(db: &DbPool, player: &Player, id: i64, token: &str) -> Result<()> {
+    if player.username.is_none() {
+        return Err(sign_in_first());
+    }
+    let ended =
+        sqlx::query("DELETE FROM sessions WHERE player_id = $1 AND id = $2 AND token_hash <> $3")
+            .bind(&player.id)
+            .bind(id)
+            .bind(token_hash(token))
+            .execute(db)
+            .await?
+            .rows_affected();
+    if ended == 0 {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such device",
+        ));
+    }
+    Ok(())
+}
+
 /// Change the account's username, given its password (ACCT-20). A default
 /// name that was the old username follows it.
 pub async fn change_username(
@@ -579,12 +684,13 @@ pub async fn change_username(
     player: &Player,
     username: &str,
     password: &str,
+    client: &Client,
 ) -> Result<Player> {
     let Some(old) = &player.username else {
         return Err(sign_in_first());
     };
     let username = validate_username(username)?;
-    if !check_password(db, &player.id, password).await? {
+    if !check_password(db, &player.id, password, client).await? {
         return Err(wrong_password());
     }
     if &username == old {
@@ -610,14 +716,18 @@ pub async fn change_username(
     })
 }
 
-/// What the account page shows besides stats (ACCT-17): live sessions,
-/// whether there is a recovery code, and the rooms the player is in, most
-/// recently active first.
-pub async fn account_info(db: &DbPool, player: &Player) -> Result<Value> {
+/// What the account page shows besides stats (ACCT-17): live sessions and
+/// their devices, `token`'s marked as this one, whether there is a recovery
+/// code, and the rooms the player is in with their games and wins there,
+/// most recently active first.
+pub async fn account_info(db: &DbPool, player: &Player, token: Option<&str>) -> Result<Value> {
     let row = sqlx::query(
         "SELECT
-             (SELECT count(*) FROM sessions WHERE player_id = $1 AND expires > now())
-                 AS sessions,
+             (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                  'id', s.id, 'agent', s.agent, 'created', s.created,
+                  'last_used', s.last_used, 'current', s.token_hash = $3
+              ) ORDER BY s.token_hash = $3 DESC, s.last_used DESC), '[]')
+              FROM sessions s WHERE s.player_id = $1 AND s.expires > now()) AS devices,
              coalesce((SELECT recovery_hash IS NOT NULL FROM players WHERE id = $1), false)
                  AS recovery,
              (SELECT coalesce(jsonb_agg(jsonb_build_object(
@@ -627,37 +737,47 @@ pub async fn account_info(db: &DbPool, player: &Player) -> Result<Value> {
                               WHERE o.room_id = r.id AND o.left_at IS NULL AND NOT o.removed),
                   'playing', EXISTS (SELECT 1 FROM games g
                                      WHERE g.room_id = r.id AND g.status <> 'scored'),
+                  'games', coalesce(st.games_played, 0),
+                  'wins', coalesce(st.wins, 0),
                   'last_active', r.last_active
               ) ORDER BY r.last_active DESC), '[]')
               FROM (SELECT r.* FROM rooms r
                         JOIN room_members m ON m.room_id = r.id AND m.player_id = $1
                     WHERE m.left_at IS NULL AND NOT m.removed
-                    ORDER BY r.last_active DESC LIMIT $2) r) AS rooms",
+                    ORDER BY r.last_active DESC LIMIT $2) r
+                  LEFT JOIN room_stats st ON st.room_id = r.id AND st.player_id = $1) AS rooms",
     )
     .bind(&player.id)
     .bind(ROOMS_SHOWN)
+    .bind(token.map(token_hash).unwrap_or_default())
     .fetch_one(db)
     .await?;
+    let devices: Value = row.get("devices");
     Ok(json!({
         "id": player.id,
         "name": player.name,
         "username": player.username,
-        "sessions": row.get::<i64, _>("sessions"),
+        "sessions": devices.as_array().map_or(0, Vec::len),
+        "devices": devices,
         "recovery": row.get::<bool, _>("recovery"),
         "rooms": row.get::<Value, _>("rooms"),
     }))
 }
 
 /// The account behind a live session token, and whether the session was
-/// just extended so its cookie should be sent again (ACCT-6).
+/// just extended so its cookie should be sent again (ACCT-6). Its last use
+/// is kept to the hour (ACCT-19).
 pub async fn session_player(db: &DbPool, token: &str) -> Result<Option<(Player, bool)>> {
     let row = sqlx::query(
         "WITH s AS (
-             SELECT player_id, expires < now() + make_interval(days => $2) AS stale
+             SELECT player_id, expires < now() + make_interval(days => $2) AS stale,
+                 last_used < now() - make_interval(secs => $4) AS idle
              FROM sessions WHERE token_hash = $1 AND expires > now()
          ), u AS (
-             UPDATE sessions SET expires = now() + make_interval(days => $3)
-             WHERE token_hash = $1 AND (SELECT stale FROM s)
+             UPDATE sessions SET last_used = now(),
+                 expires = CASE WHEN (SELECT stale FROM s)
+                     THEN now() + make_interval(days => $3) ELSE expires END
+             WHERE token_hash = $1 AND ((SELECT stale FROM s) OR (SELECT idle FROM s))
          )
          SELECT p.id, p.name, p.username, s.stale
          FROM s JOIN players p ON p.id = s.player_id",
@@ -665,6 +785,7 @@ pub async fn session_player(db: &DbPool, token: &str) -> Result<Option<(Player, 
     .bind(token_hash(token))
     .bind(SESSION_REFRESH_DAYS as i32)
     .bind(SESSION_DAYS as i32)
+    .bind(LAST_USED_SECS)
     .fetch_optional(db)
     .await?;
     Ok(row.map(|row| {
@@ -677,6 +798,21 @@ pub async fn session_player(db: &DbPool, token: &str) -> Result<Option<(Player, 
             row.get("stale"),
         )
     }))
+}
+
+/// Forget wrong password counts and locks gone quiet (ACCT-9), with the
+/// hourly cleanup.
+pub async fn forget_login_locks(db: &DbPool) -> Result<u64> {
+    let forgotten = sqlx::query(
+        "DELETE FROM login_locks
+         WHERE updated < now() - make_interval(hours => $1)
+             AND (locked_until IS NULL OR locked_until <= now())",
+    )
+    .bind(LOCK_KEPT_HOURS)
+    .execute(db)
+    .await?
+    .rows_affected();
+    Ok(forgotten)
 }
 
 /// End one session (ACCT-8).

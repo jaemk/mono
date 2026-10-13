@@ -88,6 +88,40 @@
   const esc = (s) =>
     String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+  // a short name for a session's device from its user agent (ACCT-19)
+  function deviceName(agent) {
+    const a = String(agent || "");
+    const browser =
+      [
+        [/Edg\//, "Edge"],
+        [/OPR\/|Opera/, "Opera"],
+        [/Firefox\/|FxiOS/, "Firefox"],
+        [/Chrome\/|CriOS/, "Chrome"],
+        [/Safari\//, "Safari"],
+      ].find(([re]) => re.test(a)) || [];
+    const os =
+      [
+        [/iPhone|iPad|iPod/, "iOS"],
+        [/Android/, "Android"],
+        [/Windows/, "Windows"],
+        [/Mac OS X|Macintosh/, "macOS"],
+        [/CrOS/, "ChromeOS"],
+        [/Linux/, "Linux"],
+      ].find(([re]) => re.test(a)) || [];
+    if (browser[1] && os[1]) return `${browser[1]} on ${os[1]}`;
+    return browser[1] || os[1] || (a ? a.slice(0, 40) : "unknown device");
+  }
+
+  // how long ago `then` was, roughly
+  function ago(then, now) {
+    const s = Math.max(0, Math.round((now - then) / 1000));
+    if (s < 3600) return "within the hour";
+    const h = Math.floor(s / 3600);
+    if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+    const d = Math.floor(h / 24);
+    return `${d} day${d === 1 ? "" : "s"} ago`;
+  }
+
   // ---------------------------------------------------------------- cards
 
   function eye(cx, cy, color) {
@@ -1876,7 +1910,12 @@
       $("acct-rooms").innerHTML = rooms.length
         ? rooms
             .map((r) => {
-              const about = [r.host ? "host" : null, plural(r.members, "player"), r.playing ? "playing" : null]
+              const about = [
+                r.host ? "host" : null,
+                plural(r.members, "player"),
+                r.playing ? "playing" : null,
+                r.games ? `you played ${plural(r.games, "game")}, won ${r.wins}` : null,
+              ]
                 .filter(Boolean)
                 .join(", ");
               const c = esc(r.code);
@@ -1888,6 +1927,16 @@
       $("acct-sessions").textContent = `(${plural(a.sessions, "device")})`;
       $("sessions-text").textContent = `Signed in on ${plural(a.sessions, "device")}, including this one.`;
       $("sessions-submit").disabled = a.sessions <= 1;
+      const now = Date.now();
+      $("acct-devices").innerHTML = (a.devices || [])
+        .map((d) => {
+          const used = d.current ? "this device" : `last used ${ago(Date.parse(d.last_used), now)}`;
+          const out = d.current
+            ? ""
+            : ` <button type="button" class="link" data-device="${esc(d.id)}">sign out</button>`;
+          return `<li title="${esc(d.agent)}">${esc(deviceName(d.agent))} <span class="about">${esc(used)}</span>${out}</li>`;
+        })
+        .join("");
       $("recovery-status").textContent = a.recovery
         ? "You have a recovery code. If you forget your password, it lets you set a new one."
         : "You have no recovery code, so a forgotten password can't be reset. Make one now.";
@@ -1930,6 +1979,8 @@
         .map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(String(value))}</dd></div>`)
         .join("");
       const partners = s.partners || [];
+      // games with partners since forgotten or deleted (STAT-10)
+      const gone = s.partners_gone || 0;
       $("stats-partners").innerHTML = partners.length
         ? partners
             .map((p) => {
@@ -1937,7 +1988,13 @@
               return `<li>${who} <span class="games">${p.games} game${p.games === 1 ? "" : "s"}</span></li>`;
             })
             .join("")
-        : "<li>nobody yet</li>";
+        : gone
+          ? ""
+          : "<li>nobody yet</li>";
+      $("stats-partners-gone").hidden = !gone;
+      $("stats-partners-gone").textContent = gone
+        ? `${partners.length ? "and " : ""}${plural(gone, "game")} with players no longer here`
+        : "";
     }
 
     async function submitPassword(e) {
@@ -1991,6 +2048,17 @@
         $("recovery-error").textContent = err.message;
       }
       $("recovery-submit").disabled = false;
+    }
+
+    async function signOutDevice(id) {
+      $("sessions-error").textContent = "";
+      try {
+        await api("POST", "/komino/api/account/sign-out-device", { id });
+        toast("signed out that device");
+        await loadAccount();
+      } catch (err) {
+        $("sessions-error").textContent = err.message;
+      }
     }
 
     async function signOutOthers() {
@@ -2159,6 +2227,10 @@
       });
       $("acct-signin").addEventListener("click", openAccount);
       $("sessions-submit").addEventListener("click", signOutOthers);
+      $("acct-devices").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-device]");
+        if (b) signOutDevice(Number(b.dataset.device));
+      });
       $("username-form").addEventListener("submit", submitUsername);
       $("password-form").addEventListener("submit", submitPassword);
       $("recovery-form").addEventListener("submit", submitRecovery);
@@ -2274,7 +2346,19 @@
   }
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { createKomino, face, back, cardLabel, guideHtml, openSealed, importServerKey, b64d, b64e };
+    module.exports = {
+      createKomino,
+      face,
+      back,
+      cardLabel,
+      guideHtml,
+      openSealed,
+      importServerKey,
+      b64d,
+      b64e,
+      deviceName,
+      ago,
+    };
   } else {
     createKomino(root).start();
   }

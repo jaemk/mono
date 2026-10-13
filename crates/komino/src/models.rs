@@ -1333,6 +1333,7 @@ pub async fn delete_stale_rooms(db: &DbPool) -> Result<u64> {
     sqlx::query("DELETE FROM sessions WHERE expires <= now()")
         .execute(db)
         .await?;
+    crate::accounts::forget_login_locks(db).await?;
     // leases left behind by a machine that died mid-socket
     sqlx::query("DELETE FROM room_observers WHERE until <= now()")
         .execute(db)
@@ -1357,26 +1358,44 @@ pub const ANONYMOUS_DAYS: i32 = 90;
 pub const UNPLAYED_DAYS: i32 = 7;
 
 /// Forget anonymous players gone quiet (ACCT-21): with them go their stats,
-/// match times, and partner rows. A player still in a room, current or
+/// match times, and partner rows, and their partners count those games as
+/// games with someone no longer here. A player still in a room, current or
 /// past, waits for the room to be deleted first, so no game or host loses
 /// a player it refers to. Returns how many were forgotten.
 pub async fn forget_anonymous_players(db: &DbPool) -> Result<u64> {
-    let forgotten = sqlx::query(
-        "DELETE FROM players p
-         WHERE p.username IS NULL AND NOT p.bot
-             AND p.last_seen < now() - make_interval(days => $1)
-             AND (p.last_seen < now() - make_interval(days => $2)
-                  OR NOT EXISTS (SELECT 1 FROM player_stats s WHERE s.player_id = p.id))
-             AND NOT EXISTS (SELECT 1 FROM room_members m WHERE m.player_id = p.id)
-             AND NOT EXISTS (SELECT 1 FROM rooms r WHERE r.host_player_id = p.id)",
-    )
+    let forgotten: i64 = sqlx::query_scalar(&format!(
+        "WITH gone AS (
+             DELETE FROM players p
+             WHERE p.username IS NULL AND NOT p.bot
+                 AND p.last_seen < now() - make_interval(days => $1)
+                 AND (p.last_seen < now() - make_interval(days => $2)
+                      OR NOT EXISTS (SELECT 1 FROM player_stats s WHERE s.player_id = p.id))
+                 AND NOT EXISTS (SELECT 1 FROM room_members m WHERE m.player_id = p.id)
+                 AND NOT EXISTS (SELECT 1 FROM rooms r WHERE r.host_player_id = p.id)
+             RETURNING p.id
+         ), folded AS ({FOLD_PARTNERS_GONE})
+         SELECT count(*) FROM gone"
+    ))
     .bind(UNPLAYED_DAYS)
     .bind(ANONYMOUS_DAYS)
-    .execute(db)
-    .await?
-    .rows_affected();
-    Ok(forgotten)
+    .fetch_one(db)
+    .await?;
+    Ok(forgotten as u64)
 }
+
+/// Fold the partner rows of the players in a `gone` CTE (column `id`) into
+/// each remaining partner's games with players no longer here (STAT-10).
+/// Every statement in one query sees the rows before its deletes, so this
+/// works beside the delete that takes those rows away.
+pub const FOLD_PARTNERS_GONE: &str =
+    "INSERT INTO player_partners_gone (player_id, games, last_played)
+     SELECT pp.player_id, sum(pp.games), max(pp.last_played)
+     FROM player_partners pp JOIN gone ON gone.id = pp.other_id
+     WHERE pp.player_id NOT IN (SELECT id FROM gone)
+     GROUP BY pp.player_id
+     ON CONFLICT (player_id) DO UPDATE SET
+         games = player_partners_gone.games + excluded.games,
+         last_played = greatest(player_partners_gone.last_played, excluded.last_played)";
 
 // ---------------------------------------------------------------------------
 // Views

@@ -53,9 +53,12 @@ reaches no one. The browser then returns to the anonymous player its player cook
 gets a fresh one.
 
 ### ACCT-9
-Five wrong passwords in a row lock an account's sign in for 5 minutes, during which even the
-right password gets `429 locked`. A successful sign in resets the count, and a recovery
-(ACCT-18) lifts the lock. Open sessions are not affected.
+Five wrong passwords in a row from one client address (as ACCT-22 counts addresses) lock the
+account's password checks from that address for 5 minutes, during which even the right
+password gets `429 locked`. Other addresses are not locked, so a stranger can't lock the owner
+out. A successful check resets that address's count, and a recovery (ACCT-18) lifts every
+lock. Open sessions are not affected. Counts and locks with nothing new for a day are swept
+with the hourly cleanup (ROOM-11).
 
 ### ACCT-10
 Account endpoints take json bodies, which a cross-site form can't send, and the session cookie
@@ -114,15 +117,15 @@ show a deleted player's past moves as `someone`.
 ### ACCT-17
 `/komino/account` is the account page. Every player sees the rooms they are a current member
 of, up to 50, most recently active first, each linking to the room and saying whether they host
-it, how many players are in it, and whether a game is running; and their lifetime stats
-(STAT-11). An anonymous player is told these belong to this browser and offered sign in. An
-account also sees its username and how many devices it is signed in on, a sign out other
-devices button (ACCT-19), and forms to change the username (ACCT-20), change the password,
+it, how many players are in it, whether a game is running, and how many games they played and
+won there (once they have played one); and their lifetime stats (STAT-11). An anonymous player is told these belong to this browser and offered sign in. An
+account also sees its username and its devices (ACCT-19), and forms to change the username (ACCT-20), change the password,
 make a new recovery code (ACCT-18), and delete the account, which asks to confirm before
 sending. Errors show under each form. A changed password clears both fields and says other
 devices were signed out; a deleted account returns to `/komino` as a new anonymous player.
-`GET /komino/api/account` returns the player, `sessions` (live sessions), `recovery` (whether a
-recovery code is set), and `rooms` (`code`, `host`, `members`, `playing`, `last_active`).
+`GET /komino/api/account` returns the player, `sessions` (live sessions), `devices` (ACCT-19),
+`recovery` (whether a recovery code is set), and `rooms` (`code`, `host`, `members`,
+`playing`, `games`, `wins`, `last_active`).
 
 ### ACCT-18
 An account has at most one recovery code: 25 random characters from `0-9a-z` without `i`, `l`,
@@ -137,9 +140,15 @@ new code is shown in a dialog that stays until the player says it is saved, with
 and responses holding one are `Cache-Control: no-store`.
 
 ### ACCT-19
-`POST /komino/api/account/sign-out-others` ends every session of the signed in account except
-the one making the request, and returns how many ended. It needs no password, since it only
-takes access away.
+A session keeps the first 200 characters of the user agent that signed it in, without control
+characters, and when it was last used, to the hour. The account page lists the live sessions,
+this device first and then by last use, each named by browser and system from its user agent
+(the full one on hover) with how long ago it was used, and a sign out button on every one but
+this device. `POST /komino/api/account/sign-out-device` with a session's `id` ends that one
+other session of the signed in account; this device's own, another account's, or an unknown
+one gets `404`. `POST /komino/api/account/sign-out-others` ends every session of the signed in
+account except the one making the request, and returns how many ended. Neither needs a
+password, since they only take access away.
 
 ### ACCT-20
 A signed in account can change its username, given its password (checked as in ACCT-15). The
@@ -149,7 +158,8 @@ Rooms the account is in are refreshed. Sessions are not affected.
 
 ### ACCT-21
 An anonymous player not seen for 90 days, or for 7 days if it has no lifetime stats, is
-deleted with its stats, match times, and partner rows, by the hourly cleanup (ROOM-11). A
+deleted with its stats, match times, and partner rows (its partners keep the games as in
+STAT-10), by the hourly cleanup (ROOM-11). A
 player still in any room's member list, or hosting one, is kept until those rooms are deleted.
 Accounts are never deleted this way.
 
